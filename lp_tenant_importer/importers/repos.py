@@ -7,7 +7,7 @@ from core.nodes import collect_nodes
 def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, force_create=False):
     logger.info("Starting import of Repos")
     df = pd.read_excel(config_file, sheet_name="repos", skiprows=0)  # 6 rows
-    nodes = get_nodes_by_role()  # backends + all_in_one
+    nodes = collect_nodes()  # backends + all_in_one
     backends = nodes.get("backends", [])
     if not backends:
         logger.warning("No backends or all_in_one nodes found. Skipping repos import.")

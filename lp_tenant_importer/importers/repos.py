@@ -55,7 +55,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
         retention_days = [r.strip() for r in row["retention_days"].replace("|", ",").split(",") if r.strip()]
         if len(storage_paths) != len(retention_days):
             logger.error("Mismatch between storage_paths and retention_days for repo %s: %s vs %s", name, storage_paths, retention_days)
-            rows.append({"siem": "", "node": "", "name": name, "result": "FAILED", "action": "NONE", "error": "Mismatch in storage and retention data"})
+            rows.append({"siem": "", "node": "", "name": name, "result": "Fail", "action": "NONE", "error": "Mismatch in storage and retention data"})
             any_error = True
             continue
         storage_data = [{"path": path + "/", "retention": int(retention)} for path, retention in zip(storage_paths, retention_days)]
@@ -70,7 +70,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                     missing_paths = client.check_storage_paths(pool_uuid, siem_id, [item["path"] for item in storage_data])
                     if missing_paths:
                         logger.warning("Skipping repo %s on %s (%s): missing storage paths %s", name, node.name, siem_id, missing_paths)
-                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SKIPPED", "action": "MISSING_STORAGE_PATHS", "error": f"Missing paths: {missing_paths}"})
+                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "MISSING_STORAGE", "action": "SKIP", "error": f"Missing paths: {missing_paths}"})
                         continue
 
                 try:
@@ -82,7 +82,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                         new_repopath = {item["path"]: item["retention"] for item in storage_data}
                         if current_repopath == new_repopath and existing_repo.get("active") == active:
                             logger.info("Repo %s already exists with matching config on %s (%s), marking as NOOP", name, node.name, siem_id)
-                            rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "NOOP", "action": "NONE", "error": None})
+                            rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "(N/A)", "action": "NOOP", "error": None})
                         else:
                             if not dry_run:
                                 result = client.update_repo(pool_uuid, siem_id, existing_repo["id"], repo_data)
@@ -90,41 +90,41 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                                     job_status = client.monitor_job(result["monitorapi"])
                                     if job_status.get("success"):
                                         logger.info("Repo %s updated successfully on %s (%s)", name, node.name, siem_id)
-                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SUCCESS", "action": "UPDATED", "error": None})
+                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Success", "action": "UPDATE", "error": None})
                                     else:
                                         logger.error("Failed to update repo %s on %s (%s): %s", name, node.name, siem_id, job_status.get("error"))
-                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error", "Unknown error")})
+                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Fail", "action": "UPDATE", "error": job_status.get("error", "Unknown error")})
                                         any_error = True
                                 else:
                                     logger.error("Failed to update repo %s on %s (%s): Invalid response from API", name, node.name, siem_id)
-                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "NONE", "error": "Invalid response from API"})
+                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Fail", "action": "UPDATE", "error": "Invalid response from API"})
                                     any_error = True
                             else:
-                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SKIPPED", "action": "DRY_RUN", "error": "Update would be applied"})
+                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "MISSING_STORAGE", "action": "SKIP", "error": "Update would be applied"})
                     else:
                         if not dry_run:
                             result = client.create_repo(pool_uuid, siem_id, repo_data)
                             if result.get("status") == "noop":
                                 logger.info("Repo %s already exists on %s (%s), marking as NOOP", name, node.name, siem_id)
-                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "NOOP", "action": "NONE", "error": None})
+                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "(N/A)", "action": "NOOP", "error": None})
                             elif "monitorapi" in result:
                                 job_status = client.monitor_job(result["monitorapi"])
                                 if job_status.get("success"):
                                     logger.info("Repo %s created successfully on %s (%s)", name, node.name, siem_id)
-                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SUCCESS", "action": "CREATED", "error": None})
+                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Success", "action": "CREATE", "error": None})
                                 else:
                                     logger.error("Failed to create repo %s on %s (%s): %s", name, node.name, siem_id, job_status.get("error"))
-                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error", "Unknown error")})
+                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Fail", "action": "CREATE", "error": job_status.get("error", "Unknown error")})
                                     any_error = True
                             else:
                                 logger.error("Failed to create repo %s on %s (%s): Invalid response from API", name, node.name, siem_id)
-                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "NONE", "error": "Invalid response from API"})
+                                rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Fail", "action": "CREATE", "error": "Invalid response from API"})
                                 any_error = True
                         else:
-                            rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SKIPPED", "action": "DRY_RUN", "error": ""})
+                            rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "MISSING_STORAGE", "action": "SKIP", "error": ""})
                 except Exception as e:
                     logger.error("Failed to process repo %s on %s (%s): %s", name, node.name, siem_id, str(e))
-                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "NONE", "error": str(e)})
+                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "Fail", "action": "NONE", "error": str(e)})
                     any_error = True
 
     return rows, any_error

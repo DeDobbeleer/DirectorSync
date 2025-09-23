@@ -119,37 +119,24 @@ def import_routing_policies_for_nodes(
             routing_criteria = []
             repos_to_check = set()
 
-            for index, row in group.iterrows():
-                if pd.notna(row['rule_type']) and pd.notna(row['key']) and pd.notna(row['value']) and pd.notna(row['repo']):
-                    criterion = {
-                        "type": row['rule_type'],
-                        "key": row['key'],
-                        "value": row['value'],
-                        "repo": row['repo'],
-                        "drop": row['drop'] if pd.notna(row['drop']) else "store"
+          
+            for _, crit_row in group.iterrows():
+                if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
+                    crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
+                    if not crit_repo:
+                        logger.warning("No repo for criteria in policy %s, skipping this criterion", policy_name)
+                        continue
+                    criteria = {
+                        "type": str(crit_row['rule_type']).strip(),
+                        "key": str(crit_row['key']).strip(),
+                        "value": str(crit_row['value']).strip(),
+                        "repo": crit_repo,
+                        "drop": str(crit_row['drop']).strip(),
                     }
-                    routing_criteria.append(criterion)
-            else:
-                logging.debug("No criteria for this row in policy %s", policy_name)
-
-            
-            # for _, crit_row in group.iterrows():
-            #     if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
-            #         crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
-            #         if not crit_repo:
-            #             logger.warning("No repo for criteria in policy %s, skipping this criterion", policy_name)
-            #             continue
-            #         criteria = {
-            #             "type": str(crit_row['rule_type']).strip(),
-            #             "key": str(crit_row['key']).strip(),
-            #             "value": str(crit_row['value']).strip(),
-            #             "repo": crit_repo,
-            #             "drop": str(crit_row['drop']).strip(),
-            #         }
-            #         routing_criteria.append(criteria)
-            #         repos_to_check.add(crit_repo)
-            #     else:
-            #         logger.debug("No criteria for this row in policy %s", policy_name)
+                    routing_criteria.append(criteria)
+                    repos_to_check.add(crit_repo)
+                else:
+                    logger.debug("No criteria for this row in policy %s", policy_name)
 
             repos_to_check.add(catch_all)
             logger.debug("Normalized repos for %s: %s", policy_name, list(repos_to_check))

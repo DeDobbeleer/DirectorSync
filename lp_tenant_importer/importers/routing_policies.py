@@ -11,27 +11,70 @@ from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def normalize_repo_name(repo_name: str, tenant: str) -> str:
-    """Normalize repository name by removing tenant and rejoining parts with '_'.
+# def normalize_repo_name(repo_name: str, tenant: str) -> str:
+#     """Normalize repository name by removing tenant and rejoining parts with '_'.
 
-    Handles mixed separators ('-' or '_') and removes tenant name (case-insensitive).
+#     Handles mixed separators ('-' or '_') and removes tenant name (case-insensitive).
 
-    Args:
-        repo_name: Original repository name (e.g., 'Repo-core-system', 'Repo_core_system').
-        tenant: Tenant name to remove (e.g., 'core').
+#     Args:
+#         repo_name: Original repository name (e.g., 'Repo-core-system', 'Repo_core_system').
+#         tenant: Tenant name to remove (e.g., 'core').
 
-    Returns:
-        Normalized repository name (e.g., 'Repo_system').
-    """
-    if not repo_name or repo_name.lower() in ('nan', '', 'none'):
-        return ''
-    # Split on both '-' and '_'
-    parts = re.split(r'[-_]', repo_name)
-    tenant_lower = tenant.lower()
-    # Remove tenant (case-insensitive)
-    parts = [part for part in parts if part.lower() != tenant_lower]
-    # Join remaining parts with '_'
-    return '_'.join(parts) if parts else ''
+#     Returns:
+#         Normalized repository name (e.g., 'Repo_system').
+#     """
+#     if not repo_name or repo_name.lower() in ('nan', '', 'none'):
+#         return ''
+#     # Split on both '-' and '_'
+#     parts = re.split(r'[-_]', repo_name)
+#     tenant_lower = tenant.lower()
+#     # Remove tenant (case-insensitive)
+#     parts = [part for part in parts if part.lower() != tenant_lower]
+#     # Join remaining parts with '_'
+#     return '_'.join(parts) if parts else ''
+
+
+def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
+    logging.debug("Found columns: %s", list(df.columns))
+    logging.debug("Found %d routing policies in XLSX", len(df))
+    target_nodes = [n.name for n in nodes['backends']]  # Ex. ['lb-backend01', 'lb-backend02']
+    logging.debug("Target nodes for RP: %s", ", ".join(target_nodes))
+
+    for policy_name in df['cleaned_policy_name'].unique():  # Par politique unique
+        policy_rows = df[df['cleaned_policy_name'] == policy_name]
+        active = bool(policy_rows['active'].iloc[0])
+        catch_all = policy_rows['catch_all'].iloc[0]
+        routing_criteria = []
+
+        for index, row in policy_rows.iterrows():
+            if pd.notna(row['rule_type']) and pd.notna(row['key']) and pd.notna(row['value']) and pd.notna(row['repo']):
+                criterion = {
+                    "type": row['rule_type'],
+                    "key": row['key'],
+                    "value": row['value'],
+                    "repo": row['repo'],
+                    "drop": row['drop'] if pd.notna(row['drop']) else "store"
+                }
+                routing_criteria.append(criterion)
+            else:
+                logging.debug("No criteria for this row in policy %s", policy_name)
+
+        logging.debug("Routing criteria for %s: %s", policy_name, routing_criteria)
+        data = {"data": {"policy_name": policy_name, "active": active, "catch_all": catch_all, "routing_criteria": routing_criteria}}
+        # Applique aux nœuds (votre logique existante ici)
+        for node in nodes['backends']:
+            # Vérification des dépôts et mise à jour
+            existing_repos = http_client.get_existing_repos(tenant_config['pool_uuid'], node.id)
+            required_repos = [crit["repo"] for crit in routing_criteria] + [catch_all] if catch_all else []
+            missing_repos = [r for r in required_repos if r not in [repo["name"] for repo in existing_repos]]
+            if missing_repos:
+                logging.warning("Skipping policy %s on %s (%s): missing repos %s", policy_name, node.name, node.id, missing_repos)
+                continue
+            # Logique de mise à jour (ex. http_client.update_routing_policy)
+            logging.info("Policy %s on %s (%s): NOOP -> (N/A)", policy_name, node.name, node.id)
+
+    return  # Ajuste selon ton retour
+
 
 def import_routing_policies_for_nodes(
     client: DirectorClient,

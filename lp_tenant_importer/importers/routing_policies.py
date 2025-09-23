@@ -99,25 +99,28 @@ def import_routing_policies_for_nodes(
             active = str(group['active'].iloc[0]).lower() == "true"
             catch_all = normalize_repo_name(str(group['catch_all'].iloc[0]).strip(), tenant)
 
-            # Build routing_criteria, handling incomplete lines
+            # Build routing_criteria, handling incomplete lines and multi-line policies
             routing_criteria = []
             repos_to_check = set()  # Use set to avoid duplicates
-            if not group['rule_type'].dropna().empty:
-                for _, crit_row in group.iterrows():
-                    if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
-                        crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
-                        criteria = {
-                            "type": str(crit_row['rule_type']).strip(),
-                            "key": str(crit_row['key']).strip(),
-                            "value": str(crit_row['value']).strip(),
-                            "repo": crit_repo,
-                            "drop": str(crit_row['drop']).strip(),
-                        }
-                        routing_criteria.append(criteria)
-                        if crit_repo:
-                            repos_to_check.add(crit_repo)
-            else:
+            for _, crit_row in group.iterrows():
+                if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
+                    crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
+                    criteria = {
+                        "type": str(crit_row['rule_type']).strip(),
+                        "key": str(crit_row['key']).strip(),
+                        "value": str(crit_row['value']).strip(),
+                        "repo": crit_repo,
+                        "drop": str(crit_row['drop']).strip(),
+                    }
+                    routing_criteria.append(criteria)
+                    if crit_repo:
+                        repos_to_check.add(crit_repo)
+                else:
+                    logger.debug("No criteria for policy %s, setting routing_criteria = [] for this row", policy_name)
+
+            if not routing_criteria:  # If no criteria after loop, set empty list
                 logger.debug("No criteria for policy %s, setting routing_criteria = []", policy_name)
+                routing_criteria = []
 
             if catch_all:
                 repos_to_check.add(catch_all)
@@ -129,7 +132,7 @@ def import_routing_policies_for_nodes(
                 "routing_criteria": routing_criteria,
             }
 
-            logger.debug("Processing policy: %s", policy_name)
+            logger.debug("Processing policy: %s with criteria: %s", policy_name, routing_criteria)
 
             # Process for each target role (backends, all_in_one only)
             for node_type in targets:
@@ -184,7 +187,7 @@ def import_routing_policies_for_nodes(
                                     )
                                     if "monitorapi" in response:
                                         job_status = client.monitor_job(response["monitorapi"])
-                                        logger.debug("Monitor job response: %s", job_status)  # Add debug
+                                        logger.debug("Monitor job response: %s", job_status)
                                         if job_status.get("success"):
                                             result = "Success"
                                         else:
@@ -208,7 +211,7 @@ def import_routing_policies_for_nodes(
                                     action = "NOOP"
                                 elif "monitorapi" in response:
                                     job_status = client.monitor_job(response["monitorapi"])
-                                    logger.debug("Monitor job response: %s", job_status)  # Add debug
+                                    logger.debug("Monitor job response: %s", job_status)
                                     if job_status.get("success"):
                                         result = "Success"
                                     else:

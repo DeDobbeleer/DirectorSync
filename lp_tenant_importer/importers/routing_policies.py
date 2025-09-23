@@ -246,7 +246,7 @@ def import_routing_policies_for_nodes(
     return rows, any_error
 
 
-def _needs_update(existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
+def _needs_update(existing: Dict[str, any], new: Dict[str, any]) -> bool:
     """Check if an existing policy needs updating by comparing key fields.
 
     Args:

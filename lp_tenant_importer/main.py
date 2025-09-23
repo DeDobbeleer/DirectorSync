@@ -50,7 +50,7 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     repo_cloud = {"name": "Repo_cloud", "repopath": [{"path": "/data_hot/", "retention": 180}], "active": True}
     client.create_repo("a9fa7661c4f84b278b136e94a86b4ea2", "506caf32de83054497d07c3c632a98cb", repo_cloud)
     
-    response = client.update_routing_policy("a9fa7661c4f84b278b136e94a86b4ea2", "01925abf82fe0db0a75c190c4316b8a6", policy_id, update_data)
+    response = client.update_routing_policy("a9fa7661c4f84b278b136e94a86b4ea2", "01925abf82fe0db0a75c190c4316b8a6", "68d2f8675cb7b6fa6ec694de" , repo_cloud )
     if response.get("status") == "Success":
         logging.info("rp_fortinet updated")
 

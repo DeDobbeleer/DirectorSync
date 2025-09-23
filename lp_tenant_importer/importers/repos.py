@@ -1,6 +1,8 @@
 import pandas as pd
 from logging_utils import logger
-from core.nodes import get_nodes_by_role
+from ..core.nodes import get_nodes_by_role
+
+
 
 def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, force_create=False):
     logger.info("Starting import of Repos")

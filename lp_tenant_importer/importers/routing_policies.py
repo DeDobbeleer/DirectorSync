@@ -97,8 +97,8 @@ def import_routing_policies_for_nodes(
                     logger.warning("No nodes for target role %s", target)
                     continue
                 for node in nodes.get(target, []):
-                    siem_id = node["id"]
-                    node_name = node["name"]
+                    siem_id = node.id
+                    node_name = node.name
                     result = {
                         "siem": siem_id,
                         "node": node_name,

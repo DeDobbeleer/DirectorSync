@@ -11,7 +11,7 @@ from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-# def normalize_repo_name(repo_name: str, tenant: str) -> str:
+def normalize_repo_name(repo_name: str, tenant: str) -> str:
 #     """Normalize repository name by removing tenant and rejoining parts with '_'.
 
 #     Handles mixed separators ('-' or '_') and removes tenant name (case-insensitive).
@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 #     Returns:
 #         Normalized repository name (e.g., 'Repo_system').
 #     """
-#     if not repo_name or repo_name.lower() in ('nan', '', 'none'):
-#         return ''
-#     # Split on both '-' and '_'
-#     parts = re.split(r'[-_]', repo_name)
-#     tenant_lower = tenant.lower()
-#     # Remove tenant (case-insensitive)
-#     parts = [part for part in parts if part.lower() != tenant_lower]
-#     # Join remaining parts with '_'
-#     return '_'.join(parts) if parts else ''
+    if not repo_name or repo_name.lower() in ('nan', '', 'none'):
+        return ''
+    # Split on both '-' and '_'
+    parts = re.split(r'[-_]', repo_name)
+    tenant_lower = tenant.lower()
+    # Remove tenant (case-insensitive)
+    parts = [part for part in parts if part.lower() != tenant_lower]
+    # Join remaining parts with '_'
+    return '_'.join(parts) if parts else ''
 
 
 def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):

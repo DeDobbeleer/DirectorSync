@@ -2,7 +2,7 @@ import argparse
 import os
 from dotenv import load_dotenv
 from core.http import DirectorClient
-from repos import import_repos
+from importers.repos import import_repos
 from logging_utils import logger
 # Autres imports pour routing_policies, etc.
 

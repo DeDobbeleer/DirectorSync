@@ -51,9 +51,6 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     pool_uuid = tenant["pool_uuid"]
     nodes = collect_nodes(tenant)
     
-    # Dans main.py après le chargement de tenant_config
-    new_node = {"id": "new-device-id", "name": "new-device"}
-    tenant['core']['siems']['backends'].append(new_node)
     logging.info("New node added: %s", json.dumps(new_node, separators=(',', ':')))
 
     # De-duplicate nodes based on ID

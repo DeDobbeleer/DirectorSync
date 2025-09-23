@@ -132,6 +132,7 @@ def import_routing_policies_for_nodes(
                         repos_to_check = [
                             policy["catch_all"],
                             policy["routing_criteria"][0]["repo"],
+                            [criteria["repo"] for criteria in policy["routing_criteria"]]
                         ]
                         repos_to_check = [r for r in repos_to_check if r]  # Remove empty or invalid repos
                         if not repos_to_check:

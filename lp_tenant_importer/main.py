@@ -66,6 +66,8 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
                 seen_ids.add(node.id)
     logger.debug("De-duplicated nodes: %s", deduplicated_nodes)
 
+    logger.debug("Loaded API token: %s", json.dumps({"length": len(api_token)}, separators=(',', ':')))
+
     return client, tenants_file, tenant_name, pool_uuid, deduplicated_nodes, xlsx_path
 
 def cmd_import_repos(args):

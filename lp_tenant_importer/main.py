@@ -66,7 +66,7 @@ def cmd_import_repos(args):
     """Import repositories command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["repos"]
-    rows, any_error = import_repos_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    rows, any_error = import_repos_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets, args.force_create)
     logger.debug("Finished import_repos_for_nodes, rows=%d, any_error=%s", len(rows), any_error)
     print_table(rows, args.format)
     if any_error:
@@ -186,6 +186,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode, no changes made")
     parser.add_argument("--no-verify", action="store_true", help="Disable SSL verification")
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
+    parser.add_argument("--force-create", action="store_true", help="Force creation even if storage paths missing")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

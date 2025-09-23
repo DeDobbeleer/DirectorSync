@@ -7,7 +7,7 @@ from core.nodes import Node, collect_nodes
 
 logger = logging.getLogger(__name__)
 
-def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[str, List[Node]], xlsx_path: str, dry_run: bool, targets: List[str], force_create: bool = False) -> Tuple[List[Dict], bool]:
+def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[str, List[Node]], xlsx_path: str, dry_run: bool, targets: List[str]) -> Tuple[List[Dict], bool]:
     """Import or update repositories for all nodes.
 
     Args:
@@ -17,7 +17,6 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
         xlsx_path: Path to the Excel configuration file.
         dry_run: If True, do not make changes.
         targets: List of target node roles.
-        force_create: If True, ignore missing storage paths.
 
     Returns:
         List of result rows and a flag indicating if any error occurred.
@@ -25,6 +24,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
     rows = []
     any_error = False
 
+    # Read the Repo sheet from the Excel file
     try:
         df = pd.read_excel(xlsx_path, sheet_name="Repo")
         logger.debug("Reading Repo sheet from %s", xlsx_path)
@@ -32,6 +32,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
         logger.error("Failed to read Repo sheet from %s: %s", xlsx_path, e)
         return [], True
 
+    # Define column mappings
     column_mapping = {
         "cleaned_repo_name": "name",
         "storage_paths": "storage_paths",
@@ -40,8 +41,10 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
     }
     required_columns = ["name", "storage_paths", "retention_days", "active"]
 
+    # Rename columns based on mapping
     df = df.rename(columns=column_mapping)
 
+    # Validate and process the DataFrame
     if not all(col in df.columns for col in required_columns):
         missing_cols = [col for col in required_columns if col not in df.columns]
         logger.error("Missing required columns in Repo sheet: %s", missing_cols)
@@ -66,18 +69,19 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                 continue
             for node in node_list:
                 siem_id = node.id
-                if not force_create:
-                    missing_paths = client.check_storage_paths(pool_uuid, siem_id, [item["path"] for item in storage_data])
-                    if missing_paths:
-                        logger.warning("Skipping repo %s on %s (%s): missing storage paths %s", name, node.name, siem_id, missing_paths)
-                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SKIPPED", "action": "MISSING_STORAGE_PATHS", "error": f"Missing paths: {missing_paths}"})
-                        continue
+                missing_paths = client.check_storage_paths(pool_uuid, siem_id, [item["path"] for item in storage_data])
+                if missing_paths:
+                    logger.warning("Skipping repo %s on %s (%s): missing storage paths %s", name, node.name, siem_id, missing_paths)
+                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SKIPPED", "action": "MISSING_STORAGE_PATHS", "error": f"Missing paths: {missing_paths}"})
+                    any_error = True
+                    continue
 
                 try:
                     existing_repos = client.get_existing_repos(pool_uuid, siem_id)
                     repo_data = {"name": name, "repopath": storage_data, "active": active}
                     existing_repo = next((r for r in existing_repos if r["name"] == name), None)
                     if existing_repo:
+                        # Comparer la configuration existante avec celle demandée
                         current_repopath = {item["path"]: item["retention"] for item in existing_repo.get("repopath", [])}
                         new_repopath = {item["path"]: item["retention"] for item in storage_data}
                         if current_repopath == new_repopath and existing_repo.get("active") == active:
@@ -90,10 +94,10 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                                     job_status = client.monitor_job(result["monitorapi"])
                                     if job_status.get("success"):
                                         logger.info("Repo %s updated successfully on %s (%s)", name, node.name, siem_id)
-                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SUCCESS", "action": "UPDATED", "error": None})
+                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "UPDATED", "action": "UPDATED", "error": None})
                                     else:
                                         logger.error("Failed to update repo %s on %s (%s): %s", name, node.name, siem_id, job_status.get("error"))
-                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error", "Unknown error")})
+                                        rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error")})
                                         any_error = True
                                 else:
                                     logger.error("Failed to update repo %s on %s (%s): Invalid response from API", name, node.name, siem_id)
@@ -111,10 +115,10 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
                                 job_status = client.monitor_job(result["monitorapi"])
                                 if job_status.get("success"):
                                     logger.info("Repo %s created successfully on %s (%s)", name, node.name, siem_id)
-                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "SUCCESS", "action": "CREATED", "error": None})
+                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "CREATED", "action": "CREATED", "error": None})
                                 else:
                                     logger.error("Failed to create repo %s on %s (%s): %s", name, node.name, siem_id, job_status.get("error"))
-                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error", "Unknown error")})
+                                    rows.append({"siem": siem_id, "node": node.name, "name": name, "result": "FAILED", "action": "FAILED", "error": job_status.get("error")})
                                     any_error = True
                             else:
                                 logger.error("Failed to create repo %s on %s (%s): Invalid response from API", name, node.name, siem_id)

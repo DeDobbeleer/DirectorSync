@@ -180,14 +180,14 @@ class DirectorClient:
         except requests.RequestException as e:
             logger.error("Failed to update repo %s: %s (Response: %s)", repo_id, str(e), getattr(e.response, 'text', 'No response'))
             raise
-    
-    def monitor_job(self, monitorapi: str, max_attempts: int = 30, interval: float = 2) -> Dict:
+
+    def monitor_job(self, monitorapi: str, max_attempts: int = 10, interval: float = 0.2) -> Dict:
         """Monitor an async job until completion (success: true or false).
 
         Args:
             monitorapi: Monitor API URL (assumed to be a string).
             max_attempts: Maximum polling attempts.
-            interval: Polling interval in seconds (default: 2).
+            interval: Polling interval in seconds (default: 0.1).
 
         Returns:
             Final job status dictionary (with success and error fields).
@@ -206,22 +206,18 @@ class DirectorClient:
                     return {"success": False, "error": "Invalid JSON"}
                 logger.debug("Job status (attempt %d/%d): %s", attempt, max_attempts, status)
                 
-                response_data = status.get("response", {})
-                success = response_data.get("success")
-                errors = response_data.get("errors", [])
-                
-                if success is not None or errors:
-                    if success:
-                        logger.info(f"Job succeeded: {response_data.get('message', 'No message')}")
-                    else:
-                        logger.error(f"Job failed: {errors or response_data.get('message', 'No error details')}")
-                    return response_data  # Sortie immédiate
+                success = status.get("success")
+                if success is not None:
+                    if not success:
+                        error_message = status.get("message", "No message")
+                        logger.error("Job failed: %s", error_message)
+                    return status  # Sortie immédiate avec success: true ou false
                 time.sleep(interval)
             except requests.RequestException as e:
                 logger.error("Failed to monitor job: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
-                return {"success": False, "error": str(e)}
+                break
         logger.error("Job monitoring timed out after %d attempts", max_attempts)
-        return {"success": False, "error": "Timeout"}        
+        return {"success": False, "error": "Timeout"}
 
     def get(self, url: str, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"

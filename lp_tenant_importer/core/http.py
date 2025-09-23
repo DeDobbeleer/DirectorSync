@@ -330,7 +330,7 @@ class DirectorClient:
  
     def create_repo(self, pool_uuid, node_id, repo_data):
         url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/Repos"
-        response = requests.post(url, json=repo_data, headers=self.headers, verify=False)
+        response = self.session.put(url, json=repo_data, verify=False, timeout=self.timeout, proxies=self.proxies)
         if response.status_code == 200:
             logging.info("Repo created: %s", json.dumps(repo_data, separators=(',', ':')))
         else:
@@ -339,6 +339,7 @@ class DirectorClient:
     def update_routing_policy(self, pool_uuid, node_id, policy_id, data):
         url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/RoutingPolicies/{policy_id}"
         response = requests.put(url, json=data, headers=self.headers, verify=False)
+        response = self.session.put(url, json=data, verify=False, timeout=self.timeout, proxies=self.proxies)
         return response.json() if response.status_code == 200 else {}         
     
 

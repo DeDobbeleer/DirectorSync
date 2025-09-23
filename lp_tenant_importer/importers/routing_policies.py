@@ -45,7 +45,7 @@ def import_routing_policies_for_nodes(
 
     Groups rows by cleaned_policy_name to handle multi-line policies with multiple criteria.
     Verifies that all referenced repos (catch_all and routing_criteria.repo) exist after
-    normalizing names (removing tenant). Skips policies if any repo is missing to avoid DB inconsistencies.
+    normalizing names (removing tenant). Uses NOOP for no changes, SKIP for anomalies.
 
     Args:
         client: DirectorClient instance for API interactions.
@@ -85,6 +85,7 @@ def import_routing_policies_for_nodes(
 
         logger.debug("Found columns: %s", df.columns.tolist())
         logger.debug("Found %d routing policies in XLSX", len(df))
+        logger.debug("Target nodes for RP: %s", ", ".join([node.name for node_type in targets for node in nodes.get(node_type, []) if nodes.get(node_type)]))
 
         # Group by cleaned_policy_name to handle multi-line policies
         grouped = df.groupby('cleaned_policy_name')
@@ -98,13 +99,30 @@ def import_routing_policies_for_nodes(
 
             active = str(group['active'].iloc[0]).lower() == "true"
             catch_all = normalize_repo_name(str(group['catch_all'].iloc[0]).strip(), tenant)
+            if not catch_all:
+                logger.warning("No catch_all for policy %s, skipping", policy_name)
+                for node_type in targets:
+                    if node_type in nodes and nodes[node_type]:
+                        for node in nodes[node_type]:
+                            rows.append({
+                                "siem": node.id,
+                                "node": node.name,
+                                "name": policy_name,
+                                "result": "NO_DATA",
+                                "action": "SKIP",
+                                "error": "No catch_all defined",
+                            })
+                continue
 
-            # Build routing_criteria, handling incomplete lines and multi-line policies
+            # Build routing_criteria, handling multi-line policies
             routing_criteria = []
-            repos_to_check = set()  # Use set to avoid duplicates
+            repos_to_check = set()
             for _, crit_row in group.iterrows():
                 if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
                     crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
+                    if not crit_repo:
+                        logger.warning("No repo for criteria in policy %s, skipping this criterion", policy_name)
+                        continue
                     criteria = {
                         "type": str(crit_row['rule_type']).strip(),
                         "key": str(crit_row['key']).strip(),
@@ -113,17 +131,12 @@ def import_routing_policies_for_nodes(
                         "drop": str(crit_row['drop']).strip(),
                     }
                     routing_criteria.append(criteria)
-                    if crit_repo:
-                        repos_to_check.add(crit_repo)
+                    repos_to_check.add(crit_repo)
                 else:
-                    logger.debug("No criteria for policy %s, setting routing_criteria = [] for this row", policy_name)
+                    logger.debug("No criteria for this row in policy %s", policy_name)
 
-            if not routing_criteria:  # If no criteria after loop, set empty list
-                logger.debug("No criteria for policy %s, setting routing_criteria = []", policy_name)
-                routing_criteria = []
-
-            if catch_all:
-                repos_to_check.add(catch_all)
+            repos_to_check.add(catch_all)
+            logger.debug("Normalized repos for %s: %s", policy_name, list(repos_to_check))
 
             policy = {
                 "policy_name": policy_name,
@@ -131,8 +144,6 @@ def import_routing_policies_for_nodes(
                 "catch_all": catch_all,
                 "routing_criteria": routing_criteria,
             }
-
-            logger.debug("Processing policy: %s with criteria: %s", policy_name, routing_criteria)
 
             # Process for each target role (backends, all_in_one only)
             for node_type in targets:
@@ -163,6 +174,7 @@ def import_routing_policies_for_nodes(
                                     "result": "MISSING_REPO",
                                     "action": "SKIP",
                                     "error": f"Missing repos: {missing_repos}",
+                                    "job_status": None,
                                 }
                             )
                             continue
@@ -174,8 +186,9 @@ def import_routing_policies_for_nodes(
                             None,
                         )
                         action = "NOOP"
-                        result = "N/A"
+                        result = "(N/A)"
                         error = None
+                        job_status = None
 
                         if existing_policy:
                             # Check if update is needed
@@ -187,20 +200,21 @@ def import_routing_policies_for_nodes(
                                     )
                                     if "monitorapi" in response:
                                         job_status = client.monitor_job(response["monitorapi"])
-                                        logger.debug("Monitor job response: %s", job_status)
+                                        logger.debug("Monitor job response for %s: %s", policy_name, job_status)
                                         if job_status.get("success"):
                                             result = "Success"
                                         else:
                                             result = "Fail"
                                             error = job_status.get("error", "Unknown error")
                                             any_error = True
+                                            job_status = json.dumps(job_status) if job_status else None
                                     else:
-                                        result = "Fail"
-                                        error = "Invalid response from API"
-                                        any_error = True
+                                        result = "Success" if response.get("status") == "Success" else "Fail"
+                                        error = "Invalid response from API" if result == "Fail" else None
+                                        any_error = result == "Fail"
                             else:
-                                action = "SKIP"
-                                result = "Success"
+                                action = "NOOP"
+                                result = "(N/A)"
                         else:
                             # Create new policy
                             action = "CREATE"
@@ -211,17 +225,18 @@ def import_routing_policies_for_nodes(
                                     action = "NOOP"
                                 elif "monitorapi" in response:
                                     job_status = client.monitor_job(response["monitorapi"])
-                                    logger.debug("Monitor job response: %s", job_status)
+                                    logger.debug("Monitor job response for %s: %s", policy_name, job_status)
                                     if job_status.get("success"):
                                         result = "Success"
                                     else:
                                         result = "Fail"
-                                        error = job_status.get("error", "Unknown error") or "Job failed"
+                                        error = job_status.get("error", "Unknown error")
                                         any_error = True
+                                        job_status = json.dumps(job_status) if job_status else None
                                 else:
-                                    result = "Fail"
-                                    error = "Invalid response from API"
-                                    any_error = True
+                                    result = "Success" if response.get("status") == "Success" else "Fail"
+                                    error = "Invalid response from API" if result == "Fail" else None
+                                    any_error = result == "Fail"
 
                         rows.append(
                             {
@@ -231,6 +246,7 @@ def import_routing_policies_for_nodes(
                                 "result": result,
                                 "action": action,
                                 "error": error,
+                                "job_status": job_status,
                             }
                         )
                         logger.info(
@@ -257,6 +273,7 @@ def import_routing_policies_for_nodes(
                                 "result": "Fail",
                                 "action": "NONE",
                                 "error": str(e),
+                                "job_status": None,
                             }
                         )
                         any_error = True
@@ -269,8 +286,9 @@ def import_routing_policies_for_nodes(
                     "node": "",
                     "name": "N/A",
                     "result": "SKIPPED",
-                    "action": "NO_DATA",
+                    "action": "SKIP",
                     "error": "No policies processed",
+                    "job_status": None,
                 }
             )
 

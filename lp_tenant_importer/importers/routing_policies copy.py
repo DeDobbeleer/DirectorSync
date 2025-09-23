@@ -1,7 +1,7 @@
 """Importer for routing policies from Excel to Logpoint Director API."""
 import logging
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 
@@ -11,7 +11,7 @@ from core.nodes import Node
 logger = logging.getLogger(__name__)
 
 def normalize_repo_name(repo_name: str, tenant: str) -> str:
-    """Normalize repository name by removing tenant and rejoining parts with '-'.
+    """Normalize repository name by removing tenant and rejoining parts with '_'.
 
     Handles mixed separators ('-' or '_') and removes tenant name (case-insensitive).
 
@@ -20,7 +20,7 @@ def normalize_repo_name(repo_name: str, tenant: str) -> str:
         tenant: Tenant name to remove (e.g., 'core').
 
     Returns:
-        Normalized repository name (e.g., 'Repo-system').
+        Normalized repository name (e.g., 'Repo_system').
     """
     if not repo_name or repo_name.lower() in ('nan', '', 'none'):
         return ''
@@ -29,8 +29,8 @@ def normalize_repo_name(repo_name: str, tenant: str) -> str:
     tenant_lower = tenant.lower()
     # Remove tenant (case-insensitive)
     parts = [part for part in parts if part.lower() != tenant_lower]
-    # Join remaining parts with '-'
-    return '-'.join(parts) if parts else ''
+    # Join remaining parts with '_'
+    return '_'.join(parts) if parts else ''
 
 def import_routing_policies_for_nodes(
     client: DirectorClient,
@@ -43,6 +43,7 @@ def import_routing_policies_for_nodes(
 ) -> Tuple[List[Dict], bool]:
     """Import or update routing policies for specified nodes.
 
+    Groups rows by cleaned_policy_name to handle multi-line policies with multiple criteria.
     Verifies that all referenced repos (catch_all and routing_criteria.repo) exist after
     normalizing names (removing tenant). Skips policies if any repo is missing to avoid DB inconsistencies.
 
@@ -85,38 +86,53 @@ def import_routing_policies_for_nodes(
         logger.debug("Found columns: %s", df.columns.tolist())
         logger.debug("Found %d routing policies in XLSX", len(df))
 
-        for index, row in df.iterrows():
-            # Build policy dictionary with normalized repo names
-            policy = {
-                "policy_name": str(row["cleaned_policy_name"]).strip(),
-                "active": str(row["active"]).lower() == "true",
-                "catch_all": normalize_repo_name(str(row["catch_all"]).strip(), tenant),
-                "routing_criteria": [
-                    {
-                        "type": str(row["rule_type"]).strip(),
-                        "key": str(row["key"]).strip(),
-                        "value": str(row["value"]).strip(),
-                        "repo": normalize_repo_name(str(row["repo"]).strip(), tenant),
-                        "drop": str(row["drop"]).strip(),  # "store" or "drop"
-                    }
-                ],
-            }
-            if not policy["policy_name"]:
-                logger.warning("Skipping row %d with empty policy_name", index + 2)
-                rows.append(
-                    {
-                        "siem": "",
-                        "node": "",
-                        "name": "N/A",
-                        "result": "Fail",
-                        "action": "NONE",
-                        "error": "Empty policy_name",
-                    }
-                )
+        # Group by cleaned_policy_name to handle multi-line policies
+        grouped = df.groupby('cleaned_policy_name')
+
+        for policy_name, group in grouped:
+            # Validate consistency in common fields
+            if len(group['active'].unique()) > 1 or len(group['catch_all'].unique()) > 1:
+                logger.error("Inconsistent common fields for policy %s", policy_name)
                 any_error = True
                 continue
 
-            logger.debug("Processing policy: %s", policy["policy_name"])
+            active = str(group['active'].iloc[0]).lower() == "true"
+            catch_all = normalize_repo_name(str(group['catch_all'].iloc[0]).strip(), tenant)
+
+            # Build routing_criteria, handling incomplete lines and multi-line policies
+            routing_criteria = []
+            repos_to_check = set()  # Use set to avoid duplicates
+            for _, crit_row in group.iterrows():
+                if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
+                    crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
+                    criteria = {
+                        "type": str(crit_row['rule_type']).strip(),
+                        "key": str(crit_row['key']).strip(),
+                        "value": str(crit_row['value']).strip(),
+                        "repo": crit_repo,
+                        "drop": str(crit_row['drop']).strip(),
+                    }
+                    routing_criteria.append(criteria)
+                    if crit_repo:
+                        repos_to_check.add(crit_repo)
+                else:
+                    logger.debug("No criteria for policy %s, setting routing_criteria = [] for this row", policy_name)
+
+            if not routing_criteria:  # If no criteria after loop, set empty list
+                logger.debug("No criteria for policy %s, setting routing_criteria = []", policy_name)
+                routing_criteria = []
+
+            if catch_all:
+                repos_to_check.add(catch_all)
+
+            policy = {
+                "policy_name": policy_name,
+                "active": active,
+                "catch_all": catch_all,
+                "routing_criteria": routing_criteria,
+            }
+
+            logger.debug("Processing policy: %s with criteria: %s", policy_name, routing_criteria)
 
             # Process for each target role (backends, all_in_one only)
             for node_type in targets:
@@ -129,35 +145,12 @@ def import_routing_policies_for_nodes(
 
                     try:
                         # Verify all referenced repos exist
-                        repos_to_check = [
-                            policy["catch_all"],
-                            policy["routing_criteria"][0]["repo"],
-                        ]
-                        repos_to_check = [r for r in repos_to_check if r]  # Remove empty or invalid repos
-                        if not repos_to_check:
-                            logger.warning(
-                                "Skipping policy %s on %s (%s): no valid repos to check",
-                                policy["policy_name"],
-                                node_name,
-                                siem_id,
-                            )
-                            rows.append(
-                                {
-                                    "siem": siem_id,
-                                    "node": node_name,
-                                    "name": policy["policy_name"],
-                                    "result": "MISSING_REPO",
-                                    "action": "SKIP",
-                                    "error": "No valid repos provided",
-                                }
-                            )
-                            continue
-
-                        missing_repos = client.check_repos(pool_uuid, siem_id, repos_to_check)
+                        repos_to_check_list = list(repos_to_check)
+                        missing_repos = client.check_repos(pool_uuid, siem_id, repos_to_check_list)
                         if missing_repos:
                             logger.warning(
                                 "Skipping policy %s on %s (%s): missing repos %s",
-                                policy["policy_name"],
+                                policy_name,
                                 node_name,
                                 siem_id,
                                 missing_repos,
@@ -166,7 +159,7 @@ def import_routing_policies_for_nodes(
                                 {
                                     "siem": siem_id,
                                     "node": node_name,
-                                    "name": policy["policy_name"],
+                                    "name": policy_name,
                                     "result": "MISSING_REPO",
                                     "action": "SKIP",
                                     "error": f"Missing repos: {missing_repos}",
@@ -194,6 +187,7 @@ def import_routing_policies_for_nodes(
                                     )
                                     if "monitorapi" in response:
                                         job_status = client.monitor_job(response["monitorapi"])
+                                        logger.debug("Monitor job response: %s", job_status)
                                         if job_status.get("success"):
                                             result = "Success"
                                         else:
@@ -217,11 +211,12 @@ def import_routing_policies_for_nodes(
                                     action = "NOOP"
                                 elif "monitorapi" in response:
                                     job_status = client.monitor_job(response["monitorapi"])
+                                    logger.debug("Monitor job response: %s", job_status)
                                     if job_status.get("success"):
                                         result = "Success"
                                     else:
                                         result = "Fail"
-                                        error = job_status.get("error", "Unknown error")
+                                        error = job_status.get("error", "Unknown error") or "Job failed"
                                         any_error = True
                                 else:
                                     result = "Fail"
@@ -232,7 +227,7 @@ def import_routing_policies_for_nodes(
                             {
                                 "siem": siem_id,
                                 "node": node_name,
-                                "name": policy["policy_name"],
+                                "name": policy_name,
                                 "result": result,
                                 "action": action,
                                 "error": error,
@@ -240,7 +235,7 @@ def import_routing_policies_for_nodes(
                         )
                         logger.info(
                             "Policy %s on %s (%s): %s -> %s",
-                            policy["policy_name"],
+                            policy_name,
                             node_name,
                             siem_id,
                             action,
@@ -249,7 +244,7 @@ def import_routing_policies_for_nodes(
                     except Exception as e:
                         logger.error(
                             "Failed to process policy %s on %s (%s): %s",
-                            policy["policy_name"],
+                            policy_name,
                             node_name,
                             siem_id,
                             str(e),
@@ -258,7 +253,7 @@ def import_routing_policies_for_nodes(
                             {
                                 "siem": siem_id,
                                 "node": node_name,
-                                "name": policy["policy_name"],
+                                "name": policy_name,
                                 "result": "Fail",
                                 "action": "NONE",
                                 "error": str(e),
@@ -289,7 +284,7 @@ def import_routing_policies_for_nodes(
     return rows, any_error
 
 
-def _needs_update(existing: Dict[str, any], new: Dict[str, any]) -> bool:
+def _needs_update(existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
     """Check if an existing policy needs updating by comparing key fields.
 
     Args:

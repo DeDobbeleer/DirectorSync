@@ -1,6 +1,6 @@
 import pandas as pd
 from logging_utils import logger
-from core.nodes import get_nodes_by_role
+from core.nodes import collect_nodes
 
 
 

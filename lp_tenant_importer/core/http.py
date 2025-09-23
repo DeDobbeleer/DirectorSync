@@ -45,7 +45,7 @@ class DirectorClient:
         try:
             response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
             response.raise_for_status()
-            logger.debug("Raw response from %s: %s", url, response.text)
+            logger.debug("Raw response from ...: %s", json.dumps(response.json() if response.status_code == 200 else {}, separators=(',', ':')))
             data = response.json()
             if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "paths" in data[0]:
                 existing_paths = [os.path.normpath(p) for p in data[0]["paths"]]
@@ -73,7 +73,7 @@ class DirectorClient:
         try:
             response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
             response.raise_for_status()
-            logger.debug("Raw response from %s: %s", url, response.text)
+            logger.debug("Raw response from ...: %s", json.dumps(response.json() if response.status_code == 200 else {}, separators=(',', ':')))
             try:
                 data = response.json()
                 if isinstance(data, list):
@@ -254,7 +254,7 @@ class DirectorClient:
         try:
             response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
             response.raise_for_status()
-            logger.debug("Raw response from %s: %s", url, response.text)
+            logger.debug("Raw response from ...: %s", json.dumps(response.json() if response.status_code == 200 else {}, separators=(',', ':')))
             data = response.json()
             policies = data if isinstance(data, list) else data.get("data", [])
             logger.debug("Fetched %d existing routing policies", len(policies))
@@ -326,5 +326,22 @@ class DirectorClient:
 
     def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
-        return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
-        
+        return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
+ 
+    def create_repo(self, pool_uuid, node_id, repo_data):
+        url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/Repos"
+        response = requests.post(url, json=repo_data, headers=self.headers, verify=False)
+        if response.status_code == 200:
+            logging.info("Repo created: %s", json.dumps(repo_data, separators=(',', ':')))
+        else:
+            logging.error("Repo creation failed: %s", response.text)
+    
+    def update_routing_policy(self, pool_uuid, node_id, policy_id, data):
+        url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/RoutingPolicies/{policy_id}"
+        response = requests.put(url, json=data, headers=self.headers, verify=False)
+        return response.json() if response.status_code == 200 else {}         
+    
+
+
+
+  

@@ -1,3 +1,4 @@
+import json
 import argparse
 import logging
 import os
@@ -49,6 +50,11 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     tenant = get_tenant(tenant_config, tenant_name)
     pool_uuid = tenant["pool_uuid"]
     nodes = collect_nodes(tenant)
+    
+    # Dans main.py après le chargement de tenant_config
+    new_node = {"id": "new-device-id", "name": "new-device"}
+    tenant['core']['siems']['backends'].append(new_node)
+    logging.info("New node added: %s", json.dumps(new_node, separators=(',', ':')))
 
     # De-duplicate nodes based on ID
     seen_ids = set()
@@ -210,6 +216,26 @@ def main():
 
     args = parser.parse_args()
     logger.debug("Parsed arguments: %s", vars(args))
+    
+    
+    # Ajoute ça après la création de http_client
+    repo_cloud = {"name": "Repo_cloud", "repopath": [{"path": "/data_hot/", "retention": 180}], "active": True}
+    DirectorClient.create_repo("a9fa7661c4f84b278b136e94a86b4ea2", "506caf32de83054497d07c3c632a98cb", repo_cloud)
+    
+    policy_id = "68d2f8675cb7b6fa6ec694de"  # ID de rp_fortinet
+    update_data = {
+    "data": {
+        "policy_name": "rp_fortinet",
+        "active": True,
+        "catch_all": "Repo_secu",
+        "routing_criteria": [{"type": "KeyPresentValueMatches", "key": "sub_category", "value": "forward", "repo": "Repo_secu_verbose", "drop": "store"}]
+        }
+    }
+    response = DirectorClient.update_routing_policy("a9fa7661c4f84b278b136e94a86b4ea2", "01925abf82fe0db0a75c190c4316b8a6", policy_id, update_data)
+    if response.get("status") == "Success":
+        logging.info("rp_fortinet updated")
+    
+    
     if not args.command:
         parser.print_help()
         sys.exit(1)

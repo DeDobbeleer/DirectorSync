@@ -1,7 +1,6 @@
 """Importer for routing policies from Excel to Logpoint Director API."""
 import logging
 import re
-import json
 from typing import Dict, List, Tuple, Any
 
 import pandas as pd
@@ -112,14 +111,12 @@ def import_routing_policies_for_nodes(
                                 "result": "NO_DATA",
                                 "action": "SKIP",
                                 "error": "No catch_all defined",
-                                "job_status": None,
                             })
                 continue
 
             # Build routing_criteria, handling multi-line policies
             routing_criteria = []
             repos_to_check = set()
-            logger.debug("Group for %s: %d lines", policy_name, len(group))
             for _, crit_row in group.iterrows():
                 if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
                     crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)
@@ -201,7 +198,6 @@ def import_routing_policies_for_nodes(
                                     response = client.update_routing_policy(
                                         pool_uuid, siem_id, existing_policy["id"], policy
                                     )
-                                    logger.debug("API response for %s: %s", policy_name, response.text)
                                     if "monitorapi" in response:
                                         job_status = client.monitor_job(response["monitorapi"])
                                         logger.debug("Monitor job response for %s: %s", policy_name, job_status)
@@ -213,9 +209,9 @@ def import_routing_policies_for_nodes(
                                             any_error = True
                                             job_status = json.dumps(job_status) if job_status else None
                                     else:
-                                        result = "Unknown"
-                                        error = "No monitorapi, status uncertain"
-                                        any_error = False
+                                        result = "Success" if response.get("status") == "Success" else "Fail"
+                                        error = "Invalid response from API" if result == "Fail" else None
+                                        any_error = result == "Fail"
                             else:
                                 action = "NOOP"
                                 result = "(N/A)"
@@ -224,7 +220,6 @@ def import_routing_policies_for_nodes(
                             action = "CREATE"
                             if not dry_run:
                                 response = client.create_routing_policy(pool_uuid, siem_id, policy)
-                                logger.debug("API response for %s: %s", policy_name, response.text)
                                 if response.get("status") == "noop":
                                     result = "(N/A)"
                                     action = "NOOP"
@@ -239,9 +234,9 @@ def import_routing_policies_for_nodes(
                                         any_error = True
                                         job_status = json.dumps(job_status) if job_status else None
                                 else:
-                                    result = "Unknown"
-                                    error = "No monitorapi, status uncertain"
-                                    any_error = False
+                                    result = "Success" if response.get("status") == "Success" else "Fail"
+                                    error = "Invalid response from API" if result == "Fail" else None
+                                    any_error = result == "Fail"
 
                         rows.append(
                             {

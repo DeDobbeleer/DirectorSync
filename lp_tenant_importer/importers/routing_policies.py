@@ -1,5 +1,6 @@
 """Importer for routing policies from Excel to Logpoint Director API."""
 import logging
+import re
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -9,6 +10,27 @@ from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
+def normalize_repo_name(repo_name: str, tenant: str) -> str:
+    """Normalize repository name by removing tenant and rejoining parts with '-'.
+
+    Handles mixed separators ('-' or '_') and removes tenant name (case-insensitive).
+
+    Args:
+        repo_name: Original repository name (e.g., 'Repo-core-system', 'Repo_core_system').
+        tenant: Tenant name to remove (e.g., 'core').
+
+    Returns:
+        Normalized repository name (e.g., 'Repo-system').
+    """
+    if not repo_name or repo_name.lower() in ('nan', '', 'none'):
+        return ''
+    # Split on both '-' and '_'
+    parts = re.split(r'[-_]', repo_name)
+    tenant_lower = tenant.lower()
+    # Remove tenant (case-insensitive)
+    parts = [part for part in parts if part.lower() != tenant_lower]
+    # Join remaining parts with '-'
+    return '-'.join(parts) if parts else ''
 
 def import_routing_policies_for_nodes(
     client: DirectorClient,
@@ -17,11 +39,12 @@ def import_routing_policies_for_nodes(
     xlsx_path: str,
     dry_run: bool,
     targets: List[str],
+    tenant: str = 'core'
 ) -> Tuple[List[Dict], bool]:
     """Import or update routing policies for specified nodes.
 
-    Verifies that all referenced repos (catch_all and routing_criteria.repo) exist before
-    creating or updating policies. Skips policies if any repo is missing to avoid DB inconsistencies.
+    Verifies that all referenced repos (catch_all and routing_criteria.repo) exist after
+    normalizing names (removing tenant). Skips policies if any repo is missing to avoid DB inconsistencies.
 
     Args:
         client: DirectorClient instance for API interactions.
@@ -30,6 +53,7 @@ def import_routing_policies_for_nodes(
         xlsx_path: Path to the Excel configuration file.
         dry_run: If True, simulate actions without API calls.
         targets: List of target node roles (e.g., ['backends', 'all_in_one']).
+        tenant: Tenant name for normalizing repo names (default: 'core').
 
     Returns:
         Tuple of (list of result dictionaries, flag indicating if any error occurred).
@@ -62,17 +86,17 @@ def import_routing_policies_for_nodes(
         logger.debug("Found %d routing policies in XLSX", len(df))
 
         for index, row in df.iterrows():
-            # Build policy dictionary from row
+            # Build policy dictionary with normalized repo names
             policy = {
                 "policy_name": str(row["cleaned_policy_name"]).strip(),
                 "active": str(row["active"]).lower() == "true",
-                "catch_all": str(row["catch_all"]).strip(),
+                "catch_all": normalize_repo_name(str(row["catch_all"]).strip(), tenant),
                 "routing_criteria": [
                     {
                         "type": str(row["rule_type"]).strip(),
                         "key": str(row["key"]).strip(),
                         "value": str(row["value"]).strip(),
-                        "repo": str(row["repo"]).strip(),
+                        "repo": normalize_repo_name(str(row["repo"]).strip(), tenant),
                         "drop": str(row["drop"]).strip(),  # "store" or "drop"
                     }
                 ],
@@ -109,7 +133,26 @@ def import_routing_policies_for_nodes(
                             policy["catch_all"],
                             policy["routing_criteria"][0]["repo"],
                         ]
-                        repos_to_check = [r for r in repos_to_check if r]  # Remove empty strings
+                        repos_to_check = [r for r in repos_to_check if r]  # Remove empty or invalid repos
+                        if not repos_to_check:
+                            logger.warning(
+                                "Skipping policy %s on %s (%s): no valid repos to check",
+                                policy["policy_name"],
+                                node_name,
+                                siem_id,
+                            )
+                            rows.append(
+                                {
+                                    "siem": siem_id,
+                                    "node": node_name,
+                                    "name": policy["policy_name"],
+                                    "result": "MISSING_REPO",
+                                    "action": "SKIP",
+                                    "error": "No valid repos provided",
+                                }
+                            )
+                            continue
+
                         missing_repos = client.check_repos(pool_uuid, siem_id, repos_to_check)
                         if missing_repos:
                             logger.warning(
@@ -246,7 +289,7 @@ def import_routing_policies_for_nodes(
     return rows, any_error
 
 
-def _needs_update(existing: Dict[str, any], new: Dict[str, any]) -> bool:
+def _needs_update(existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
     """Check if an existing policy needs updating by comparing key fields.
 
     Args:

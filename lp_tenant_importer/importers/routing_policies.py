@@ -184,6 +184,7 @@ def import_routing_policies_for_nodes(
                                     )
                                     if "monitorapi" in response:
                                         job_status = client.monitor_job(response["monitorapi"])
+                                        logger.debug("Monitor job response: %s", job_status)  # Add debug
                                         if job_status.get("success"):
                                             result = "Success"
                                         else:
@@ -207,11 +208,12 @@ def import_routing_policies_for_nodes(
                                     action = "NOOP"
                                 elif "monitorapi" in response:
                                     job_status = client.monitor_job(response["monitorapi"])
+                                    logger.debug("Monitor job response: %s", job_status)  # Add debug
                                     if job_status.get("success"):
                                         result = "Success"
                                     else:
                                         result = "Fail"
-                                        error = job_status.get("error", "Unknown error")
+                                        error = job_status.get("error", "Unknown error") or "Job failed"
                                         any_error = True
                                 else:
                                     result = "Fail"

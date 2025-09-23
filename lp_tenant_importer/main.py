@@ -2,9 +2,9 @@ import argparse
 import os
 from dotenv import load_dotenv
 from core.http import DirectorClient
-from importers.repos import import_repos
+from repos import import_repos
 from logging_utils import logger
-# Autres imports pour routing_policies, etc.
+# Autres imports (routing_policies, etc.)
 
 def cmd_import_repos(args, client):
     results = import_repos(
@@ -14,7 +14,6 @@ def cmd_import_repos(args, client):
         nonzero_on_skip=args.nonzero_on_skip,
         force_create=args.force_create
     )
-    # Formatage table (basé sur tes logs)
     print("| siem | node | name | result | action | error |")
     print("| ---- | ---- | ---- | ------ | ------ | ----- |")
     for r in results:
@@ -22,7 +21,6 @@ def cmd_import_repos(args, client):
     logger.debug(f"Finished import_repos_for_nodes, rows={len(results)}, any_error={any(r['result'] == 'FAILED' for r in results)}")
 
 def main():
-    # Charger .env
     load_dotenv()
     logger.debug(f"Loading .env from: {os.path.abspath('.env')}")
     base_url = os.getenv("BASE_URL", "https://10.160.144.185")
@@ -44,7 +42,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command")
     parser_repos = subparsers.add_parser("import-repos")
     parser_repos.set_defaults(func=cmd_import_repos)
-    # Autres subcommands (routing_policies, etc.)
+    # Autres subcommands
     
     args = parser.parse_args()
     logger.debug(f"Parsed arguments: {vars(args)}")
@@ -53,7 +51,6 @@ def main():
         parser.print_help()
         exit(1)
     
-    # Initialiser client
     client = DirectorClient(base_url, api_token, verify_ssl=not args.no_verify)
     args.func(args, client)
 

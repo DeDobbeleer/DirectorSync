@@ -27,14 +27,14 @@ def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, forc
         repo_data = {
             "data": {
                 "name": repo_name,
-                "hiddenrepopath": repopath,  # Format API
+                "hiddenrepopath": repopath,
                 "active": True
             }
         }
         
         for node in backends:
             pool_uuid = node.get("pool_uuid")
-            logpoint_identifier = node.get("siem", node.get("id"))  # id comme siem dans logs
+            logpoint_identifier = node.get("siem", node.get("id"))
             if not pool_uuid or not logpoint_identifier:
                 logger.warning(f"Missing pool_uuid or logpoint_identifier for node {node.get('name')}")
                 continue
@@ -47,10 +47,7 @@ def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, forc
             
             # Vérifier chemins de stockage
             if not force_create:
-                storage_check = client.make_api_request("GET", f"{base_endpoint}/RepoPaths")
-                existing_paths = storage_check.get("paths", []) if storage_check else []
-                missing_paths = [p["path"].rstrip("/") for p in repopath if p["path"].rstrip("/") not in [ep.rstrip("/") for ep in existing_paths]]
-                
+                existing_paths, missing_paths = client.check_storage_paths(pool_uuid, logpoint_identifier, [p["path"] for p in repopath])
                 if missing_paths:
                     action = "MISSING_STORAGE_PATHS"
                     result = "SKIPPED"
@@ -71,7 +68,6 @@ def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, forc
             existing_repo = next((r for r in existing_repos if r.get("name") == repo_name), None) if existing_repos else None
             
             if existing_repo:
-                # Comparer repopath
                 if existing_repo.get("repopath") != repopath:
                     action = "UPDATE"
                     result = "UPDATE"
@@ -100,22 +96,15 @@ def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, forc
                 action = "CREATE"
                 result = "CREATE"
                 if not dry_run:
-                    response = client.make_api_request("POST", base_endpoint, payload=repo_data)
-                    if response.get("status") == "Success":
-                        status = client.monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
-                        if status.get("success"):
-                            logger.info(f"Created repo {repo_name} on {node.get('name')}: {status.get('message')}")
-                            result = "SUCCESS"
-                        else:
-                            logger.error(f"Failed to create repo {repo_name} on {node.get('name')}: {status.get('errors', ['Unknown error'])}")
-                            action = "FAILED"
-                            result = "FAILED"
-                            error = str(status.get("errors", ["Unknown error"])[0])
+                    status = client.create_repo(pool_uuid, logpoint_identifier, repo_data)
+                    if status.get("success"):
+                        logger.info(f"Created repo {repo_name} on {node.get('name')}: {status.get('message')}")
+                        result = "SUCCESS"
                     else:
-                        logger.error(f"POST failed for repo {repo_name} on {node.get('name')}: {response}")
+                        logger.error(f"Failed to create repo {repo_name} on {node.get('name')}: {status.get('errors', ['Unknown error'])}")
                         action = "FAILED"
                         result = "FAILED"
-                        error = "POST request failed"
+                        error = str(status.get("errors", ["Unknown error"])[0])
             
             results.append({
                 "siem": logpoint_identifier,

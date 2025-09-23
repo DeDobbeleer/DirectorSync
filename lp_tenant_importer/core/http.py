@@ -18,6 +18,7 @@ class DirectorClient:
         logger.debug(f"Initialized with base_url={base_url}, api_token=**** (length={len(api_token)}), verify_ssl={verify_ssl}")
 
     def make_api_request(self, method, endpoint, payload=None):
+        """Effectue une requête HTTP à l'API Logpoint Director."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
             logger.debug(f"Making {method} request to {url} with payload: {payload}")
@@ -36,11 +37,37 @@ class DirectorClient:
             logger.error(f"Request failed for {url}: {str(e)}")
             return {"status": "Error", "errors": [str(e)]}
 
+    def check_storage_paths(self, pool_uuid, logpoint_identifier, expected_paths):
+        """Vérifie si les chemins de stockage sont disponibles sur un nœud."""
+        endpoint = f"/configapi/{pool_uuid}/{logpoint_identifier}/Repos/RepoPaths"
+        response = self.make_api_request("GET", endpoint)
+        existing_paths = response.get("paths", []) if response else []
+        logger.debug(f"Raw response from {endpoint}: {response}")
+        missing = [p.rstrip("/") for p in expected_paths if p.rstrip("/") not in [ep.rstrip("/") for ep in existing_paths]]
+        logger.debug(f"Checked storage paths: existing={existing_paths}, missing={missing}")
+        return existing_paths, missing
+
+    def create_repo(self, pool_uuid, logpoint_identifier, repo_data):
+        """Crée un repo via POST."""
+        endpoint = f"/configapi/{pool_uuid}/{logpoint_identifier}/Repos"
+        logger.debug(f"Formatted request body for {endpoint}: {repo_data}")
+        response = self.make_api_request("POST", endpoint, payload=repo_data)
+        logger.debug(f"Raw response from {endpoint}: {response}")
+        if response.get("status") == "Success":
+            logger.info(f"Monitoring job at {response.get('message')}")
+            status = self.monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
+            if not status.get("success"):
+                logger.error(f"Repo creation failed: {status.get('errors', ['Unknown error'])}")
+                return status
+            return status
+        logger.error(f"Repo creation failed: {response}")
+        return {"success": False, "errors": [str(response)]}
+
     def monitor_job(self, monitor_url, pool_uuid, logpoint_identifier, max_attempts=30, interval=2):
         """Monitor an async job until completion or timeout."""
         logger.info(f"Monitoring job at {monitor_url}")
         try:
-            # Extraire request_id depuis l'URL (ex. : monitorapi/.../orders/{request_id})
+            # Extraire request_id depuis l'URL
             parsed_url = urlparse(f"https://dummy/{monitor_url}")
             request_id = parsed_url.path.split("/")[-1]
             endpoint = f"/monitorapi/{pool_uuid}/{logpoint_identifier}/orders/{request_id}"
@@ -68,7 +95,6 @@ class DirectorClient:
                         time.sleep(interval)
             
             logger.error(f"Job monitoring timed out after {max_attempts * interval}s")
-            # Fallback : Retourner timeout mais sans retry
             return {"success": False, "errors": ["Timeout - operation may still be processing"]}
         except Exception as e:
             logger.error(f"Error monitoring job: {str(e)}")

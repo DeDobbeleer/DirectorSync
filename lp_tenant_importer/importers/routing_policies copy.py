@@ -105,7 +105,11 @@ def import_routing_policies_for_nodes(
 
                     try:
                         # Verify all referenced repos exist
-                        repos_to_check = [policy["catch_all"], policy["routing_criteria"][0]["repo"]]
+                        repos_to_check = [
+                            policy["catch_all"],
+                            policy["routing_criteria"][0]["repo"],
+                        ]
+                        repos_to_check = [r for r in repos_to_check if r]  # Remove empty strings
                         missing_repos = client.check_repos(pool_uuid, siem_id, repos_to_check)
                         if missing_repos:
                             logger.warning(
@@ -130,7 +134,8 @@ def import_routing_policies_for_nodes(
                         # Check if policy exists
                         existing_policies = client.get_existing_routing_policies(pool_uuid, siem_id)
                         existing_policy = next(
-                            (p for p in existing_policies if p["policy_name"] == policy["policy_name"]), None
+                            (p for p in existing_policies if p["policy_name"] == policy["policy_name"]),
+                            None,
                         )
                         action = "NOOP"
                         result = "N/A"

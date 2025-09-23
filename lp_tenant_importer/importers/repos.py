@@ -1,9 +1,8 @@
 import pandas as pd
-from core.http import make_api_request, monitor_job
 from logging_utils import logger
 from core.nodes import get_nodes_by_role
 
-def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create=False):
+def import_repos(client, config_file, dry_run=False, nonzero_on_skip=False, force_create=False):
     logger.info("Starting import of Repos")
     df = pd.read_excel(config_file, sheet_name="repos", skiprows=0)  # 6 rows
     nodes = get_nodes_by_role()  # backends + all_in_one
@@ -29,31 +28,32 @@ def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create
             "data": {
                 "name": repo_name,
                 "hiddenrepopath": repopath,  # Format API
-                "active": True  # Champs par défaut
+                "active": True
             }
         }
         
         for node in backends:
             pool_uuid = node.get("pool_uuid")
-            logpoint_identifier = node.get("logpoint_identifier")
+            logpoint_identifier = node.get("siem", node.get("id"))  # id comme siem dans logs
             if not pool_uuid or not logpoint_identifier:
                 logger.warning(f"Missing pool_uuid or logpoint_identifier for node {node.get('name')}")
                 continue
             
             base_endpoint = f"/configapi/{pool_uuid}/{logpoint_identifier}/Repos"
             get_endpoint = f"{base_endpoint}/{repo_name}"
-            action = "NOOP"
-            result = "SKIPPED"
+            action = "NONE"
+            result = "NOOP"
             error = ""
             
             # Vérifier chemins de stockage
             if not force_create:
-                storage_check = make_api_request("GET", f"{base_endpoint}/RepoPaths")
+                storage_check = client.make_api_request("GET", f"{base_endpoint}/RepoPaths")
                 existing_paths = storage_check.get("paths", []) if storage_check else []
                 missing_paths = [p["path"].rstrip("/") for p in repopath if p["path"].rstrip("/") not in [ep.rstrip("/") for ep in existing_paths]]
                 
                 if missing_paths:
                     action = "MISSING_STORAGE_PATHS"
+                    result = "SKIPPED"
                     error = f"Missing paths: {missing_paths}"
                     results.append({
                         "siem": logpoint_identifier,
@@ -67,7 +67,7 @@ def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create
                     continue
             
             # Vérifier existence repo
-            existing_repos = make_api_request("GET", base_endpoint)
+            existing_repos = client.make_api_request("GET", base_endpoint)
             existing_repo = next((r for r in existing_repos if r.get("name") == repo_name), None) if existing_repos else None
             
             if existing_repo:
@@ -76,9 +76,9 @@ def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create
                     action = "UPDATE"
                     result = "UPDATE"
                     if not dry_run:
-                        response = make_api_request("PUT", get_endpoint, payload=repo_data)
+                        response = client.make_api_request("PUT", get_endpoint, payload=repo_data)
                         if response.get("status") == "Success":
-                            status = monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
+                            status = client.monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
                             if status.get("success"):
                                 logger.info(f"Updated repo {repo_name} on {node.get('name')}: {status.get('message')}")
                                 result = "SUCCESS"
@@ -100,9 +100,9 @@ def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create
                 action = "CREATE"
                 result = "CREATE"
                 if not dry_run:
-                    response = make_api_request("POST", base_endpoint, payload=repo_data)
+                    response = client.make_api_request("POST", base_endpoint, payload=repo_data)
                     if response.get("status") == "Success":
-                        status = monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
+                        status = client.monitor_job(response.get("message"), pool_uuid, logpoint_identifier)
                         if status.get("success"):
                             logger.info(f"Created repo {repo_name} on {node.get('name')}: {status.get('message')}")
                             result = "SUCCESS"
@@ -126,7 +126,6 @@ def import_repos(config_file, dry_run=False, nonzero_on_skip=False, force_create
                 "error": error
             })
     
-    # Gérer --nonzero-on-skip
     if nonzero_on_skip and any(r["action"] == "MISSING_STORAGE_PATHS" for r in results):
         logger.warning("Non-zero exit due to skipped repos")
         exit(2)

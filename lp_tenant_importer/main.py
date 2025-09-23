@@ -46,14 +46,6 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
 
     client = DirectorClient(base_url, api_token, verify=not args.no_verify)
     
-    # Ajoute ça après la création de http_client
-    repo_cloud = {"name": "Repo_cloud", "repopath": [{"path": "/data_hot/", "retention": 180}], "active": True}
-    client.create_repo("a9fa7661c4f84b278b136e94a86b4ea2", "506caf32de83054497d07c3c632a98cb", repo_cloud)
-    
-    response = client.update_routing_policy("a9fa7661c4f84b278b136e94a86b4ea2", "01925abf82fe0db0a75c190c4316b8a6", "68d2f8675cb7b6fa6ec694de" , repo_cloud )
-    if response.get("status") == "Success":
-        logging.info("rp_fortinet updated")
-
     tenant_config = load_tenants_file(tenants_file)
     tenant = get_tenant(tenant_config, tenant_name)
     pool_uuid = tenant["pool_uuid"]
@@ -224,19 +216,7 @@ def main():
 
     args = parser.parse_args()
     logger.debug("Parsed arguments: %s", vars(args))
-  
-
-    policy_id = "68d2f8675cb7b6fa6ec694de"  # ID de rp_fortinet
-    update_data = {
-    "data": {
-        "policy_name": "rp_fortinet",
-        "active": True,
-        "catch_all": "Repo_secu",
-        "routing_criteria": [{"type": "KeyPresentValueMatches", "key": "sub_category", "value": "forward", "repo": "Repo_secu_verbose", "drop": "store"}]
-        }
-    }
-    
-    
+      
     
     if not args.command:
         parser.print_help()

@@ -327,19 +327,7 @@ class DirectorClient:
     def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
- 
-    def create_repo(self, pool_uuid, node_id, repo_data):
-        url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/Repos"
-        response = self.session.put(url, json=repo_data, verify=False, timeout=self.timeout, proxies=self.proxies)
-        if response.status_code == 200:
-            logging.info("Repo created: %s", json.dumps(repo_data, separators=(',', ':')))
-        else:
-            logging.error("Repo creation failed: %s", response.text)
-    
-    def update_routing_policy(self, pool_uuid, node_id, policy_id, data):
-        url = f"https://10.160.144.185/configapi/{pool_uuid}/{node_id}/RoutingPolicies/{policy_id}"
-        response = self.session.put(url, json=data, verify=False, timeout=self.timeout, proxies=self.proxies)
-        return response.json() if response.status_code == 200 else {}         
+  
     
 
 

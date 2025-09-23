@@ -1,5 +1,0 @@
-core:
-  director_url: "https://director.example.com"
-  token: "REDACT_ME"
-  verify: true
-  nodes: ["lb-backend01","lb-backend02"]

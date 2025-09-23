@@ -223,6 +223,99 @@ class DirectorClient:
         logger.error("Job monitoring timed out after %d attempts", max_attempts)
         return {"success": False, "error": "Timeout"}        
 
+    def check_repos(self, pool_uuid: str, logpoint_id: str, repo_names: List[str]) -> List[str]:
+        """Check which repositories exist on the SIEM.
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+            repo_names: List of repository names to check.
+
+        Returns:
+            List of repo names that do not exist.
+        """
+        existing_repos = self.get_existing_repos(pool_uuid, logpoint_id)
+        existing_names = [repo["name"] for repo in existing_repos]
+        missing_repos = [name for name in repo_names if name and name not in existing_names]
+        logger.debug("Checked repos: existing=%s, missing=%s", existing_names, missing_repos)
+        return missing_repos
+
+    def get_existing_routing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+        """Fetch existing routing policies from the SIEM.
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+
+        Returns:
+            List of routing policy dictionaries.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies"
+        try:
+            response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            data = response.json()
+            policies = data if isinstance(data, list) else data.get("data", [])
+            logger.debug("Fetched %d existing routing policies", len(policies))
+            return policies
+        except requests.RequestException as e:
+            logger.error("Failed to fetch existing routing policies: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
+            return []
+
+    def create_routing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+        """Create a new routing policy (async).
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+            policy: Policy dictionary with policy_name, catch_all, active, routing_criteria.
+
+        Returns:
+            Response dictionary with monitorapi.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies"
+        payload = {"data": policy}
+        logger.debug("Create request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
+                result["monitorapi"] = result["message"]
+            return result
+        except requests.RequestException as e:
+            logger.error("Failed to create routing policy %s: %s (Response: %s)", policy["policy_name"], str(e), getattr(e.response, 'text', 'No response'))
+            raise
+
+    def update_routing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+        """Update an existing routing policy (async).
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+            policy_id: Policy ID.
+            policy: Updated policy dictionary.
+
+        Returns:
+            Response dictionary with monitorapi.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies/{policy_id}"
+        payload = {"data": policy}
+        logger.debug("Update request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.put(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
+                result["monitorapi"] = result["message"]
+            return result
+        except requests.RequestException as e:
+            logger.error("Failed to update routing policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
+            raise
+    
     def get(self, url: str, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.get(full_url, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
@@ -234,3 +327,4 @@ class DirectorClient:
     def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
+        

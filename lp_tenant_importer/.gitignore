@@ -1,0 +1,7 @@
+# .gitignore
+.env
+*.exe
+__pycache__/
+*.pyc
+artifacts/
+# *.xlsx

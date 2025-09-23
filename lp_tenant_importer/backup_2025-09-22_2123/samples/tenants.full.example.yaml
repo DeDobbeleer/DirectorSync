@@ -1,0 +1,37 @@
+tenants:
+  core:
+    pool_uuid: "a9fa7661c4f84b278b136e94a86b4ea2"
+
+    # Cibles SIEM par rôle
+    siems:
+      search_heads: []
+      backends:
+        - { id: "506caf32de83054497d07c3c632a98cb", name: "lb-backend01" }
+        - { id: "01925abf82fe0db0a75c190c4316b8a6", name: "lb-backend02" }
+      # all_in_one peut rester vide : il sera calculé = backends ∪ search_heads
+      all_in_one: []
+
+    # Règles par défaut (cible par entité) :
+    # - Sans override → tout va vers backends
+    # - alerts est routé vers search_heads par défaut par le code
+    defaults:
+      target:
+        #exemples d’override (facultatifs)
+        repos: [ backends, all_in_one ]
+        routing_policies: [ backends, all_in_one ]
+        normalization_policies: [ backends, all_in_one ]
+        processing_policies: [ backends, all_in_one ]
+        alerts: search_heads
+
+# DÉFAUT GLOBAL (NOUVEAU)
+defaults:
+  target:
+    repos: [ backends, all_in_one ]
+    routing_policies: [ backends, all_in_one ]
+    normalization_policies: [ backends, all_in_one ]
+    processing_policies: [ backends, all_in_one ]
+    alerts: search_heads  
+
+  xlsx:
+    dir: "~/.local/share/lp_importer/"  # dossier commun
+    pattern: "config-{tenant}.xlsx"     # nommage canonique

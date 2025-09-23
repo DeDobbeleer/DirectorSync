@@ -50,8 +50,6 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     tenant = get_tenant(tenant_config, tenant_name)
     pool_uuid = tenant["pool_uuid"]
     nodes = collect_nodes(tenant)
-    
-    logging.info("New node added: %s", json.dumps(new_node, separators=(',', ':')))
 
     # De-duplicate nodes based on ID
     seen_ids = set()

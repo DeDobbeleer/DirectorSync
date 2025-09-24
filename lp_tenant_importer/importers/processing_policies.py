@@ -243,7 +243,7 @@ def import_processing_policies_for_nodes(
                     "routing_policy": policy_data.get("routing_policy"),
                     "action": action,
                     "result": result,
-                    "error": error or (json.loads(result.get("error", "{}")) if result and result.get("error") else "")
+                    "error": error
                 }
                 rows.append(row_result)
 

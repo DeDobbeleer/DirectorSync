@@ -122,6 +122,7 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping row with empty policy_name")
                     continue
 
+                # active is kept internally but not sent to API
                 active = bool(row.get("active", True))  # Default True, direct bool conversion
                 norm_policy = row.get("norm_policy", "").strip()
                 enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
@@ -210,25 +211,20 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                # Build payload with "None" as string for optional fields
+                # Build payload without active, using "None" for optional fields if specified
                 policy_data = {
                     "name": policy_name,
-                    "active": active,
                     "norm_policy": norm_policy
                 }
-                if enrich_policy is None and not enrich_policy_src_id:
-                    policy_data["enrich_policy"] = "None"
-                elif enrich_policy:
-                    policy_data["enrich_policy"] = enrich_policy
-                if routing_policy is None and not routing_policy_src_id:
-                    policy_data["routing_policy"] = "None"
-                elif routing_policy:
-                    policy_data["routing_policy"] = routing_policy
+                if enrich_policy_src_id:
+                    policy_data["enrich_policy"] = enrich_policy if enrich_policy else "None"
+                if routing_policy_src_id:
+                    policy_data["routing_policy"] = routing_policy if routing_policy else "None"
 
-                logger.debug("Processing policy %s: active=%s, norm_policy=%s, enrich_policy=%s, routing_policy=%s",
-                             policy_name, active, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
+                logger.debug("Processing policy %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
+                             policy_name, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
 
-                # Check existence and decide action
+                # Check existence and decide action, ignoring active for NOOP
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data, existing_policies.get(policy_name))
                 row_result = {
                     "siem": logpoint_id,
@@ -264,7 +260,7 @@ def _process_policy_action(
         pool_uuid: Tenant pool UUID.
         logpoint_id: SIEM identifier.
         dry_run: Simulate mode.
-        policy: Policy data with name, active, norm_policy, enrich_policy, routing_policy.
+        policy: Policy data with name, norm_policy, enrich_policy, routing_policy.
         existing_policy: Existing policy if found.
 
     Returns:
@@ -289,14 +285,12 @@ def _process_policy_action(
             logger.error("Exception during CREATE %s: %s", policy["name"], e)
             return "CREATE", "Fail", str(e)
 
-    # Compare if existing
-    existing_active = existing_policy.get("active", False)
+    # Compare if existing, ignoring active since not modifiable via API
     existing_norm = existing_policy.get("norm_policy", "")
     existing_enrich = existing_policy.get("enrich_policy", "")
     existing_routing = existing_policy.get("routing_policy", "")
 
-    if (existing_active == policy["active"] and
-        existing_norm == policy["norm_policy"] and
+    if (existing_norm == policy["norm_policy"] and
         existing_enrich == policy["enrich_policy"] and
         existing_routing == policy["routing_policy"]):
         logger.info("NOOP: Processing policy %s unchanged", policy["name"])

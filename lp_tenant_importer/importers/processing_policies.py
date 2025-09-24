@@ -122,7 +122,7 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping row with empty policy_name")
                     continue
 
-                active = bool(row.get("active", "").strip() or True)  # Default True, handle empty string
+                active = bool(row.get("active", True))  # Default True, direct bool conversion
                 norm_policy = row.get("norm_policy", "").strip()
                 enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
                 routing_policy_src_id = str(row.get("routing_policy", "")).strip()

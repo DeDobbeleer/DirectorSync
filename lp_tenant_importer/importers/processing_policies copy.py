@@ -287,7 +287,7 @@ def _process_policy_action(
             else:
                 error = result.get("error", json.dumps(result))
                 logger.debug(f"Defective payload: {policy}")
-                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s - Payload: %s", policy["name"], logpoint_id, error, result, policy)
                 return "CREATE", "Fail", error
         except Exception as e:
             logger.error("Exception during CREATE %s on %s: %s", policy["name"], logpoint_id, str(e))

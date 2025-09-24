@@ -470,7 +470,7 @@ class DirectorClient:
         try:
             response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
             response.raise_for_status()
-            logger.debug(f"Post response: {response.json()}")
+            
             result = response.json()
             if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
                 monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
@@ -482,6 +482,7 @@ class DirectorClient:
                 else:
                     error = json.dumps(job_status, indent=2)
                     logger.error("Create job failed for %s: %s", policy["name"], error)
+                    logger.debug(f"Post response: {json.dumps(response.json(), indent=2)}")
                     return {"status": "failed", "error": error}
             return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:

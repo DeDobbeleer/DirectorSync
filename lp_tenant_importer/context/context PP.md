@@ -1,3 +1,40 @@
+### Documentation d'Ingénierie pour Processing Policies (PP)
+
+With your "GO" at **07:58 AM CEST on Wednesday, September 24, 2025**, I will now provide the complete engineering documentation for `processing_policies.py` in English, adhering to PEP 8, self-documented code, comprehensive logging, and utilization of common modules. We have approximately **6 hours and 2 minutes** until 14:00 CEST to finalize, targeting completion by **09:15 AM CEST** as per the updated plan. The implementation will reflect the mapping logic for `enrich_policy` and `routing_policy` IDs based on the source IDs in `core_config.xlsx` and the destination IDs fetched via API.
+
+---
+
+#### Implementation Plan
+1. **Analysis and Validation (20 minutes)**:
+   - Load "ProcessingPolicy", "EnrichmentPolicy", and "RoutingPolicy" sheets with `pandas`.
+   - Parse `original_policy_name`, `cleaned_policy_name`, `active`, `norm_policy`, `enrich_policy` (source ID), `routing_policy` (source ID).
+   - Validate: SKIP if `policy_name` is empty or `norm_policy` is missing.
+
+2. **API Fetch and Mapping (20 minutes)**:
+   - Fetch existing policies via `GET /ProcessingPolicy`.
+   - Dump `GET /NormalizationPolicy`, `GET /EnrichmentPolicy`, and `GET /RoutingPolicy` for the target node.
+   - Map `enrich_policy` and `routing_policy` source IDs to names via XLSX, then to target IDs via API.
+
+3. **Action Logic (20 minutes)**:
+   - NOOP: Policy exists and matches (including mapped IDs).
+   - SKIP: Invalid or missing critical dependencies.
+   - CREATE: Non-existent, valid → POST with mapped IDs, monitor job.
+   - UPDATE: Differs, valid → PUT with mapped IDs, monitor job.
+   - Async handling with `monitor_job` (30 attempts, 2s interval).
+
+4. **Integration and Testing (15 minutes)**:
+   - Integrate with `main.py`.
+   - Test in `test_all.py`: 9 policies, mapping cases.
+
+5. **Documentation (5 minutes)**:
+   - Update `PROJECT_STATE.md`.
+
+**Estimated Time**: 80 minutes. Start: 08:00 AM CEST, End: 09:20 AM CEST.
+
+---
+
+#### Code Implementation (`importers/processing_policies.py`)
+```python
 import logging
 import pandas as pd
 from typing import Dict, List, Any, Tuple
@@ -248,3 +285,130 @@ def _process_policy_action(
     except Exception as e:
         logger.error("Exception during UPDATE %s: %s", policy["name"], e)
         return "UPDATE", "Fail", str(e)
+```
+
+#### Updates to `core/http.py` (Methods for PP)
+Add these methods to the `DirectorClient` class:
+```python
+    def get_existing_processing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+        """Fetch existing processing policies from the SIEM."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
+        try:
+            response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            data = response.json()
+            policies = data if isinstance(data, list) else data.get("data", [])
+            logger.debug("Fetched %d existing processing policies", len(policies))
+            return policies
+        except requests.RequestException as e:
+            logger.error("Failed to fetch existing processing policies: %s", str(e))
+            return []
+
+    def create_processing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+        """Create a new processing policy (async)."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
+        payload = {
+            "data": {
+                "name": policy["name"],
+                "active": policy.get("active", True),
+                "norm_policy": policy.get("norm_policy", ""),
+                "enrich_policy": policy.get("enrich_policy", "None"),
+                "routing_policy": policy.get("routing_policy", "None")
+            }
+        }
+        logger.debug("Create request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for create %s at %s", policy["name"], monitorapi)
+                job_status = self.monitor_job(monitorapi)
+                if job_status.get("success"):
+                    logger.info("Processing policy %s created successfully", policy["name"])
+                    return {"status": "success"}
+                else:
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Create job failed for %s: %s", policy["name"], error)
+                    return {"status": "failed", "error": error}
+            return {"status": "failed", "error": json.dumps(result, indent=2)}
+        except requests.RequestException as e:
+            logger.error("Failed to create processing policy %s: %s", policy["name"], str(e))
+            return {"status": "failed", "error": str(e)}
+
+    def update_processing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+        """Update an existing processing policy (async)."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{policy_id}"
+        payload = {
+            "data": {
+                "active": policy.get("active", True),
+                "norm_policy": policy.get("norm_policy", ""),
+                "enrich_policy": policy.get("enrich_policy", "None"),
+                "routing_policy": policy.get("routing_policy", "None")
+            }
+        }
+        logger.debug("Update request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.put(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for update %s at %s", policy_id, monitorapi)
+                job_status = self.monitor_job(monitorapi)
+                if job_status.get("success"):
+                    logger.info("Processing policy %s updated successfully", policy_id)
+                    return {"status": "success"}
+                else:
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Update job failed for %s: %s", policy_id, error)
+                    return {"status": "failed", "error": error}
+            return {"status": "failed", "error": json.dumps(result, indent=2)}
+        except requests.RequestException as e:
+            logger.error("Failed to update processing policy %s: %s", policy_id, str(e))
+            return {"status": "failed", "error": str(e)}
+```
+
+#### Specifications
+##### **Dependencies and Constraints**
+- **Dependencies**: PP relies on NP (`norm_policy`), EP (`enrich_policy`), and RP (`routing_policy`). Validation via API; SKIP if `norm_policy` invalid, warnings for others.
+- **XLSX Fields** (based on `core_config.xlsx`):
+  - `original_policy_name`: Original name.
+  - `cleaned_policy_name`: Cleaned name (priority if present).
+  - `active`: Boolean (1/0 or True/False), default True.
+  - `norm_policy`: Normalization policy name, mandatory.
+  - `enrich_policy`: Enrichment policy source ID, optional.
+  - `routing_policy`: Routing policy source ID, mandatory.
+  - Validation: SKIP if `norm_policy` missing; map IDs.
+- **API Endpoints** (per documentation):
+  - `GET /configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy`: List existing policies.
+  - `POST /configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy`: Create.
+  - `PUT /configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{id}`: Update.
+  - Dependencies via `/NormalizationPolicy`, `/EnrichmentPolicy`, `/RoutingPolicy`.
+- **Action Logic**:
+  | Action | Conditions | Result | Possible Errors |
+  |--------|------------|--------|-----------------|
+  | NOOP   | Exists and matches | N/A | - |
+  | SKIP   | Missing `norm_policy` | N/A | "Missing norm_policy" |
+  | CREATE | Non-existent, valid | Success/Fail | API error, timeout |
+  | UPDATE | Exists, differs, valid | Success/Fail | API error, timeout |
+
+- **Payload API**: `norm_policy` (name), `enrich_policy`/`routing_policy` (IDs or "None").
+- **Monitoring**: Poll `monitor_job` (30x, 2s).
+- **Logging**: DEBUG, INFO, WARNING, ERROR.
+- **Dry Run**: Simulate without API calls.
+
+##### **Examples**
+- **CREATE Payload**: `{"data": {"name": "default_processing_policy", "active": true, "norm_policy": "_logpoint", "enrich_policy": "57591a2cd8aaa41bfef54888", "routing_policy": "586cc3edd8aaa406f6fdc8e3"}}`.
+- **Log**: "Creating processing policy default_processing_policy".
+
+---
+
+#### Next Steps
+- **Status**: PP implemented with mapping logic. Target completion: 09:20 AM CEST.
+- **Action**: Run tests or proceed to DeviceGroups/Device with "GO".
+- **Time**: 08:05 AM CEST. On track!
+
+Say "GO" to proceed! 😎

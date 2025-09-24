@@ -438,3 +438,83 @@ class DirectorClient:
         except requests.RequestException as e:
             logger.error("Failed to update normalization policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
             return {"status": "failed", "error": str(e)}
+
+    def get_existing_processing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+        """Fetch existing processing policies from the SIEM."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
+        try:
+            response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            data = response.json()
+            policies = data if isinstance(data, list) else data.get("data", [])
+            logger.debug("Fetched %d existing processing policies", len(policies))
+            return policies
+        except requests.RequestException as e:
+            logger.error("Failed to fetch existing processing policies: %s", str(e))
+            return []
+
+    def create_processing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+        """Create a new processing policy (async)."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
+        payload = {
+            "data": {
+                "name": policy["name"],
+                "active": policy.get("active", True),
+                "norm_policy": policy.get("norm_policy", ""),
+                "enrich_policy": policy.get("enrich_policy", "None"),
+                "routing_policy": policy.get("routing_policy", "None")
+            }
+        }
+        logger.debug("Create request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for create %s at %s", policy["name"], monitorapi)
+                job_status = self.monitor_job(monitorapi)
+                if job_status.get("success"):
+                    logger.info("Processing policy %s created successfully", policy["name"])
+                    return {"status": "success"}
+                else:
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Create job failed for %s: %s", policy["name"], error)
+                    return {"status": "failed", "error": error}
+            return {"status": "failed", "error": json.dumps(result, indent=2)}
+        except requests.RequestException as e:
+            logger.error("Failed to create processing policy %s: %s", policy["name"], str(e))
+            return {"status": "failed", "error": str(e)}
+
+    def update_processing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+        """Update an existing processing policy (async)."""
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{policy_id}"
+        payload = {
+            "data": {
+                "active": policy.get("active", True),
+                "norm_policy": policy.get("norm_policy", ""),
+                "enrich_policy": policy.get("enrich_policy", "None"),
+                "routing_policy": policy.get("routing_policy", "None")
+            }
+        }
+        logger.debug("Update request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.put(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for update %s at %s", policy_id, monitorapi)
+                job_status = self.monitor_job(monitorapi)
+                if job_status.get("success"):
+                    logger.info("Processing policy %s updated successfully", policy_id)
+                    return {"status": "success"}
+                else:
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Update job failed for %s: %s", policy_id, error)
+                    return {"status": "failed", "error": error}
+            return {"status": "failed", "error": json.dumps(result, indent=2)}
+        except requests.RequestException as e:
+            logger.error("Failed to update processing policy %s: %s", policy_id, str(e))
+            return {"status": "failed", "error": str(e)}

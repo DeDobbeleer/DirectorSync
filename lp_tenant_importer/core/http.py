@@ -470,6 +470,7 @@ class DirectorClient:
         try:
             response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
             response.raise_for_status()
+            logger.debug(f"Post response: {response.json()}")
             result = response.json()
             if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
                 monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]

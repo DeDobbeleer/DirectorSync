@@ -242,7 +242,7 @@ def import_processing_policies_for_nodes(
                     "routing_policy": policy_data.get("routing_policy"),
                     "action": action,
                     "result": result,
-                    "error": error or (json.loads(result.get("error", "{}")) if result and result.get("error") else "")
+                    "error": error or (json.loads(api_result.get("error", "{}")) if api_result and api_result.get("error") else "")
                 }
                 rows.append(row_result)
 
@@ -281,12 +281,12 @@ def _process_policy_action(
         # CREATE
         logger.info("Creating processing policy %s on %s", policy["name"], logpoint_id)
         try:
-            result = client.create_processing_policy(pool_uuid, logpoint_id, policy)
-            if result.get("status") == "success":
+            api_result = client.create_processing_policy(pool_uuid, logpoint_id, policy)
+            if api_result.get("status") == "success":
                 return "CREATE", "Success", ""
             else:
-                error = result.get("error", json.dumps(result))
-                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                error = api_result.get("error", json.dumps(api_result))
+                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, api_result)
                 return "CREATE", "Fail", error
         except Exception as e:
             logger.error("Exception during CREATE %s on %s: %s", policy["name"], logpoint_id, str(e))
@@ -307,12 +307,12 @@ def _process_policy_action(
         policy_id = existing_policy.get("id")
         logger.info("Updating processing policy %s (ID: %s) on %s", policy["name"], policy_id, logpoint_id)
         try:
-            result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
-            if result.get("status") == "success":
+            api_result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
+            if api_result.get("status") == "success":
                 return "UPDATE", "Success", ""
             else:
-                error = result.get("error", json.dumps(result))
-                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                error = api_result.get("error", json.dumps(api_result))
+                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, api_result)
                 return "UPDATE", "Fail", error
         except Exception as e:
             logger.error("Exception during UPDATE %s on %s: %s", policy["name"], logpoint_id, str(e))

@@ -15,8 +15,11 @@ def load_env() -> None:
     Raises:
         ValueError: If required environment variables are missing.
     """
-    load_dotenv(dotenv_path='.env')
-    required_vars = ["LP_DIRECTOR_URL", "LP_TOKEN", "LP_TENANTS_FILE"]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(script_dir, '.env')
+    
+    load_dotenv(env_path)
+    required_vars = ["LP_DIRECTOR_URL", "LP_DIRECTOR_API_TOKEN", "LP_TENANTS_FILE"]
     missing = [var for var in required_vars if not os.getenv(var)]
     if missing:
         logger.error("Missing required environment variables: %s", ", ".join(missing))
@@ -108,7 +111,14 @@ def get_targets(tenant: Dict[str, Any], element: str) -> List[str]:
     default_targets = tenant.get("defaults", {}).get("target", {}).get(element, [])
     if not default_targets:
         # Fallback to global defaults
-        tenants_file = os.getenv("LP_TENANTS_FILE", "~/.config/lp_importer/tenants.yml")
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_path = os.path.join(script_dir, '.env')
+    
+        load_dotenv(env_path)
+        
+        
+        tenants_file = os.getenv("LP_TENANTS_FILE", "tenants.yaml")
         logging.info(f"Tenant file path: {tenants_file}")
         config = load_tenants_file(tenants_file)
         default_targets = config.get("defaults", {}).get("target", {}).get(element, [])

@@ -41,6 +41,7 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
         Tuple containing client, tenant file, tenant name, pool UUID, nodes, and XLSX path.
     """
     logger.debug(f"opening env file: {env_path}")
+
     api_token = os.environ.get("LP_DIRECTOR_API_TOKEN", "")
     logger.debug("Loaded API token: %s (length=%d)", "*" * min(len(api_token), 8) if api_token else "None", len(api_token))  # Log token masked with length
     if not api_token:

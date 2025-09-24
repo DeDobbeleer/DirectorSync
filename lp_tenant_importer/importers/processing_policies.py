@@ -21,7 +21,7 @@ def import_processing_policies_for_nodes(
 
     Reads the 'ProcessingPolicy', 'EnrichmentPolicy', and 'RoutingPolicy' sheets from the XLSX file,
     maps source IDs to names, fetches target IDs via API, and performs CREATE/UPDATE/NOOP/SKIP actions.
-    Excel is the source of truth; SKIP if any dependency is missing.
+    Excel is the source of truth; SKIP if any dependency is missing. routing_policy never uses 'None' if required.
 
     Args:
         client: DirectorClient instance for API calls.
@@ -145,8 +145,8 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, None) if enrich_policy_src_id else None
-                if enrich_policy_src_id and not enrich_policy_name:
+                enrich_policy_dest_id = "None" if not enrich_policy_src_id else enrich_policies.get(enrich_policy_src_id, "None")
+                if enrich_policy_src_id and enrich_policy_dest_id == "None":
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -156,69 +156,52 @@ def import_processing_policies_for_nodes(
                         "routing_policy": None,
                         "action": "SKIP",
                         "result": "N/A",
-                        "error": "Invalid enrich_policy source ID: %s not found in mapping" % enrich_policy_src_id
-                    }
-                    rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
-                    continue
-                enrich_policy = enrich_policies.get(enrich_policy_name) if enrich_policy_name else None
-                if enrich_policy_name and not enrich_policy:
-                    row_result = {
-                        "siem": logpoint_id,
-                        "node": node.name,
-                        "name": policy_name,
-                        "norm_policy": norm_policy,
-                        "enrich_policy": None,
-                        "routing_policy": None,
-                        "action": "SKIP",
-                        "result": "N/A",
-                        "error": "Invalid enrich_policy: %s not found in target" % enrich_policy_name
+                        "error": "Invalid enrich_policy: %s not found in target" % enrich_policy_src_id
                     }
                     rows.append(row_result)
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                routing_policy_name = rp_mapping.get(routing_policy_src_id, None) if routing_policy_src_id else None
-                if routing_policy_src_id and not routing_policy_name:
+                if not routing_policy_src_id:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
                         "name": policy_name,
                         "norm_policy": norm_policy,
-                        "enrich_policy": enrich_policy,
+                        "enrich_policy": enrich_policy_dest_id,
                         "routing_policy": None,
                         "action": "SKIP",
                         "result": "N/A",
-                        "error": "Invalid routing_policy source ID: %s not found in mapping" % routing_policy_src_id
-                    }
-                    rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
-                    continue
-                routing_policy = routing_policies.get(routing_policy_name) if routing_policy_name else None
-                if routing_policy_name and not routing_policy:
-                    row_result = {
-                        "siem": logpoint_id,
-                        "node": node.name,
-                        "name": policy_name,
-                        "norm_policy": norm_policy,
-                        "enrich_policy": enrich_policy,
-                        "routing_policy": None,
-                        "action": "SKIP",
-                        "result": "N/A",
-                        "error": "Invalid routing_policy: %s not found in target" % routing_policy_name
+                        "error": "Missing mandatory routing_policy"
                     }
                     rows.append(row_result)
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                # Build payload without active, with mandatory routing_policy
+                routing_policy_dest_id = routing_policies.get(routing_policy_src_id)
+                if not routing_policy_dest_id:
+                    row_result = {
+                        "siem": logpoint_id,
+                        "node": node.name,
+                        "name": policy_name,
+                        "norm_policy": norm_policy,
+                        "enrich_policy": enrich_policy_dest_id,
+                        "routing_policy": None,
+                        "action": "SKIP",
+                        "result": "N/A",
+                        "error": "Invalid routing_policy: %s not found in target" % routing_policy_src_id
+                    }
+                    rows.append(row_result)
+                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    continue
+
+                # Build payload without active
                 policy_data = {
                     "name": policy_name,
                     "norm_policy": norm_policy,
-                    "routing_policy": routing_policy
+                    "enrich_policy": enrich_policy_dest_id,
+                    "routing_policy": routing_policy_dest_id
                 }
-                if enrich_policy_src_id:
-                    policy_data["enrich_policy"] = enrich_policy if enrich_policy else "None"
 
                 logger.debug("Processing policy %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
                              policy_name, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
@@ -278,13 +261,13 @@ def _process_policy_action(
                 return "CREATE", "Success", ""
             else:
                 error = api_result.get("error", json.dumps(api_result))
-                logger.error("CREATE failed for %s: %s", policy["name"], error)
+                logger.error("CREATE failed for %s: Response error: %s", policy["name"], error)
                 return "CREATE", "Fail", error
         except Exception as e:
-            logger.error("Exception during CREATE %s: %s", policy["name"], e)
+            logger.error("Exception during CREATE %s: %s", policy["name"], str(e))
             return "CREATE", "Fail", str(e)
 
-    # Compare if existing, ignoring active since not modifiable via API
+    # Compare if existing, ignoring active
     existing_norm = existing_policy.get("norm_policy", "")
     existing_enrich = existing_policy.get("enrich_policy", "")
     existing_routing = existing_policy.get("routing_policy", "")
@@ -294,18 +277,18 @@ def _process_policy_action(
         existing_routing == policy["routing_policy"]):
         logger.info("NOOP: Processing policy %s unchanged", policy["name"])
         return "NOOP", "N/A", ""
-
-    # UPDATE
-    policy_id = existing_policy.get("id")
-    logger.info("Updating processing policy %s (ID: %s)", policy["name"], policy_id)
-    try:
-        api_result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
-        if api_result.get("status") == "success":
-            return "UPDATE", "Success", ""
-        else:
-            error = api_result.get("error", json.dumps(api_result))
-            logger.error("UPDATE failed for %s: %s", policy["name"], error)
-            return "UPDATE", "Fail", error
-    except Exception as e:
-        logger.error("Exception during UPDATE %s: %s", policy["name"], e)
-        return "UPDATE", "Fail", str(e)
+    else:
+        # UPDATE
+        policy_id = existing_policy.get("id")
+        logger.info("Updating processing policy %s (ID: %s)", policy["name"], policy_id)
+        try:
+            api_result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
+            if api_result.get("status") == "success":
+                return "UPDATE", "Success", ""
+            else:
+                error = api_result.get("error", json.dumps(api_result))
+                logger.error("UPDATE failed for %s: Response error: %s", policy["name"], error)
+                return "UPDATE", "Fail", error
+        except Exception as e:
+            logger.error("Exception during UPDATE %s: %s", policy["name"], str(e))
+            return "UPDATE", "Fail", str(e)

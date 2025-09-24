@@ -210,16 +210,23 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
+                # Build payload with "None" as string for optional fields
                 policy_data = {
                     "name": policy_name,
                     "active": active,
-                    "norm_policy": norm_policy,
-                    "enrich_policy": enrich_policy,
-                    "routing_policy": routing_policy
+                    "norm_policy": norm_policy
                 }
+                if enrich_policy is None and not enrich_policy_src_id:
+                    policy_data["enrich_policy"] = "None"
+                elif enrich_policy:
+                    policy_data["enrich_policy"] = enrich_policy
+                if routing_policy is None and not routing_policy_src_id:
+                    policy_data["routing_policy"] = "None"
+                elif routing_policy:
+                    policy_data["routing_policy"] = routing_policy
 
                 logger.debug("Processing policy %s: active=%s, norm_policy=%s, enrich_policy=%s, routing_policy=%s",
-                             policy_name, active, norm_policy, enrich_policy, routing_policy)
+                             policy_name, active, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
 
                 # Check existence and decide action
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data, existing_policies.get(policy_name))
@@ -228,8 +235,8 @@ def import_processing_policies_for_nodes(
                     "node": node.name,
                     "name": policy_name,
                     "norm_policy": norm_policy,
-                    "enrich_policy": enrich_policy,
-                    "routing_policy": routing_policy,
+                    "enrich_policy": policy_data.get("enrich_policy"),
+                    "routing_policy": policy_data.get("routing_policy"),
                     "action": action,
                     "result": result,
                     "error": error or (json.loads(api_result.get("error", "{}")) if api_result else "")

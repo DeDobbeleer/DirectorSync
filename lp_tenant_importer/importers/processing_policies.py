@@ -113,7 +113,8 @@ def import_processing_policies_for_nodes(
                 if not policy_name:
                     logger.warning("Skipping row with empty policy_name")
                     continue
-                #changed
+                #changed gad
+                print("hello")
                 active = bool(row.get("active", True))  # Default True
                 norm_policy = row.get("norm_policy", "").strip().replace("nan", "")
                 enrich_policy_src_id = row.get("enrich_policy", "").strip().replace("nan", "")

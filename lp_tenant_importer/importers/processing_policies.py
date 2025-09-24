@@ -2,6 +2,7 @@ import logging
 import pandas as pd
 from typing import Dict, List, Any, Tuple
 import json
+import requests
 
 from core.http import DirectorClient
 from core.nodes import Node
@@ -97,9 +98,17 @@ def import_processing_policies_for_nodes(
                 enrich_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy")
                 enrich_resp.raise_for_status()
                 enrich_policies = {p.get("name"): p.get("id") for p in enrich_resp.json() if p.get("name") and p.get("id")}
-                routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
-                routing_resp.raise_for_status()
-                routing_policies = {p.get("name"): p.get("id") for p in routing_resp.json() if p.get("name") and p.get("id")}
+                # Use correct endpoint /RoutingPolicies
+                try:
+                    routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
+                    routing_resp.raise_for_status()
+                    routing_policies = {p.get("policy_name"): p.get("id") for p in routing_resp.json() if p.get("policy_name") and p.get("id")}
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 400:
+                        logger.warning("Failed to fetch RoutingPolicies for %s: 400 Bad Request, proceeding without routing policies", logpoint_id)
+                        routing_policies = {}
+                    else:
+                        raise
             except Exception as e:
                 logger.error("Failed to fetch dependencies for %s: %s", logpoint_id, e)
                 any_error = True
@@ -113,8 +122,7 @@ def import_processing_policies_for_nodes(
                 if not policy_name:
                     logger.warning("Skipping row with empty policy_name")
                     continue
-                #changed gad
-                print("hello")
+
                 active = bool(row.get("active", True))  # Default True
                 norm_policy = row.get("norm_policy", "").strip().replace("nan", "")
                 enrich_policy_src_id = row.get("enrich_policy", "").strip().replace("nan", "")

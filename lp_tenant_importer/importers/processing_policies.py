@@ -46,9 +46,19 @@ def import_processing_policies_for_nodes(
         logger.error("Failed to load sheets: %s", e)
         return [], True
 
+    # Validate column names
+    required_ep_columns = ["policy_id", "policy_name"]
+    required_rp_columns = ["policy_id", "policy_name"]
+    if not all(col in ep_df.columns for col in required_ep_columns):
+        logger.error("Missing required columns in EnrichmentPolicy sheet: %s", required_ep_columns)
+        return [], True
+    if not all(col in rp_df.columns for col in required_rp_columns):
+        logger.error("Missing required columns in RoutingPolicy sheet: %s", required_rp_columns)
+        return [], True
+
     # Build source ID to name mappings
-    ep_mapping = dict(zip(ep_df["id"], ep_df["name"]))
-    rp_mapping = dict(zip(rp_df["id"], rp_df["name"]))
+    ep_mapping = dict(zip(ep_df["policy_id"], ep_df["policy_name"]))
+    rp_mapping = dict(zip(rp_df["policy_id"], rp_df["policy_name"]))
 
     # Process per node
     for target_type in targets:
@@ -106,8 +116,8 @@ def import_processing_policies_for_nodes(
                 routing_policy_src_id = row.get("routing_policy", "").strip().replace("nan", "")
 
                 # Map source IDs to names
-                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, "") if enrich_policy_src_id else "None"
-                routing_policy_name = rp_mapping.get(routing_policy_src_id, "") if routing_policy_src_id else "None"
+                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, "None") if enrich_policy_src_id else "None"
+                routing_policy_name = rp_mapping.get(routing_policy_src_id, "None") if routing_policy_src_id else "None"
 
                 # Map names to target IDs
                 enrich_policy = enrich_policies.get(enrich_policy_name, "None") if enrich_policy_name != "None" else "None"

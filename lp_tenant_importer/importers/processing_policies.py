@@ -291,6 +291,7 @@ def _process_policy_action(
                 logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["policy_name"], logpoint_id, error, result)
                 return "CREATE", "Fail", error
         except Exception as e:
+            logger.debug(f"Defective payload: {policy}")
             logger.error("Exception during CREATE %s on %s: %s", policy["policy_name"], logpoint_id, str(e))
             return "CREATE", "Fail", str(e)
 

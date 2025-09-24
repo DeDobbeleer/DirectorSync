@@ -37,9 +37,9 @@ def import_processing_policies_for_nodes(
     rows = []
     any_error = False
 
-    # Load all relevant sheets
+    # Load all relevant sheets and handle NaN
     try:
-        pp_df = pd.read_excel(xlsx_path, sheet_name="ProcessingPolicy", skiprows=0)
+        pp_df = pd.read_excel(xlsx_path, sheet_name="ProcessingPolicy", skiprows=0).fillna("")
         ep_df = pd.read_excel(xlsx_path, sheet_name="EnrichmentPolicy", skiprows=0)
         rp_df = pd.read_excel(xlsx_path, sheet_name="RoutingPolicy", skiprows=0)
         logger.debug("Loaded ProcessingPolicy, EnrichmentPolicy, and RoutingPolicy sheets")
@@ -98,7 +98,6 @@ def import_processing_policies_for_nodes(
                 enrich_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy")
                 enrich_resp.raise_for_status()
                 enrich_policies = {p.get("name"): p.get("id") for p in enrich_resp.json() if p.get("name") and p.get("id")}
-                # Use correct endpoint /RoutingPolicies
                 try:
                     routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
                     routing_resp.raise_for_status()
@@ -123,10 +122,10 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping row with empty policy_name")
                     continue
 
-                active = bool(row.get("active", True))  # Default True
-                norm_policy = row.get("norm_policy", "").strip().replace("nan", "")
-                enrich_policy_src_id = row.get("enrich_policy", "").strip().replace("nan", "")
-                routing_policy_src_id = row.get("routing_policy", "").strip().replace("nan", "")
+                active = bool(row.get("active", "").strip() or True)  # Default True, handle empty string
+                norm_policy = row.get("norm_policy", "").strip()
+                enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
+                routing_policy_src_id = str(row.get("routing_policy", "")).strip()
 
                 # Map source IDs to names
                 enrich_policy_name = ep_mapping.get(enrich_policy_src_id, "None") if enrich_policy_src_id else "None"

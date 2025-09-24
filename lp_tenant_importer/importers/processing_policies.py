@@ -223,7 +223,7 @@ def import_processing_policies_for_nodes(
 
                 # Build payload without active, using destination IDs
                 policy_data = {
-                    "name": policy_name,
+                    "policy_name": policy_name,
                     "norm_policy": norm_policy,
                     "enrich_policy": enrich_policy_dest_id,
                     "routing_policy": routing_policy_dest_id

@@ -275,12 +275,12 @@ def _process_policy_action(
         Tuple of (action, result, error).
     """
     if dry_run:
-        logger.info("DRY RUN: Would process %s on %s (CREATE/UPDATE/NOOP/SKIP)", policy["name"], logpoint_id)
+        logger.info("DRY RUN: Would process %s on %s (CREATE/UPDATE/NOOP/SKIP)", policy["policy_name"], logpoint_id)
         return "DRY_RUN", "N/A", ""
 
     if not existing_policy:
         # CREATE
-        logger.info("Creating processing policy %s on %s", policy["name"], logpoint_id)
+        logger.info("Creating processing policy %s on %s", policy["policy_name"], logpoint_id)
         try:
             result = client.create_processing_policy(pool_uuid, logpoint_id, policy)
             if result.get("status") == "success":
@@ -288,10 +288,10 @@ def _process_policy_action(
             else:
                 error = result.get("error", json.dumps(result))
                 logger.debug(f"Defective payload: {policy}")
-                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["policy_name"], logpoint_id, error, result)
                 return "CREATE", "Fail", error
         except Exception as e:
-            logger.error("Exception during CREATE %s on %s: %s", policy["name"], logpoint_id, str(e))
+            logger.error("Exception during CREATE %s on %s: %s", policy["policy_name"], logpoint_id, str(e))
             return "CREATE", "Fail", str(e)
 
     # Compare if existing, ignoring active
@@ -302,20 +302,20 @@ def _process_policy_action(
     if (existing_norm == policy["norm_policy"] and
         existing_enrich == policy["enrich_policy"] and
         existing_routing == policy["routing_policy"]):
-        logger.info("NOOP: Processing policy %s on %s unchanged", policy["name"], logpoint_id)
+        logger.info("NOOP: Processing policy %s on %s unchanged", policy["policy_name"], logpoint_id)
         return "NOOP", "N/A", ""
     else:
         # UPDATE
         policy_id = existing_policy.get("id")
-        logger.info("Updating processing policy %s (ID: %s) on %s", policy["name"], policy_id, logpoint_id)
+        logger.info("Updating processing policy %s (ID: %s) on %s", policy["policy_name"], policy_id, logpoint_id)
         try:
             result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
             if result.get("status") == "success":
                 return "UPDATE", "Success", ""
             else:
                 error = result.get("error", json.dumps(result))
-                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["policy_name"], logpoint_id, error, result)
                 return "UPDATE", "Fail", error
         except Exception as e:
-            logger.error("Exception during UPDATE %s on %s: %s", policy["name"], logpoint_id, str(e))
+            logger.error("Exception during UPDATE %s on %s: %s", policy["policy_name"], logpoint_id, str(e))
             return "UPDATE", "Fail", str(e)

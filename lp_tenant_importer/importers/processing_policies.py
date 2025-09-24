@@ -248,7 +248,6 @@ def _process_policy_action(
         logger.info("NOOP: Processing policy %s unchanged", policy["name"])
         return "NOOP", "N/A", ""
 
-
     # UPDATE
     policy_id = existing_policy.get("id")
     logger.info("Updating processing policy %s (ID: %s)", policy["name"], policy_id)

@@ -21,6 +21,7 @@ def import_processing_policies_for_nodes(
 
     Reads the 'ProcessingPolicy', 'EnrichmentPolicy', and 'RoutingPolicy' sheets from the XLSX file,
     maps source IDs to names, fetches target IDs via API, and performs CREATE/UPDATE/NOOP/SKIP actions.
+    Excel is the source of truth; SKIP if any dependency is missing.
 
     Args:
         client: DirectorClient instance for API calls.
@@ -104,8 +105,7 @@ def import_processing_policies_for_nodes(
                     routing_policies = {p.get("policy_name"): p.get("id") for p in routing_resp.json() if p.get("policy_name") and p.get("id")}
                 except requests.exceptions.HTTPError as e:
                     if e.response.status_code == 400:
-                        logger.warning("Failed to fetch RoutingPolicies for %s: 400 Bad Request, proceeding without routing policies", logpoint_id)
-                        routing_policies = {}
+                        logger.error("Failed to fetch RoutingPolicies for %s: 400 Bad Request, skipping dependent policies", logpoint_id)
                     else:
                         raise
             except Exception as e:
@@ -127,49 +127,88 @@ def import_processing_policies_for_nodes(
                 enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
                 routing_policy_src_id = str(row.get("routing_policy", "")).strip()
 
-                # Map source IDs to names
-                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, "None") if enrich_policy_src_id else "None"
-                routing_policy_name = rp_mapping.get(routing_policy_src_id, "None") if routing_policy_src_id else "None"
+                # Validate all dependencies from Excel
+                if norm_policy and norm_policy not in norm_policies:
+                    row_result = {
+                        "siem": logpoint_id,
+                        "node": node.name,
+                        "name": policy_name,
+                        "norm_policy": norm_policy,
+                        "enrich_policy": None,
+                        "routing_policy": None,
+                        "action": "SKIP",
+                        "result": "N/A",
+                        "error": "Invalid norm_policy: %s not found" % norm_policy
+                    }
+                    rows.append(row_result)
+                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    continue
 
-                # Map names to target IDs
-                enrich_policy = enrich_policies.get(enrich_policy_name, "None") if enrich_policy_name != "None" else "None"
-                routing_policy = routing_policies.get(routing_policy_name, "None") if routing_policy_name != "None" else "None"
+                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, None) if enrich_policy_src_id else None
+                if enrich_policy_src_id and not enrich_policy_name:
+                    row_result = {
+                        "siem": logpoint_id,
+                        "node": node.name,
+                        "name": policy_name,
+                        "norm_policy": norm_policy,
+                        "enrich_policy": None,
+                        "routing_policy": None,
+                        "action": "SKIP",
+                        "result": "N/A",
+                        "error": "Invalid enrich_policy source ID: %s not found in mapping" % enrich_policy_src_id
+                    }
+                    rows.append(row_result)
+                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    continue
+                enrich_policy = enrich_policies.get(enrich_policy_name) if enrich_policy_name else None
+                if enrich_policy_name and not enrich_policy:
+                    row_result = {
+                        "siem": logpoint_id,
+                        "node": node.name,
+                        "name": policy_name,
+                        "norm_policy": norm_policy,
+                        "enrich_policy": None,
+                        "routing_policy": None,
+                        "action": "SKIP",
+                        "result": "N/A",
+                        "error": "Invalid enrich_policy: %s not found in target" % enrich_policy_name
+                    }
+                    rows.append(row_result)
+                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    continue
 
-                # Validation: Critical fields
-                if not norm_policy:
+                routing_policy_name = rp_mapping.get(routing_policy_src_id, None) if routing_policy_src_id else None
+                if routing_policy_src_id and not routing_policy_name:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
                         "name": policy_name,
                         "norm_policy": norm_policy,
                         "enrich_policy": enrich_policy,
-                        "routing_policy": routing_policy,
+                        "routing_policy": None,
                         "action": "SKIP",
                         "result": "N/A",
-                        "error": "Missing norm_policy"
+                        "error": "Invalid routing_policy source ID: %s not found in mapping" % routing_policy_src_id
                     }
                     rows.append(row_result)
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
-                if norm_policy not in norm_policies:
+                routing_policy = routing_policies.get(routing_policy_name) if routing_policy_name else None
+                if routing_policy_name and not routing_policy:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
                         "name": policy_name,
                         "norm_policy": norm_policy,
                         "enrich_policy": enrich_policy,
-                        "routing_policy": routing_policy,
+                        "routing_policy": None,
                         "action": "SKIP",
                         "result": "N/A",
-                        "error": "Invalid norm_policy"
+                        "error": "Invalid routing_policy: %s not found in target" % routing_policy_name
                     }
                     rows.append(row_result)
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
-                if enrich_policy_name and enrich_policy == "None":
-                    logger.warning("Invalid enrich_policy mapping for %s: %s", policy_name, enrich_policy_name)
-                if routing_policy_name and routing_policy == "None":
-                    logger.warning("Invalid routing_policy mapping for %s: %s", policy_name, routing_policy_name)
 
                 policy_data = {
                     "name": policy_name,
@@ -193,7 +232,7 @@ def import_processing_policies_for_nodes(
                     "routing_policy": routing_policy,
                     "action": action,
                     "result": result,
-                    "error": error
+                    "error": error or (json.loads(api_result.get("error", "{}")) if api_result else "")
                 }
                 rows.append(row_result)
 

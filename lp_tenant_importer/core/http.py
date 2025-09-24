@@ -472,7 +472,7 @@ class DirectorClient:
             response.raise_for_status()
             
             result = response.json()
-            logger.debug(f"Post response: {json.dumps(result, indent=2)}")
+            logger.info(f"Post response: {json.dumps(result, indent=2)}")
             if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
                 monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
                 logger.info("Monitoring job for create %s at %s", policy["name"], monitorapi)

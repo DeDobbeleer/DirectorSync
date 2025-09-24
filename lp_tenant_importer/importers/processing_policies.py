@@ -80,7 +80,7 @@ def import_processing_policies_for_nodes(
                 policies_data = resp.json()
                 logger.debug(f"Existing PP on {node.name} PoliciesData : {policies_data}")
                 if isinstance(policies_data, list):
-                    existing_policies = {p.get("name", "").strip(): p for p in policies_data if p.get("name")}
+                    existing_policies = {p.get("policy_name", "").strip(): p for p in policies_data if p.get("policy_name")}
                     logger.debug("Existing policies for %s: %d", logpoint_id, len(existing_policies))
                 else:
                     logger.warning("Unexpected response for policies on %s: %s", logpoint_id, policies_data)

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(script_dir, '.env')
-logger.debug(f"opening env file: {env_path}")
+
 load_dotenv(env_path)
 
 
@@ -40,6 +40,7 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     Returns:
         Tuple containing client, tenant file, tenant name, pool UUID, nodes, and XLSX path.
     """
+    logger.debug(f"opening env file: {env_path}")
     api_token = os.environ.get("LP_DIRECTOR_API_TOKEN", "")
     logger.debug("Loaded API token: %s (length=%d)", "*" * min(len(api_token), 8) if api_token else "None", len(api_token))  # Log token masked with length
     if not api_token:

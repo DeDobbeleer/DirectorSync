@@ -97,7 +97,7 @@ def import_processing_policies_for_nodes(
                 enrich_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy")
                 enrich_resp.raise_for_status()
                 enrich_policies = {p.get("name"): p.get("id") for p in enrich_resp.json() if p.get("name") and p.get("id")}
-                routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicy")
+                routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
                 routing_resp.raise_for_status()
                 routing_policies = {p.get("name"): p.get("id") for p in routing_resp.json() if p.get("name") and p.get("id")}
             except Exception as e:

@@ -20,7 +20,7 @@ def import_processing_policies_for_nodes(
     """Import processing policies for the specified nodes.
 
     Reads the 'ProcessingPolicy', 'EnrichmentPolicy', and 'RoutingPolicy' sheets from the XLSX file,
-    maps source IDs to names, fetches target IDs via API, and performs CREATE/UPDATE/NOOP/SKIP actions.
+    maps source IDs to names, fetches target IDs via API for each node, and performs CREATE/UPDATE/NOOP/SKIP actions.
     Excel is the source of truth; SKIP if any dependency is missing. routing_policy never uses 'None' if required.
 
     Args:
@@ -72,7 +72,7 @@ def import_processing_policies_for_nodes(
             logpoint_id = node.id
             logger.debug("Processing policies for node %s (%s)", node.name, logpoint_id)
 
-            # Fetch existing policies
+            # Fetch existing policies for the current node
             existing_policies = {}
             try:
                 resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy")
@@ -80,15 +80,15 @@ def import_processing_policies_for_nodes(
                 policies_data = resp.json()
                 if isinstance(policies_data, list):
                     existing_policies = {p.get("name", "").strip(): p for p in policies_data if p.get("name")}
-                    logger.debug("Existing policies: %d", len(existing_policies))
+                    logger.debug("Existing policies for %s: %d", logpoint_id, len(existing_policies))
                 else:
-                    logger.warning("Unexpected response for policies: %s", policies_data)
+                    logger.warning("Unexpected response for policies on %s: %s", logpoint_id, policies_data)
             except Exception as e:
                 logger.error("Failed to fetch existing policies for %s: %s", logpoint_id, e)
                 any_error = True
                 continue
 
-            # Fetch dependencies for the target node
+            # Fetch dependencies for the current node
             norm_policies = set()
             enrich_policies = {}
             routing_policies = {}
@@ -96,18 +96,18 @@ def import_processing_policies_for_nodes(
                 norm_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy")
                 norm_resp.raise_for_status()
                 norm_data = norm_resp.json()
-                logger.debug("NormalizationPolicy response: %s", norm_data)
+                logger.debug("NormalizationPolicy response for %s: %s", logpoint_id, norm_data)
                 norm_policies = {p.get("name") for p in norm_data if p.get("name")}
                 enrich_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy")
                 enrich_resp.raise_for_status()
                 enrich_data = enrich_resp.json()
-                logger.debug("EnrichmentPolicy response: %s", enrich_data)
+                logger.debug("EnrichmentPolicy response for %s: %s", logpoint_id, enrich_data)
                 enrich_policies = {p.get("policy_name"): p.get("id") for p in enrich_data if p.get("policy_name") and p.get("id")}
                 try:
                     routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
                     routing_resp.raise_for_status()
                     routing_data = routing_resp.json()
-                    logger.debug("RoutingPolicies response: %s", routing_data)
+                    logger.debug("RoutingPolicies response for %s: %s", logpoint_id, routing_data)
                     routing_policies = {p.get("policy_name"): p.get("id") for p in routing_data if p.get("policy_name") and p.get("id")}
                 except requests.exceptions.HTTPError as e:
                     if e.response.status_code == 400:
@@ -119,7 +119,7 @@ def import_processing_policies_for_nodes(
                 any_error = True
                 continue
 
-            # Process each processing policy row
+            # Process each processing policy row for the current node
             for _, row in pp_df.iterrows():
                 original_name = row.get("original_policy_name", "").strip()
                 cleaned_policy_name = row.get("cleaned_policy_name", original_name).strip()
@@ -148,7 +148,7 @@ def import_processing_policies_for_nodes(
                         "error": "Invalid norm_policy: %s not found" % norm_policy
                     }
                     rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
 
                 # Map enrich_policy
@@ -167,7 +167,7 @@ def import_processing_policies_for_nodes(
                         "error": "Invalid enrich_policy: %s not found in target" % enrich_policy_name
                     }
                     rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
 
                 # Map routing_policy (never None if required)
@@ -184,7 +184,7 @@ def import_processing_policies_for_nodes(
                         "error": "Missing mandatory routing_policy"
                     }
                     rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
 
                 routing_policy_name = rp_mapping.get(routing_policy_src_id, None)
@@ -201,7 +201,7 @@ def import_processing_policies_for_nodes(
                         "error": "Invalid routing_policy source ID: %s not found in mapping" % routing_policy_src_id
                     }
                     rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
                 routing_policy_dest_id = routing_policies.get(routing_policy_name)
                 if not routing_policy_dest_id:
@@ -217,7 +217,7 @@ def import_processing_policies_for_nodes(
                         "error": "Invalid routing_policy: %s not found in target" % routing_policy_name
                     }
                     rows.append(row_result)
-                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
 
                 # Build payload without active, using destination IDs
@@ -228,8 +228,8 @@ def import_processing_policies_for_nodes(
                     "routing_policy": routing_policy_dest_id
                 }
 
-                logger.debug("Processing policy %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
-                             policy_name, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
+                logger.debug("Processing policy %s on %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
+                             policy_name, logpoint_id, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
 
                 # Check existence and decide action
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data, existing_policies.get(policy_name))
@@ -242,7 +242,7 @@ def import_processing_policies_for_nodes(
                     "routing_policy": policy_data.get("routing_policy"),
                     "action": action,
                     "result": result,
-                    "error": error or (json.loads(result.get("error", "{}")) if result else "")
+                    "error": error or (json.loads(result.get("error", "{}")) if result and result.get("error") else "")
                 }
                 rows.append(row_result)
 
@@ -274,22 +274,22 @@ def _process_policy_action(
         Tuple of (action, result, error).
     """
     if dry_run:
-        logger.info("DRY RUN: Would process %s (CREATE/UPDATE/NOOP/SKIP)", policy["name"])
+        logger.info("DRY RUN: Would process %s on %s (CREATE/UPDATE/NOOP/SKIP)", policy["name"], logpoint_id)
         return "DRY_RUN", "N/A", ""
 
     if not existing_policy:
         # CREATE
-        logger.info("Creating processing policy %s", policy["name"])
+        logger.info("Creating processing policy %s on %s", policy["name"], logpoint_id)
         try:
-            api_result = client.create_processing_policy(pool_uuid, logpoint_id, policy)
-            if api_result.get("status") == "success":
+            result = client.create_processing_policy(pool_uuid, logpoint_id, policy)
+            if result.get("status") == "success":
                 return "CREATE", "Success", ""
             else:
-                error = api_result.get("error", json.dumps(api_result))
-                logger.error("CREATE failed for %s: Response error: %s", policy["name"], error)
+                error = result.get("error", json.dumps(result))
+                logger.error("CREATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
                 return "CREATE", "Fail", error
         except Exception as e:
-            logger.error("Exception during CREATE %s: %s", policy["name"], str(e))
+            logger.error("Exception during CREATE %s on %s: %s", policy["name"], logpoint_id, str(e))
             return "CREATE", "Fail", str(e)
 
     # Compare if existing, ignoring active
@@ -300,20 +300,20 @@ def _process_policy_action(
     if (existing_norm == policy["norm_policy"] and
         existing_enrich == policy["enrich_policy"] and
         existing_routing == policy["routing_policy"]):
-        logger.info("NOOP: Processing policy %s unchanged", policy["name"])
+        logger.info("NOOP: Processing policy %s on %s unchanged", policy["name"], logpoint_id)
         return "NOOP", "N/A", ""
     else:
         # UPDATE
         policy_id = existing_policy.get("id")
-        logger.info("Updating processing policy %s (ID: %s)", policy["name"], policy_id)
+        logger.info("Updating processing policy %s (ID: %s) on %s", policy["name"], policy_id, logpoint_id)
         try:
-            api_result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
-            if api_result.get("status") == "success":
+            result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
+            if result.get("status") == "success":
                 return "UPDATE", "Success", ""
             else:
-                error = api_result.get("error", json.dumps(api_result))
-                logger.error("UPDATE failed for %s: Response error: %s", policy["name"], error)
+                error = result.get("error", json.dumps(result))
+                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
                 return "UPDATE", "Fail", error
         except Exception as e:
-            logger.error("Exception during UPDATE %s: %s", policy["name"], str(e))
+            logger.error("Exception during UPDATE %s on %s: %s", policy["name"], logpoint_id, str(e))
             return "UPDATE", "Fail", str(e)

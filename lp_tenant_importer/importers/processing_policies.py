@@ -129,8 +129,6 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping row with empty policy_name")
                     continue
 
-                # active is kept internally but not sent to API
-                active = bool(row.get("active", True))  # Default True, direct bool conversion
                 norm_policy = row.get("norm_policy", "").strip()
                 enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
                 routing_policy_src_id = str(row.get("routing_policy_id", "")).strip()
@@ -295,29 +293,29 @@ def _process_policy_action(
             logger.debug(f"Defective payload: {policy}")
             logger.error("Exception during CREATE %s on %s: %s", policy["name"], logpoint_id, str(e))
             return "CREATE", "Fail", str(e)
-
-    # Compare if existing, ignoring active
-    existing_norm = existing_policy.get("norm_policy", "")
-    existing_enrich = existing_policy.get("enrich_policy", "")
-    existing_routing = existing_policy.get("routing_policy", "")
-
-    if (existing_norm == policy["norm_policy"] and
-        existing_enrich == policy["enrich_policy"] and
-        existing_routing == policy["routing_policy"]):
-        logger.info("NOOP: Processing policy %s on %s unchanged", policy["name"], logpoint_id)
-        return "NOOP", "N/A", ""
     else:
-        # UPDATE
-        policy_id = existing_policy.get("id")
-        logger.info("Updating processing policy %s (ID: %s) on %s", policy["name"], policy_id, logpoint_id)
-        try:
-            result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
-            if result.get("status") == "success":
-                return "UPDATE", "Success", ""
-            else:
-                error = result.get("error", json.dumps(result))
-                logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
-                return "UPDATE", "Fail", error
-        except Exception as e:
-            logger.error("Exception during UPDATE %s on %s: %s", policy["name"], logpoint_id, str(e))
-            return "UPDATE", "Fail", str(e)
+        # Compare if existing, ignoring active
+        existing_norm = existing_policy.get("norm_policy", "")
+        existing_enrich = existing_policy.get("enrich_policy", "")
+        existing_routing = existing_policy.get("routing_policy", "")
+
+        if (existing_norm == policy["norm_policy"] and
+            existing_enrich == policy["enrich_policy"] and
+            existing_routing == policy["routing_policy"]):
+            logger.info("NOOP: Processing policy %s on %s unchanged", policy["name"], logpoint_id)
+            return "NOOP", "N/A", ""
+        else:
+            # UPDATE
+            policy_id = existing_policy.get("id")
+            logger.info("Updating processing policy %s (ID: %s) on %s", policy["name"], policy_id, logpoint_id)
+            try:
+                result = client.update_processing_policy(pool_uuid, logpoint_id, policy_id, policy)
+                if result.get("status") == "success":
+                    return "UPDATE", "Success", ""
+                else:
+                    error = result.get("error", json.dumps(result))
+                    logger.error("UPDATE failed for %s on %s: Response error: %s, Full response: %s", policy["name"], logpoint_id, error, result)
+                    return "UPDATE", "Fail", error
+            except Exception as e:
+                logger.error("Exception during UPDATE %s on %s: %s", policy["name"], logpoint_id, str(e))
+                return "UPDATE", "Fail", str(e)

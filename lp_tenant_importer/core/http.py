@@ -463,7 +463,6 @@ class DirectorClient:
                 "norm_policy": policy.get("norm_policy", ""),
                 "enrich_policy": policy.get("enrich_policy", "None"),
                 "routing_policy": policy.get("routing_policy", "None"),
-                "active": True,
                 "tid": ""
             }
         }
@@ -496,7 +495,6 @@ class DirectorClient:
                 "norm_policy": policy.get("norm_policy", ""),
                 "enrich_policy": policy.get("enrich_policy", "None"),
                 "routing_policy": policy.get("routing_policy", "None"),
-                "active": True,
                 "tid": ""
             }
         }

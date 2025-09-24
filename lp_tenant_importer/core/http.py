@@ -460,7 +460,6 @@ class DirectorClient:
         payload = {
             "data": {
                 "name": policy["name"],
-                "active": policy.get("active", True),
                 "norm_policy": policy.get("norm_policy", ""),
                 "enrich_policy": policy.get("enrich_policy", "None"),
                 "routing_policy": policy.get("routing_policy", "None")

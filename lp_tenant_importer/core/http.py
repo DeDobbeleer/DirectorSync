@@ -495,7 +495,7 @@ class DirectorClient:
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{policy_id}"
         payload = {
             "data": {
-                "id": policy.get("id", ""),
+                "id": policy_id,
                 "norm_policy": policy.get("norm_policy", ""),
                 "enrich_policy": policy.get("enrich_policy", "None"),
                 "routing_policy": policy.get("routing_policy", "None"),

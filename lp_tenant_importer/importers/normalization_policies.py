@@ -1,5 +1,3 @@
-# importers/normalization_policies.py
-
 import logging
 import pandas as pd
 from typing import Dict, List, Any, Tuple
@@ -48,31 +46,43 @@ def import_normalization_policies_for_nodes(
         return [], True
 
     # Fetch available packages and compiled normalizers once per node (assuming same across nodes)
-    available_packages = {}  # name -> id mapping
-    available_compiled = set()  # set of names
     for target_type in targets:
         for node in nodes.get(target_type, []):
             logpoint_id = node.id
             logger.debug("Fetching available packages/normalizers for node %s (%s)", node.name, logpoint_id)
 
+            available_packages = {}  # name -> id mapping
+            available_compiled = set()  # set of names
+
             try:
                 # Get normalization packages
-                packages_resp = client.get(f"/configapi/{pool_uuid}/{logpoint_id}/NormalizationPackage")
-                packages_data = packages_resp.json() if packages_resp.ok else []
+                packages_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/NormalizationPackage")
+                packages_resp.raise_for_status()
+                packages_data = packages_resp.json()
                 if isinstance(packages_data, list):
-                    available_packages = {pkg.get("name", ""): pkg.get("id", "") for pkg in packages_data}
+                    available_packages = {pkg.get("name", ""): pkg.get("id", "") for pkg in packages_data if pkg.get("id") and pkg.get("name")}
                     logger.debug("Available packages: %d", len(available_packages))
-
-                # Get compiled normalizers
-                compiled_resp = client.get(f"/configapi/{pool_uuid}/{logpoint_id}/NormalizationPackage/CompiledNormalizers")
-                compiled_data = compiled_resp.json() if compiled_resp.ok else []
-                if isinstance(compiled_data, list):
-                    available_compiled = {c.get("name", "") for c in compiled_data}
-                    logger.debug("Available compiled normalizers: %d", len(available_compiled))
+                else:
+                    logger.warning("Unexpected response for packages: %s", packages_data)
             except Exception as e:
-                logger.error("Failed to fetch available packages/normalizers for %s: %s", logpoint_id, e)
+                logger.error("Failed to fetch available packages for %s: %s", logpoint_id, e)
                 any_error = True
-                continue  # Skip this node
+                continue
+
+            try:
+                # Get compiled normalizers
+                compiled_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/NormalizationPackage/CompiledNormalizers")
+                compiled_resp.raise_for_status()
+                compiled_data = compiled_resp.json()
+                if isinstance(compiled_data, list):
+                    available_compiled = {c.get("name", "") for c in compiled_data if c.get("name")}
+                    logger.debug("Available compiled normalizers: %d", len(available_compiled))
+                else:
+                    logger.warning("Unexpected response for compiled normalizers: %s", compiled_data)
+            except Exception as e:
+                logger.error("Failed to fetch available compiled normalizers for %s: %s", logpoint_id, e)
+                any_error = True
+                continue
 
             # Process each policy row
             for _, row in df.iterrows():
@@ -81,9 +91,9 @@ def import_normalization_policies_for_nodes(
                     logger.warning("Skipping row with empty policy_name")
                     continue
 
-                # Parse multi-values
-                norm_packages_str = str(row.get("normalization_packages", "")).strip()
-                compiled_str = str(row.get("compiled_normalizer", "")).strip()
+                # Parse multi-values, handle 'nan'
+                norm_packages_str = str(row.get("normalization_packages", "")).strip().replace("nan", "").strip()
+                compiled_str = str(row.get("compiled_normalizer", "")).strip().replace("nan", "").strip()
                 norm_packages = [p.strip() for p in norm_packages_str.split("|") if p.strip()] if norm_packages_str else []
                 compiled_normalizers = [c.strip() for c in compiled_str.split("|") if c.strip()] if compiled_str else []
 
@@ -110,7 +120,7 @@ def import_normalization_policies_for_nodes(
                 missing_packages = [p for p in norm_packages if p not in available_packages]
                 missing_compiled = [c for c in compiled_normalizers if c not in available_compiled]
                 if missing_packages or missing_compiled:
-                    error_msg = f"Missing packages: {missing_packages}; Missing compiled: {missing_compiled}"
+                    error_msg = f"Missing packages: {', '.join(missing_packages)}; Missing compiled: {', '.join(missing_compiled)}"
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -130,11 +140,11 @@ def import_normalization_policies_for_nodes(
 
                 policy_data = {
                     "name": policy_name,
-                    "normalization_packages": package_ids,  # List of IDs
-                    "compiled_normalizer": compiled_normalizers  # List of names
+                    "normalization_packages": package_ids,  # List of IDs for payload
+                    "compiled_normalizer": compiled_normalizers  # List of names for payload
                 }
 
-                logger.debug("Processing policy %s: packages=%s, compiled=%s", policy_name, norm_packages, compiled_normalizers)
+                logger.debug("Processing policy %s: packages=%s (IDs=%s), compiled=%s", policy_name, norm_packages, package_ids, compiled_normalizers)
 
                 # Check existence and decide action
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data)
@@ -181,10 +191,12 @@ def _process_policy_action(
 
     # Fetch existing policies
     try:
-        resp = client.get(f"/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy")
-        existing_policies = resp.json() if resp.ok else []
+        resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy")
+        resp.raise_for_status()
+        existing_policies = resp.json()
         if not isinstance(existing_policies, list):
             existing_policies = []
+        logger.debug("Fetched %d existing normalization policies", len(existing_policies))
     except Exception as e:
         logger.error("Failed to fetch existing policies: %s", e)
         return "SKIP", "N/A", "Failed to fetch existing policies"
@@ -199,17 +211,17 @@ def _process_policy_action(
             if api_result.get("status") == "success":
                 return "CREATE", "Success", ""
             else:
-                error = api_result.get("error", "Unknown error")
-                logger.error("CREATE failed for %s: %s", policy["name"], json.dumps(api_result, indent=2))
+                error = api_result.get("error", json.dumps(api_result))
+                logger.error("CREATE failed for %s: %s", policy["name"], error)
                 return "CREATE", "Fail", error
         except Exception as e:
             logger.error("Exception during CREATE %s: %s", policy["name"], e)
             return "CREATE", "Fail", str(e)
 
     # Existing: Compare
-    existing_packages = set(existing.get("normalization_packages", []))  # Assume list of IDs
+    existing_packages = set(existing.get("normalization_packages", []))  # list of IDs str
     existing_compiled_str = existing.get("compiled_normalizer", "")
-    existing_compiled = set(existing_compiled_str.split(",") if existing_compiled_str else []) if isinstance(existing_compiled_str, str) else set()
+    existing_compiled = set([c.strip() for c in existing_compiled_str.split(",") if c.strip()]) if existing_compiled_str else set()
 
     current_packages = set(policy["normalization_packages"])
     current_compiled = set(policy["compiled_normalizer"])
@@ -226,8 +238,8 @@ def _process_policy_action(
         if api_result.get("status") == "success":
             return "UPDATE", "Success", ""
         else:
-            error = api_result.get("error", "Unknown error")
-            logger.error("UPDATE failed for %s: %s", policy["name"], json.dumps(api_result, indent=2))
+            error = api_result.get("error", json.dumps(api_result))
+            logger.error("UPDATE failed for %s: %s", policy["name"], error)
             return "UPDATE", "Fail", error
     except Exception as e:
         logger.error("Exception during UPDATE %s: %s", policy["name"], e)

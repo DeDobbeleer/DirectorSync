@@ -30,6 +30,18 @@ class DirectorClient:
         self.session.headers.update({"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"})
         logger.debug("Headers set: %s", self.session.headers)
 
+    def get(self, url: str, **kwargs) -> requests.Response:
+        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
+        return self.session.get(full_url, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
+
+    def post(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
+        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
+        return self.session.post(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
+
+    def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
+        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
+        return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
+
     def check_storage_paths(self, pool_uuid: str, logpoint_id: str, paths: List[str]) -> List[str]:
         """Check which storage paths exist on the SIEM.
 
@@ -316,21 +328,6 @@ class DirectorClient:
             logger.error("Failed to update routing policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
             raise
     
-    def get(self, url: str, **kwargs) -> requests.Response:
-        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
-        return self.session.get(full_url, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
-
-    def post(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
-        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
-        return self.session.post(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
-
-    def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
-        full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
-        return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
-  
-    
-# Additions to core/http.py (append to the end of the class DirectorClient)
-
     def get_existing_normalization_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
         """Fetch existing normalization policies from the SIEM.
 
@@ -360,10 +357,10 @@ class DirectorClient:
         Args:
             pool_uuid: Tenant pool UUID.
             logpoint_id: SIEM identifier.
-            policy: Policy dictionary with name, normalization_packages (list of IDs), compiled_normalizer (list of names).
+            policy: Policy dictionary with name, normalization_packages (list of IDs str), compiled_normalizer (list of names str).
 
         Returns:
-            Response dictionary with monitorapi and status.
+            Dict with status 'success' or 'failed', error if failed.
         """
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy"
         payload = {
@@ -379,22 +376,24 @@ class DirectorClient:
             response.raise_for_status()
             logger.debug("Raw response from %s: %s", url, response.text)
             result = response.json()
-            # Extract monitorapi from message if status is Success
-            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
-                result["monitorapi"] = result["message"]
-            if result.get("monitorapi"):
-                logger.info("Monitoring job for create %s at %s", policy["name"], result["monitorapi"])
-                job_status = self.monitor_job(result["monitorapi"])
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                # Add leading / for URL
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for create %s at %s", policy["name"], monitorapi)
+                job_status = self.monitor_job(monitorapi)
                 if job_status.get("success"):
                     logger.info("Normalization policy %s created successfully", policy["name"])
-                    return {"monitorapi": result["monitorapi"], "status": "success"}
+                    return {"status": "success"}
                 else:
-                    logger.error("Create failed for %s: %s", policy["name"], json.dumps(job_status, indent=2))
-                    return {"monitorapi": result["monitorapi"], "status": "failed", "error": job_status.get("error")}
-            return result
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Create job failed for %s: %s", policy["name"], error)
+                    return {"status": "failed", "error": error}
+            else:
+                logger.warning("Unexpected initial response for create %s: %s", policy["name"], json.dumps(result, indent=2))
+                return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:
             logger.error("Failed to create normalization policy %s: %s (Response: %s)", policy["name"], str(e), getattr(e.response, 'text', 'No response'))
-            raise
+            return {"status": "failed", "error": str(e)}
 
     def update_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
         """Update an existing normalization policy (async).
@@ -403,10 +402,10 @@ class DirectorClient:
             pool_uuid: Tenant pool UUID.
             logpoint_id: SIEM identifier.
             policy_id: Policy ID.
-            policy: Updated policy dictionary with normalization_packages (list of IDs), compiled_normalizer (list of names).
+            policy: Updated policy dictionary with normalization_packages (list of IDs str), compiled_normalizer (list of names str).
 
         Returns:
-            Response dictionary with monitorapi and status.
+            Dict with status 'success' or 'failed', error if failed.
         """
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy/{policy_id}"
         payload = {
@@ -421,22 +420,21 @@ class DirectorClient:
             response.raise_for_status()
             logger.debug("Raw response from %s: %s", url, response.text)
             result = response.json()
-            # Extract monitorapi from message if status is Success
-            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
-                result["monitorapi"] = result["message"]
-            if result.get("monitorapi"):
-                logger.info("Monitoring job for update %s at %s", policy_id, result["monitorapi"])
-                job_status = self.monitor_job(result["monitorapi"])
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+                # Add leading / for URL
+                monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+                logger.info("Monitoring job for update %s at %s", policy_id, monitorapi)
+                job_status = self.monitor_job(monitorapi)
                 if job_status.get("success"):
                     logger.info("Normalization policy %s updated successfully", policy_id)
-                    return {"monitorapi": result["monitorapi"], "status": "success"}
+                    return {"status": "success"}
                 else:
-                    logger.error("Update failed for %s: %s", policy_id, json.dumps(job_status, indent=2))
-                    return {"monitorapi": result["monitorapi"], "status": "failed", "error": job_status.get("error")}
-            return result
+                    error = json.dumps(job_status, indent=2)
+                    logger.error("Update job failed for %s: %s", policy_id, error)
+                    return {"status": "failed", "error": error}
+            else:
+                logger.warning("Unexpected initial response for update %s: %s", policy_id, json.dumps(result, indent=2))
+                return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:
             logger.error("Failed to update normalization policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
-            raise
-
-
-  
+            return {"status": "failed", "error": str(e)}

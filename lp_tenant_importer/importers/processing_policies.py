@@ -95,14 +95,20 @@ def import_processing_policies_for_nodes(
             try:
                 norm_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy")
                 norm_resp.raise_for_status()
-                norm_policies = {p.get("name") for p in norm_resp.json() if p.get("name")}
+                norm_data = norm_resp.json()
+                logger.debug("NormalizationPolicy response: %s", norm_data)
+                norm_policies = {p.get("name") for p in norm_data if p.get("name")}
                 enrich_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy")
                 enrich_resp.raise_for_status()
-                enrich_policies = {p.get("policy_name"): p.get("id") for p in enrich_resp.json() if p.get("policy_name") and p.get("id")}
+                enrich_data = enrich_resp.json()
+                logger.debug("EnrichmentPolicy response: %s", enrich_data)
+                enrich_policies = {p.get("policy_name"): p.get("id") for p in enrich_data if p.get("policy_name") and p.get("id")}
                 try:
                     routing_resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/RoutingPolicies")
                     routing_resp.raise_for_status()
-                    routing_policies = {p.get("policy_name"): p.get("id") for p in routing_resp.json() if p.get("policy_name") and p.get("id")}
+                    routing_data = routing_resp.json()
+                    logger.debug("RoutingPolicies response: %s", routing_data)
+                    routing_policies = {p.get("policy_name"): p.get("id") for p in routing_data if p.get("policy_name") and p.get("id")}
                 except requests.exceptions.HTTPError as e:
                     if e.response.status_code == 400:
                         logger.error("Failed to fetch RoutingPolicies for %s: 400 Bad Request, skipping dependent policies", logpoint_id)
@@ -164,7 +170,7 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                # Map routing_policy
+                # Map routing_policy (never None if required)
                 if not routing_policy_src_id:
                     row_result = {
                         "siem": logpoint_id,
@@ -214,7 +220,7 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                # Build payload without active
+                # Build payload without active, using destination IDs
                 policy_data = {
                     "name": policy_name,
                     "norm_policy": norm_policy,
@@ -236,7 +242,7 @@ def import_processing_policies_for_nodes(
                     "routing_policy": policy_data.get("routing_policy"),
                     "action": action,
                     "result": result,
-                    "error": error or (json.loads(api_result.get("error", "{}")) if api_result else "")
+                    "error": error or (json.loads(result.get("error", "{}")) if result else "")
                 }
                 rows.append(row_result)
 

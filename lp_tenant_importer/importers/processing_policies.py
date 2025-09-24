@@ -228,8 +228,8 @@ def import_processing_policies_for_nodes(
                     "routing_policy": routing_policy_dest_id
                 }
 
-                logger.debug("Processing policy %s on %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
-                             policy_name, logpoint_id, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
+                logger.debug("Processing policy %s on %s with payload: %s",
+                             policy_name, logpoint_id, json.dumps(policy_data, indent=2))
 
                 # Check existence and decide action
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data, existing_policies.get(policy_name))

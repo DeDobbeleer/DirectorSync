@@ -329,7 +329,114 @@ class DirectorClient:
         return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
   
     
+# Additions to core/http.py (append to the end of the class DirectorClient)
 
+    def get_existing_normalization_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+        """Fetch existing normalization policies from the SIEM.
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+
+        Returns:
+            List of normalization policy dictionaries.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy"
+        try:
+            response = self.session.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            data = response.json()
+            policies = data if isinstance(data, list) else data.get("data", [])
+            logger.debug("Fetched %d existing normalization policies", len(policies))
+            return policies
+        except requests.RequestException as e:
+            logger.error("Failed to fetch existing normalization policies: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
+            return []
+
+    def create_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+        """Create a new normalization policy (async).
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+            policy: Policy dictionary with name, normalization_packages (list of IDs), compiled_normalizer (list of names).
+
+        Returns:
+            Response dictionary with monitorapi and status.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy"
+        payload = {
+            "data": {
+                "name": policy["name"],
+                "norm_packages": ",".join(policy.get("normalization_packages", [])),
+                "compiled_normalizer": ",".join(policy.get("compiled_normalizer", []))
+            }
+        }
+        logger.debug("Create request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.post(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            result = response.json()
+            # Extract monitorapi from message if status is Success
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
+                result["monitorapi"] = result["message"]
+            if result.get("monitorapi"):
+                logger.info("Monitoring job for create %s at %s", policy["name"], result["monitorapi"])
+                job_status = self.monitor_job(result["monitorapi"])
+                if job_status.get("success"):
+                    logger.info("Normalization policy %s created successfully", policy["name"])
+                    return {"monitorapi": result["monitorapi"], "status": "success"}
+                else:
+                    logger.error("Create failed for %s: %s", policy["name"], json.dumps(job_status, indent=2))
+                    return {"monitorapi": result["monitorapi"], "status": "failed", "error": job_status.get("error")}
+            return result
+        except requests.RequestException as e:
+            logger.error("Failed to create normalization policy %s: %s (Response: %s)", policy["name"], str(e), getattr(e.response, 'text', 'No response'))
+            raise
+
+    def update_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+        """Update an existing normalization policy (async).
+
+        Args:
+            pool_uuid: Tenant pool UUID.
+            logpoint_id: SIEM identifier.
+            policy_id: Policy ID.
+            policy: Updated policy dictionary with normalization_packages (list of IDs), compiled_normalizer (list of names).
+
+        Returns:
+            Response dictionary with monitorapi and status.
+        """
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/NormalizationPolicy/{policy_id}"
+        payload = {
+            "data": {
+                "norm_packages": ",".join(policy.get("normalization_packages", [])),
+                "compiled_normalizer": ",".join(policy.get("compiled_normalizer", []))
+            }
+        }
+        logger.debug("Update request body for %s: %s", url, json.dumps(payload, indent=2))
+        try:
+            response = self.session.put(url, json=payload, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            logger.debug("Raw response from %s: %s", url, response.text)
+            result = response.json()
+            # Extract monitorapi from message if status is Success
+            if result.get("status") == "Success" and "message" in result and result["message"].startswith("/monitorapi/"):
+                result["monitorapi"] = result["message"]
+            if result.get("monitorapi"):
+                logger.info("Monitoring job for update %s at %s", policy_id, result["monitorapi"])
+                job_status = self.monitor_job(result["monitorapi"])
+                if job_status.get("success"):
+                    logger.info("Normalization policy %s updated successfully", policy_id)
+                    return {"monitorapi": result["monitorapi"], "status": "success"}
+                else:
+                    logger.error("Update failed for %s: %s", policy_id, json.dumps(job_status, indent=2))
+                    return {"monitorapi": result["monitorapi"], "status": "failed", "error": job_status.get("error")}
+            return result
+        except requests.RequestException as e:
+            logger.error("Failed to update normalization policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
+            raise
 
 
   

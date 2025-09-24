@@ -483,6 +483,7 @@ class DirectorClient:
                     error = json.dumps(job_status, indent=2)
                     logger.error("Create job failed for %s: %s", policy["name"], error)
                     logger.debug(f"Post response: {json.dumps(response.json(), indent=2)}")
+                    print(f"Post response: {json.dumps(response.json(), indent=2)}")
                     return {"status": "failed", "error": error}
             return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:

@@ -42,23 +42,28 @@ def import_processing_policies_for_nodes(
         ep_df = pd.read_excel(xlsx_path, sheet_name="EnrichmentPolicy", skiprows=0)
         rp_df = pd.read_excel(xlsx_path, sheet_name="RoutingPolicy", skiprows=0)
         logger.debug("Loaded ProcessingPolicy, EnrichmentPolicy, and RoutingPolicy sheets")
+        logger.debug("EnrichmentPolicy columns: %s", list(ep_df.columns))
+        logger.debug("RoutingPolicy columns: %s", list(rp_df.columns))
     except Exception as e:
         logger.error("Failed to load sheets: %s", e)
         return [], True
 
-    # Validate column names
-    required_ep_columns = ["policy_id", "policy_name"]
-    required_rp_columns = ["policy_id", "policy_name"]
-    if not all(col in ep_df.columns for col in required_ep_columns):
-        logger.error("Missing required columns in EnrichmentPolicy sheet: %s", required_ep_columns)
+    # Detect column names dynamically
+    ep_id_col = next((col for col in ['policy_id', 'id'] if col in ep_df.columns), None)
+    ep_name_col = next((col for col in ['policy_name', 'name'] if col in ep_df.columns), None)
+    rp_id_col = next((col for col in ['policy_id', 'id'] if col in rp_df.columns), None)
+    rp_name_col = next((col for col in ['cleaned_policy_name', 'name'] if col in rp_df.columns), None)
+
+    if not ep_id_col or not ep_name_col:
+        logger.error("Cannot proceed: no valid ID or name column in EnrichmentPolicy (found columns: %s)", list(ep_df.columns))
         return [], True
-    if not all(col in rp_df.columns for col in required_rp_columns):
-        logger.error("Missing required columns in RoutingPolicy sheet: %s", required_rp_columns)
+    if not rp_id_col or not rp_name_col:
+        logger.error("Cannot proceed: no valid ID or name column in RoutingPolicy (found columns: %s)", list(rp_df.columns))
         return [], True
 
     # Build source ID to name mappings
-    ep_mapping = dict(zip(ep_df["policy_id"], ep_df["policy_name"]))
-    rp_mapping = dict(zip(rp_df["policy_id"], rp_df["policy_name"]))
+    ep_mapping = dict(zip(ep_df[ep_id_col], ep_df[ep_name_col]))
+    rp_mapping = dict(zip(rp_df[rp_id_col], rp_df[rp_name_col]))
 
     # Process per node
     for target_type in targets:

@@ -254,13 +254,13 @@ def import_processing_policies_for_nodes(
     return rows, any_error
 
 def _process_policy_action(
-    client: DirectorClient,
-    pool_uuid: str,
-    logpoint_id: str,
-    dry_run: bool,
-    policy: Dict[str, Any],
-    existing_policy: Dict[str, Any] = None
-) -> Tuple[str, str, str]:
+                client: DirectorClient,
+                pool_uuid: str,
+                logpoint_id: str,
+                dry_run: bool,
+                policy: Dict[str, Any],
+                existing_policy: Dict[str, Any] = None
+            ) -> Tuple[str, str, str]:
     """Determine and execute action for a single processing policy.
 
     Args:

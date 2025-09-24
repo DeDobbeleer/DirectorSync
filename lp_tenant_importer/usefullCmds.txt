@@ -1,0 +1,3 @@
+directorSync.exe --tenant core --xlsx core_config.xlsx --format table --no-verify import-repos
+directorSync.exe --tenant core --xlsx core_config.xlsx --format table --no-verify import-routing-policies
+directorSync.exe --tenant core --xlsx core_config.xlsx --format table --no-verify import-normalization-policies

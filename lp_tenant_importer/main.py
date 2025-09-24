@@ -22,9 +22,14 @@ logging_utils.setup_logging()
 logger = logging.getLogger(__name__)
 
 # Charger les variables d'environnement depuis .env
-env_path = os.path.join(os.path.dirname(__file__), '.env')
-logger.debug("Loading .env from: %s", env_path)
-load_dotenv(dotenv_path=env_path)
+# env_path = os.path.join()
+#logger.debug("Loading .env from: %s", env_path)
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(script_dir, '.env')
+logger.debug(f"opening env file: {env_path}")
+load_dotenv(env_path)
+
 
 def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, List[Node]], str]:
     """Prepare the context for the command execution.
@@ -38,9 +43,9 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, Lis
     api_token = os.environ.get("LP_DIRECTOR_API_TOKEN", "")
     logger.debug("Loaded API token: %s (length=%d)", "*" * min(len(api_token), 8) if api_token else "None", len(api_token))  # Log token masked with length
     if not api_token:
-        logger.error("API token is empty or not loaded from .env at %s", env_path)
+        logger.error("API token is empty or not loaded from .env")
     base_url = os.environ.get("LP_DIRECTOR_URL", "https://localhost")
-    tenants_file = os.path.expanduser(args.tenants_file or "~/.config/lp_importer/tenants.yml")
+    tenants_file = os.path.expanduser(args.tenants_file or "tenants.yml")
     tenant_name = args.tenant
     xlsx_path = os.path.expanduser(args.xlsx)
 

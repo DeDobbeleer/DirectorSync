@@ -21,7 +21,7 @@ def import_processing_policies_for_nodes(
 
     Reads the 'ProcessingPolicy', 'EnrichmentPolicy', and 'RoutingPolicy' sheets from the XLSX file,
     maps source IDs to names, fetches target IDs via API, and performs CREATE/UPDATE/NOOP/SKIP actions.
-    Excel is the source of truth; SKIP if any dependency is missing.
+    Excel is the source of truth; SKIP if any dependency (including mandatory routing_policy) is missing.
 
     Args:
         client: DirectorClient instance for API calls.
@@ -128,7 +128,7 @@ def import_processing_policies_for_nodes(
                 enrich_policy_src_id = str(row.get("enrich_policy", "")).strip()
                 routing_policy_src_id = str(row.get("routing_policy", "")).strip()
 
-                # Validate all dependencies from Excel
+                # Validate all dependencies from Excel, routing_policy is mandatory
                 if norm_policy and norm_policy not in norm_policies:
                     row_result = {
                         "siem": logpoint_id,
@@ -178,8 +178,24 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                routing_policy_name = rp_mapping.get(routing_policy_src_id, None) if routing_policy_src_id else None
-                if routing_policy_src_id and not routing_policy_name:
+                # routing_policy is mandatory, SKIP if not found or empty
+                if not routing_policy_src_id:
+                    row_result = {
+                        "siem": logpoint_id,
+                        "node": node.name,
+                        "name": policy_name,
+                        "norm_policy": norm_policy,
+                        "enrich_policy": enrich_policy,
+                        "routing_policy": None,
+                        "action": "SKIP",
+                        "result": "N/A",
+                        "error": "Missing mandatory routing_policy"
+                    }
+                    rows.append(row_result)
+                    logger.warning("Skipping %s: %s", policy_name, row_result["error"])
+                    continue
+                routing_policy_name = rp_mapping.get(routing_policy_src_id, None)
+                if not routing_policy_name:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -194,8 +210,8 @@ def import_processing_policies_for_nodes(
                     rows.append(row_result)
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
-                routing_policy = routing_policies.get(routing_policy_name) if routing_policy_name else None
-                if routing_policy_name and not routing_policy:
+                routing_policy = routing_policies.get(routing_policy_name)
+                if not routing_policy:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -211,20 +227,18 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s: %s", policy_name, row_result["error"])
                     continue
 
-                # Build payload without active, using "None" for optional fields if specified
+                # Build payload with mandatory routing_policy
                 policy_data = {
                     "name": policy_name,
-                    "norm_policy": norm_policy
+                    "norm_policy": norm_policy,
+                    "enrich_policy": enrich_policy if enrich_policy else "None",
+                    "routing_policy": routing_policy
                 }
-                if enrich_policy_src_id:
-                    policy_data["enrich_policy"] = enrich_policy if enrich_policy else "None"
-                if routing_policy_src_id:
-                    policy_data["routing_policy"] = routing_policy if routing_policy else "None"
 
                 logger.debug("Processing policy %s: norm_policy=%s, enrich_policy=%s, routing_policy=%s",
                              policy_name, norm_policy, policy_data.get("enrich_policy"), policy_data.get("routing_policy"))
 
-                # Check existence and decide action, ignoring active for NOOP
+                # Check existence and decide action
                 action, result, error = _process_policy_action(client, pool_uuid, logpoint_id, dry_run, policy_data, existing_policies.get(policy_name))
                 row_result = {
                     "siem": logpoint_id,

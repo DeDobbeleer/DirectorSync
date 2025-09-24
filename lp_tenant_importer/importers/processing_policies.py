@@ -123,7 +123,7 @@ def import_processing_policies_for_nodes(
             for _, row in pp_df.iterrows():
                 original_name = row.get("original_policy_name", "").strip()
                 cleaned_policy_name = row.get("cleaned_policy_name", original_name).strip()
-                policy_name = cleaned_policy_name or original_name
+                policy_name = cleaned_policy_name
                 if not policy_name:
                     logger.warning("Skipping row with empty policy_name")
                     continue
@@ -135,7 +135,7 @@ def import_processing_policies_for_nodes(
                 routing_policy_src_id = str(row.get("routing_policy_id", "")).strip()
 
                 # Validate all dependencies from Excel
-                if norm_policy and norm_policy not in norm_policies:
+                if norm_policy not in norm_policies:
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -153,7 +153,7 @@ def import_processing_policies_for_nodes(
 
                 # Map enrich_policy
                 enrich_policy_name = ep_mapping.get(enrich_policy_src_id, None) if enrich_policy_src_id else None
-                enrich_policy_dest_id = "None" if not enrich_policy_src_id else enrich_policies.get(enrich_policy_name, "None")
+                enrich_policy_dest_id = "None" if not enrich_policy_name else enrich_policies.get(enrich_policy_name, "None")
                 if enrich_policy_src_id and enrich_policy_dest_id == "None":
                     row_result = {
                         "siem": logpoint_id,
@@ -169,9 +169,11 @@ def import_processing_policies_for_nodes(
                     rows.append(row_result)
                     logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
-
+                
+                routing_policies_name = rp_mapping.get(routing_policy_src_id, None) if routing_policy_src_id else None
+                routing_policy_dest_id = "None" if not routing_policies_name else routing_policies.get(routing_policies_name, "None")
                 # Map routing_policy (never None if required)
-                if not routing_policy_src_id:
+                if routing_policy_dest_id == "None":
                     row_result = {
                         "siem": logpoint_id,
                         "node": node.name,
@@ -199,22 +201,6 @@ def import_processing_policies_for_nodes(
                         "action": "SKIP",
                         "result": "N/A",
                         "error": "Invalid routing_policy source ID: %s not found in mapping" % routing_policy_src_id
-                    }
-                    rows.append(row_result)
-                    logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
-                    continue
-                routing_policy_dest_id = routing_policies.get(routing_policy_name)
-                if not routing_policy_dest_id:
-                    row_result = {
-                        "siem": logpoint_id,
-                        "node": node.name,
-                        "name": policy_name,
-                        "norm_policy": norm_policy,
-                        "enrich_policy": enrich_policy_dest_id,
-                        "routing_policy": None,
-                        "action": "SKIP",
-                        "result": "N/A",
-                        "error": "Invalid routing_policy: %s not found in target" % routing_policy_name
                     }
                     rows.append(row_result)
                     logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])

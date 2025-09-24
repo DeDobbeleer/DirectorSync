@@ -78,6 +78,7 @@ def import_processing_policies_for_nodes(
                 resp = client.get(f"configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy")
                 resp.raise_for_status()
                 policies_data = resp.json()
+                logger.debug(f"Existing PP on {node.name} PoliciesData : {policies_data}")
                 if isinstance(policies_data, list):
                     existing_policies = {p.get("name", "").strip(): p for p in policies_data if p.get("name")}
                     logger.debug("Existing policies for %s: %d", logpoint_id, len(existing_policies))

@@ -418,21 +418,20 @@ def import_enrichment_policies_for_nodes(
                     try:
                         if action == 'CREATE':
                             response = client.create_enrichment_policy(pool_uuid, node_id, payload)
-                            job_id = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
+                            result = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
                         elif action == 'UPDATE':
                             dest_id = node_result.get('existing_id')
                             update_payload = payload.copy()
                             update_payload['data']['id'] = dest_id
                             response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
-                            job_id = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
+                            result = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
 
-                        job_status = client.monitor_job(job_id)
-                        if job_status.get('success'):
-                            result_entry['result'] = 'Success'
+                        
+                        if result.get('status') == 'Success' :
                             logger.info(f"{action} success for {policy_name} on {node_name}")
                         else:
                             result_entry['result'] = 'Fail'
-                            result_entry['error'] = job_status.get('error', 'Unknown error')
+                            result_entry['error'] = result.get('result', 'Unknown error')
                             logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
                             any_error = True
                     except Exception as e:

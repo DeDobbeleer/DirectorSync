@@ -11,18 +11,6 @@ tenants:
       # all_in_one peut rester vide : il sera calculé = backends ∪ search_heads
       all_in_one: []
 
-    # Règles par défaut (cible par entité) :
-    # - Sans override → tout va vers backends
-    # - alerts est routé vers search_heads par défaut par le code
-    defaults:
-      target:
-        #exemples d’override (facultatifs)
-        repos: [ backends, all_in_one ]
-        routing_policies: [ backends, all_in_one ]
-        normalization_policies: [ backends, all_in_one ]
-        processing_policies: [ backends, all_in_one ]
-        alerts: search_heads
-
 # DÉFAUT GLOBAL (NOUVEAU)
 defaults:
   target:
@@ -30,7 +18,8 @@ defaults:
     routing_policies: [ backends, all_in_one ]
     normalization_policies: [ backends, all_in_one ]
     processing_policies: [ backends, all_in_one ]
-    alerts: search_heads  
+    enrichment_policies: [ backends, all_in_one ]
+    alerts: [ search_heads ]
 
   xlsx:
     dir: "~/.local/share/lp_importer/"  # dossier commun

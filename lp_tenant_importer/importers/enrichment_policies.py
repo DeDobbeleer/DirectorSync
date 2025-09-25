@@ -371,10 +371,6 @@ def import_enrichment_policies_for_nodes(
 
     # Build payloads and get ES list
     payloads, es_per_policy = build_enrichment_payloads(df_policy, df_rules, df_criteria)
-    
-    # Debug the number of nodes being processed
-    node_list = [node for node in nodes]
-    logger.debug(f"Processing {len(nodes)} nodes: {node_list}")
 
     # Process per node, then per policy
     for target_type in targets:
@@ -386,56 +382,56 @@ def import_enrichment_policies_for_nodes(
             # Check existing policies and sources
             check_results = check_existing_per_node(client, pool_uuid, node, payloads, es_per_policy)
 
-        for policy_id, payload in payloads.items():
-            policy_name = payload['data']['name']
-            specs_count = len(payload['data']['specifications'])
-            node_result = check_results.get(policy_id, {}).get(node_name, {})
-            action = node_result.get('action', 'NONE')
+            for policy_id, payload in payloads.items():
+                policy_name = payload['data']['name']
+                specs_count = len(payload['data']['specifications'])
+                node_result = check_results.get(policy_id, {}).get(node_name, {})
+                action = node_result.get('action', 'NONE')
 
-            result_entry = {
-                'siem': siem,
-                'node': node_name,
-                'name': policy_name,
-                'specs_count': specs_count,
-                'action': action,
-                'result': 'N/A',
-                'error': node_result.get('error', '')
-            }
+                result_entry = {
+                    'siem': siem,
+                    'node': node_name,
+                    'name': policy_name,
+                    'specs_count': specs_count,
+                    'action': action,
+                    'result': 'N/A',
+                    'error': node_result.get('error', '')
+                }
 
-            if action in ['SKIP', 'NOOP']:
-                result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
-                logger.info(f"{action} for {policy_name} on {node_name}")
-            elif action in ['CREATE', 'UPDATE'] and not dry_run:
-                try:
-                    if action == 'CREATE':
-                        response = client.create_enrichment_policy(pool_uuid, node_id, payload)
-                        job_id = response.json().get('job_id')
-                    elif action == 'UPDATE':
-                        dest_id = node_result.get('existing_id')
-                        update_payload = payload.copy()
-                        update_payload['data']['id'] = dest_id
-                        response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
-                        job_id = response.json().get('job_id')
+                if action in ['SKIP', 'NOOP']:
+                    result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
+                    logger.info(f"{action} for {policy_name} on {node_name}")
+                elif action in ['CREATE', 'UPDATE'] and not dry_run:
+                    try:
+                        if action == 'CREATE':
+                            response = client.create_enrichment_policy(pool_uuid, node_id, payload)
+                            job_id = response.json().get('job_id')
+                        elif action == 'UPDATE':
+                            dest_id = node_result.get('existing_id')
+                            update_payload = payload.copy()
+                            update_payload['data']['id'] = dest_id
+                            response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
+                            job_id = response.json().get('job_id')
 
-                    job_status = client.monitor_job(job_id)
-                    if job_status.get('success'):
-                        result_entry['result'] = 'Success'
-                        logger.info(f"{action} success for {policy_name} on {node_name}")
-                    else:
+                        job_status = client.monitor_job(job_id)
+                        if job_status.get('success'):
+                            result_entry['result'] = 'Success'
+                            logger.info(f"{action} success for {policy_name} on {node_name}")
+                        else:
+                            result_entry['result'] = 'Fail'
+                            result_entry['error'] = job_status.get('error', 'Unknown error')
+                            logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
+                            any_error = True
+                    except Exception as e:
                         result_entry['result'] = 'Fail'
-                        result_entry['error'] = job_status.get('error', 'Unknown error')
-                        logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
+                        result_entry['error'] = str(e)
+                        logger.error(f"{action} error for {policy_name} on {node_name}: {str(e)}")
                         any_error = True
-                except Exception as e:
-                    result_entry['result'] = 'Fail'
-                    result_entry['error'] = str(e)
-                    logger.error(f"{action} error for {policy_name} on {node_name}: {str(e)}")
-                    any_error = True
-            elif dry_run:
-                result_entry['result'] = 'Dry-run'
-                logger.info(f"Dry run: {action} for {policy_name} on {node_name}")
+                elif dry_run:
+                    result_entry['result'] = 'Dry-run'
+                    logger.info(f"Dry run: {action} for {policy_name} on {node_name}")
 
-            rows.append(result_entry)
+                rows.append(result_entry)
 
     # Log summary
     actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows}

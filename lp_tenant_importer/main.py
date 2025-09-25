@@ -112,7 +112,7 @@ def cmd_import_processing_policies(args):
 def cmd_import_enrichment_policies(args):
     """Import enrichment policies command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
-    targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["enrichment-policies"]
+    targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["enrichment_policies"]
     rows, any_error = import_enrichment_policies_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
     print_table(rows, args.format)
     if any_error:

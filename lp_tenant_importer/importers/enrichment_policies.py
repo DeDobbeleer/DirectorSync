@@ -426,7 +426,7 @@ def import_enrichment_policies_for_nodes(
                             response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
                             
                         if response.get('status') == 'Success' :
-                            result_entry['result'] = 'Sucess'
+                            result_entry['result'] = 'Sucesss'
                             logger.info(f"{action} success for {policy_name} on {node_name}")
                         else:
                             result_entry['result'] = 'Fail'

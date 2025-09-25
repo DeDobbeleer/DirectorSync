@@ -472,7 +472,6 @@ class DirectorClient:
             response.raise_for_status()
             
             result = response.json()
-            logger.info(f"*************************************Post response: {json.dumps(result, indent=2)}")
             if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
                 monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
                 logger.info("Monitoring job for create %s at %s", policy["name"], monitorapi)
@@ -522,4 +521,4 @@ class DirectorClient:
             return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:
             logger.error("Failed to update processing policy %s: %s", policy_id, str(e.response.text))
-            return {"status": "failed", "error": str(e)}
+            return {"status": "failed", "error": str(e.response.text)}

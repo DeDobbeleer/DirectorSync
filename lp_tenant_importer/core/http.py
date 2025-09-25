@@ -520,5 +520,5 @@ class DirectorClient:
                     return {"status": "failed", "error": error}
             return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:
-            logger.error("Failed to update processing policy %s: %s", policy_id, str(e))
+            logger.error("Failed to update processing policy %s: %s", policy_id, str(e.response.text))
             return {"status": "failed", "error": str(e)}

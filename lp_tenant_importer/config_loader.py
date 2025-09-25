@@ -88,7 +88,7 @@ def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
         logger.error("defaults not found in configuration file")
         raise ValueError(f"defaults not found in configuration file")
     
-    tenant["efaults"] = defaults
+    tenant["defaults"] = defaults
 
     # Use explicit all_in_one from YAML, no automatic computation
     siems = tenant.get("siems", {})

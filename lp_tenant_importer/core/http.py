@@ -590,9 +590,11 @@ class DirectorClient:
         result = response.json()
         logger.debug("Creation response: %s", result)
 
-        if "message" in result and result.get("status") == "Success":
-            job_path = result["message"]
-            job_success = self.monitor_job(job_path)
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for update %s", monitorapi)
+            
+            job_success = self.monitor_job(monitorapi)
             if job_success:
                 logger.info("Enrichment policy creation succeeded on %s", logpoint_id)
                 return {"status": "Success", "result": job_success}
@@ -625,9 +627,11 @@ class DirectorClient:
         result = response.json()
         logger.debug("Update response: %s", result)
 
-        if "message" in result and result.get("status") == "Success":
-            job_path = result["message"]
-            job_success = self.monitor_job(job_path)
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for update %s at %s", policy_id, monitorapi)
+            
+            job_success = self.monitor_job(monitorapi)
             if job_success:
                 logger.info("Enrichment policy update succeeded on %s", logpoint_id)
                 return {"status": "Success", "result": job_success}

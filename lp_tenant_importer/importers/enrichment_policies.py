@@ -2,6 +2,7 @@ import logging
 import pandas as pd
 from typing import Dict, List, Any, Tuple
 import json
+import numpy as np
 
 from core.http import DirectorClient
 from core.nodes import Node
@@ -384,6 +385,10 @@ def import_enrichment_policies_for_nodes(
 
             for policy_id, payload in payloads.items():
                 policy_name = payload['data']['name']
+                if isinstance(payload['data']['description'], float) and np.isnan(payload['data']['description']):
+                    payload['data']['description'] = ''
+                if isinstance(payload['data']['tags'], float) and np.isnan(payload['data']['tags']):
+                    payload['data']['tags'] = ''               
                 specs_count = len(payload['data']['specifications'])
                 node_result = check_results.get(policy_id, {}).get(node_name, {})
                 action = node_result.get('action', 'NONE')

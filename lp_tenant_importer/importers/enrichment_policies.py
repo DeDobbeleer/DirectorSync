@@ -418,20 +418,18 @@ def import_enrichment_policies_for_nodes(
                     try:
                         if action == 'CREATE':
                             response = client.create_enrichment_policy(pool_uuid, node_id, payload)
-                            result = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
+                            
                         elif action == 'UPDATE':
                             dest_id = node_result.get('existing_id')
                             update_payload = payload.copy()
                             update_payload['data']['id'] = dest_id
                             response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
-                            result = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
-
-                        
-                        if result.get('status') == 'Success' :
+                            
+                        if response.get('status') == 'Success' :
                             logger.info(f"{action} success for {policy_name} on {node_name}")
                         else:
                             result_entry['result'] = 'Fail'
-                            result_entry['error'] = result.get('result', 'Unknown error')
+                            result_entry['error'] = response.get('result', 'Unknown error')
                             logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
                             any_error = True
                     except Exception as e:

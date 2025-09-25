@@ -1,6 +1,6 @@
 import requests
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Any, Optional
 import logging
 import os.path
 import json
@@ -522,3 +522,120 @@ class DirectorClient:
         except requests.RequestException as e:
             logger.error("Failed to update processing policy %s: %s", policy_id, str(e.response.text))
             return {"status": "failed", "error": str(e.response.text)}
+
+    def get_enrichment_sources(self, pool_uuid: str, logpoint_id: str) -> List[str]:
+        """Fetch available enrichment sources for a specific node.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+
+        Returns:
+            List[str]: List of source names (e.g., ['threat_intelligence', 'GeoIp']).
+
+        Raises:
+            ValueError: If the JSON response is invalid.
+            requests.exceptions.RequestException: If API request fails.
+        """
+        logger.debug("Fetching enrichment sources for pool %s, node %s", pool_uuid, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentSource"
+        response = self.make_api_request("GET", url)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, list):
+            raise ValueError(f"Invalid response format: {data}")
+        sources = [source.get("name", "") for source in data if source.get("name")]
+        logger.debug("Retrieved %d sources: %s", len(sources), sources)
+        return sources
+
+    def get_enrichment_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+        """Retrieve existing enrichment policies for a node.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+
+        Returns:
+            List[Dict[str, Any]]: List of policy dictionaries.
+        """
+        logger.debug("Fetching enrichment policies for pool %s, node %s", pool_uuid, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy"
+        response = self.make_api_request("GET", url)
+        response.raise_for_status()
+        policies = response.json()
+        if not isinstance(policies, list):
+            logger.warning("Unexpected response format for policies: %s", policies)
+            return []
+        logger.debug("Found %d existing policies", len(policies))
+        return policies
+
+    def create_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new enrichment policy with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            policy_data (Dict[str, Any]): The policy data under 'data' key.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Creating enrichment policy on node %s", logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy"
+        response = self.make_api_request("POST", url, json=policy_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Creation response: %s", result)
+
+        if "message" in result and result.get("status") == "Success":
+            job_path = result["message"]
+            job_success = self.monitor_job(job_path)
+            if job_success:
+                logger.info("Enrichment policy creation succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_success}
+            else:
+                logger.error("Enrichment policy creation job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+
+    def update_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update an existing enrichment policy with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            policy_id (str): The policy ID to update.
+            policy_data (Dict[str, Any]): The policy data under 'data' key with 'id'.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Updating policy %s on node %s", policy_id, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy/{policy_id}"
+        response = self.make_api_request("PUT", url, json=policy_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Update response: %s", result)
+
+        if "message" in result and result.get("status") == "Success":
+            job_path = result["message"]
+            job_success = self.monitor_job(job_path)
+            if job_success:
+                logger.info("Enrichment policy update succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_success}
+            else:
+                logger.error("Enrichment policy update job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+    
+    

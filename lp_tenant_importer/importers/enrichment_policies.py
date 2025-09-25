@@ -1,176 +1,226 @@
 import logging
 import pandas as pd
-from typing import List, Dict, Any, Tuple
-from pathlib import Path
+from typing import Dict, List, Any, Tuple
+import json
+
 from core.http import DirectorClient
+from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
 def import_enrichment_policies_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List],
+    nodes: Dict[str, List[Node]],
     xlsx_path: str,
     dry_run: bool,
     targets: List[str],
-) -> Tuple[List[Dict], bool]:
-    """Import enrichment policies from XLSX to specified SIEM nodes.
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Import enrichment policies for specified nodes.
+
+    Loads 'EnrichmentPolicy', 'EnrichmentRules', and 'EnrichmentCriteria' sheets from XLSX,
+    groups by policy_name and spec_index, validates sources via API,
+    and performs CREATE/UPDATE/NOOP/SKIP actions with async monitoring.
 
     Args:
-        client: DirectorClient instance for API calls.
-        pool_uuid: Tenant pool UUID.
-        nodes: Dictionary of SIEM nodes by role (backends, all_in_one).
-        xlsx_path: Path to XLSX file.
-        dry_run: If True, simulate without API calls.
-        targets: List of target roles (e.g., ['backends', 'all_in_one']).
+        client (DirectorClient): Instance for API calls.
+        pool_uuid (str): Tenant pool UUID.
+        nodes (Dict[str, List[Node]]): Dictionary of node types and instances.
+        xlsx_path (str): Path to the configuration XLSX file.
+        dry_run (bool): If True, simulate without API calls.
+        targets (List[str]): List of target node roles (e.g., ['backends', 'all_in_one']).
 
     Returns:
-        Tuple of (results list, any_error boolean).
+        Tuple[List[Dict[str, Any]], bool]: Tuple of (list of results, error indicator).
+        Results include: siem, node, name, specs_count, action, result, error.
 
     Raises:
-        FileNotFoundError: If XLSX file is missing.
-        ValueError: If XLSX parsing fails or sheet is invalid.
+        Exception: If XLSX loading or API calls fail.
     """
-    results = []
+    rows = []
     any_error = False
 
-    xlsx_path = Path(xlsx_path)
-    if not xlsx_path.exists():
-        logger.error("XLSX file not found: %s", xlsx_path)
-        raise FileNotFoundError(f"XLSX file not found: {xlsx_path}")
-
-    available_nodes = any(nodes.get(target, []) for target in targets)
-    if not available_nodes:
-        logger.warning("No nodes available for targets: %s", targets)
-        results.append({
-            "siem": "none",
-            "node": "none",
-            "name": "N/A",
-            "result": "SKIPPED",
-            "action": "NO_NODES",
-            "error": f"No nodes for targets: {targets}",
-        })
-        return results, False
-
+    # Load Excel sheets with error handling
     try:
-        logger.debug("Reading EnrichmentPolicy sheet from %s", xlsx_path)
-        df = pd.read_excel(xlsx_path, sheet_name="EnrichmentPolicy", skiprows=0)
-        if 'row1' in df.iloc[0].astype(str).str.lower().values:
-            df = df.iloc[1:].reset_index(drop=True)
-        if df.empty:
-            logger.warning("EnrichmentPolicy sheet is empty in %s", xlsx_path)
-            results.append({
-                "siem": "none",
-                "node": "none",
-                "name": "N/A",
-                "result": "SKIPPED",
-                "action": "EMPTY_SHEET",
-            })
-            return results, False
-
-        logger.debug("Found %d enrichment policies in XLSX", len(df))
-        policies = df.to_dict("records")
-        for policy in policies:
-            cleaned_policy = {
-                "name": str(policy.get("policy_name", "")).strip(),
-                "active": str(policy.get("active", "true")).lower() == "true",
-                "description": str(policy.get("description", "")).strip() or None,
-                "tags": [tag.strip() for tag in str(policy.get("tags", "")).split("|") if tag.strip()],
-                "source": str(policy.get("source", "")).strip() or None,
-                "policy_id": str(policy.get("policy_id", "")).strip() or None,
-            }
-            if not cleaned_policy["name"]:
-                logger.warning("Skipping policy with empty name: %s", policy)
-                continue
-
-            logger.debug("Processing enrichment policy: %s", cleaned_policy["name"])
-            for target in targets:
-                if target not in nodes or not nodes[target]:
-                    logger.warning("No nodes for target role %s", target)
-                    continue
-                for node in nodes.get(target, []):
-                    siem_id = node["id"]
-                    node_name = node["name"]
-                    result = {
-                        "siem": siem_id,
-                        "node": node_name,
-                        "name": cleaned_policy["name"],
-                        "result": "PENDING",
-                        "action": "NONE",
-                    }
-
-                    if dry_run:
-                        result["result"] = "SKIPPED"
-                        result["action"] = "DRY_RUN"
-                        logger.info("Dry-run: Would import enrichment policy %s to %s (%s)", cleaned_policy["name"], node_name, siem_id)
-                    else:
-                        try:
-                            # Placeholder for API checks (to be extended with get_existing_policies)
-                            existing_policies = client.get_existing_policies(pool_uuid, siem_id)  # Hypothetical method
-                            existing = next((p for p in existing_policies if p["name"] == cleaned_policy["name"]), None)
-
-                            if existing and _compare_policies(existing, cleaned_policy):
-                                result["result"] = "SKIPPED"
-                                result["action"] = "NOOP"
-                                logger.info("No changes needed for policy %s on %s (%s)", cleaned_policy["name"], node_name, siem_id)
-                            else:
-                                if not existing:
-                                    response = client.post(f"/api/v1/enrichment-policies", json=cleaned_policy)  # Hypothetical
-                                    status = client.monitor_job(response.json().get("monitorapi"))
-                                    if status.get("success"):
-                                        result["action"] = "CREATED"
-                                        result["result"] = "SUCCESS"
-                                        logger.info("Created policy %s on %s (%s)", cleaned_policy["name"], node_name, siem_id)
-                                    else:
-                                        result["action"] = "FAILED"
-                                        result["result"] = "FAILED"
-                                        result["error"] = status.get("error", "Unknown error")
-                                        any_error = True
-                                        logger.error("Failed to create policy %s on %s (%s): %s", cleaned_policy["name"], node_name, siem_id, result["error"])
-                                else:
-                                    response = client.put(f"/api/v1/enrichment-policies/{existing['id']}", json=cleaned_policy)  # Hypothetical
-                                    status = client.monitor_job(response.json().get("monitorapi"))
-                                    if status.get("success"):
-                                        result["action"] = "UPDATED"
-                                        result["result"] = "SUCCESS"
-                                        logger.info("Updated policy %s on %s (%s)", cleaned_policy["name"], node_name, siem_id)
-                                    else:
-                                        result["action"] = "FAILED"
-                                        result["result"] = "FAILED"
-                                        result["error"] = status.get("error", "Unknown error")
-                                        any_error = True
-                                        logger.error("Failed to update policy %s on %s (%s): %s", cleaned_policy["name"], node_name, siem_id, result["error"])
-                        except Exception as e:
-                            result["result"] = "FAILED"
-                            result["error"] = str(e)
-                            any_error = True
-                            logger.error("Failed to process policy %s on %s (%s): %s", cleaned_policy["name"], node_name, siem_id, e)
-
-                    results.append(result)
-
-        if not results:
-            logger.warning("No enrichment policies processed for %s", xlsx_path)
-            results.append({
-                "siem": "none",
-                "node": "none",
-                "name": "N/A",
-                "result": "SKIPPED",
-                "action": "NO_DATA",
-            })
-
-
-
+        policy_df = pd.read_excel(xlsx_path, sheet_name="EnrichmentPolicy", skiprows=0)
+        rules_df = pd.read_excel(xlsx_path, sheet_name="EnrichmentRules", skiprows=0)
+        criteria_df = pd.read_excel(xlsx_path, sheet_name="EnrichmentCriteria", skiprows=0)
+        logger.debug("Loaded sheets: EnrichmentPolicy (%d rows), Rules (%d rows), Criteria (%d rows)",
+                     len(policy_df), len(rules_df), len(criteria_df))
     except Exception as e:
-        logger.error("Failed to parse EnrichmentPolicy sheet in %s: %s", xlsx_path, e)
-        raise ValueError(f"Failed to parse EnrichmentPolicy sheet: {e}")
+        logger.error("Failed to load enrichment sheets from %s: %s", xlsx_path, e)
+        return [], True
 
-    return results, any_error
+    # Group rules and criteria by policy_name and spec_index
+    rules_grouped = rules_df.groupby(['policy_name', 'spec_index'])
+    criteria_grouped = criteria_df.groupby(['policy_name', 'spec_index'])
 
-def _compare_policies(existing: Dict, new: Dict) -> bool:
-    if existing["name"] != new["name"] or existing["active"] != new["active"]:
-        return False
-    existing_tags = set(existing.get("tags", []))
-    new_tags = set(new.get("tags", []))
-    return (existing.get("description") == new.get("description") and
-            existing.get("source") == new.get("source") and
-            existing_tags == new_tags)
+    # Process each policy
+    for _, row in policy_df.iterrows():
+        policy_name = row['policy_name']
+        description = row.get('description', '') if pd.notna(row.get('description', '')) else ""
+        policy_id = row.get('policy_id', '') if pd.notna(row.get('policy_id', '')) else None
+
+        # Collect specifications
+        specifications = []
+        spec_indices = rules_df[rules_df['policy_name'] == policy_name]['spec_index'].unique()
+        for spec_index in spec_indices:
+            source = row['source']
+            rules_key = (policy_name, spec_index)
+            criteria_key = (policy_name, spec_index)
+
+            rules = []
+            if rules_key in rules_grouped.groups:
+                for _, rule_row in rules_grouped.get_group(rules_key).iterrows():
+                    rules.append({
+                        "category": rule_row['category'],
+                        "source_key": rule_row['source_key'],
+                        "prefix": bool(rule_row['prefix']),
+                        "operation": rule_row['operation'],
+                        "type": rule_row['type'],
+                        "event_key": rule_row['event_key']
+                    })
+
+            criteria = []
+            if criteria_key in criteria_grouped.groups:
+                for _, crit_row in criteria_grouped.get_group(criteria_key).iterrows():
+                    criteria.append({
+                        "type": crit_row['type'],
+                        "key": crit_row['key'],
+                        "value": crit_row.get('value', '') if pd.notna(crit_row.get('value', '')) else ""
+                    })
+
+            if rules or criteria:
+                specifications.append({"source": source, "rules": rules, "criteria": criteria})
+
+        if not specifications:
+            logger.warning("No valid specifications for policy %s, skipping", policy_name)
+            continue
+
+        policy = {"name": policy_name, "description": description, "specifications": specifications}
+
+        # Process per target node
+        for target_type in targets:
+            for node in nodes.get(target_type, []):
+                logpoint_id = node.id
+                siem = node.name
+
+                # Fetch available enrichment sources
+                try:
+                    available_sources = client.get_enrichment_sources(pool_uuid, logpoint_id)
+                    logger.debug("Available sources on %s: %s", siem, available_sources)
+                except Exception as e:
+                    logger.error("Failed to fetch sources for %s: %s", siem, e)
+                    rows.append({
+                        "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                        "action": "NONE", "result": "Fail", "error": str(e)
+                    })
+                    any_error = True
+                    continue
+
+                # Validate sources
+                if not all(spec["source"] in available_sources for spec in specifications):
+                    logger.warning("Source(s) not found on %s for policy %s, skipping", siem, policy_name)
+                    rows.append({
+                        "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                        "action": "SKIP", "result": "MISSING_SOURCE", "error": ""
+                    })
+                    continue
+
+                # Fetch existing policies
+                try:
+                    existing_policies = client.get_enrichment_policies(pool_uuid, logpoint_id)
+                    logger.debug("Found %d existing policies on %s", len(existing_policies), siem)
+                except Exception as e:
+                    logger.error("Failed to fetch policies for %s: %s", siem, e)
+                    rows.append({
+                        "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                        "action": "NONE", "result": "Fail", "error": str(e)
+                    })
+                    any_error = True
+                    continue
+
+                # Find matching policy
+                existing = next((p for p in existing_policies if p.get("name") == policy_name), None)
+                if existing:
+                    # Compare for NOOP or UPDATE
+                    existing_specs = set(json.dumps(sorted(spec.items()), sort_keys=True)
+                                        for spec in existing.get("specifications", []))
+                    current_specs = set(json.dumps(sorted(spec.items()), sort_keys=True)
+                                       for spec in policy["specifications"])
+                    if existing.get("description") == description and existing_specs == current_specs:
+                        logger.info("No changes needed for policy %s on %s", policy_name, siem)
+                        rows.append({
+                            "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                            "action": "NOOP", "result": "N/A", "error": ""
+                        })
+                        continue
+
+                    # UPDATE
+                    policy["id"] = existing["id"]
+                    payload = {"data": policy}
+                    if dry_run:
+                        logger.info("Dry-run: Would update %s on %s", policy_name, siem)
+                        rows.append({
+                            "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                            "action": "UPDATE", "result": "Dry-run", "error": ""
+                        })
+                        continue
+
+                    try:
+                        result = client.update_enrichment_policy(pool_uuid, logpoint_id, policy["id"], payload)
+                        if result["status"] == "Success":
+                            logger.info("Successfully updated %s on %s", policy_name, siem)
+                            rows.append({
+                                "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                                "action": "UPDATE", "result": "Success", "error": ""
+                            })
+                        else:
+                            logger.error("Update failed for %s on %s: %s", policy_name, siem, result.get("error"))
+                            rows.append({
+                                "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                                "action": "UPDATE", "result": "Fail", "error": result.get("error")
+                            })
+                            any_error = True
+                    except Exception as e:
+                        logger.error("Exception updating %s on %s: %s", policy_name, siem, e)
+                        rows.append({
+                            "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                            "action": "UPDATE", "result": "Fail", "error": str(e)
+                        })
+                        any_error = True
+                else:
+                    # CREATE
+                    payload = {"data": policy}
+                    if dry_run:
+                        logger.info("Dry-run: Would create %s on %s", policy_name, siem)
+                        rows.append({
+                            "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                            "action": "CREATE", "result": "Dry-run", "error": ""
+                        })
+                        continue
+
+                    try:
+                        result = client.create_enrichment_policy(pool_uuid, logpoint_id, payload)
+                        if result["status"] == "Success":
+                            logger.info("Successfully created %s on %s", policy_name, siem)
+                            rows.append({
+                                "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                                "action": "CREATE", "result": "Success", "error": ""
+                            })
+                        else:
+                            logger.error("Creation failed for %s on %s: %s", policy_name, siem, result.get("error"))
+                            rows.append({
+                                "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                                "action": "CREATE", "result": "Fail", "error": result.get("error")
+                            })
+                            any_error = True
+                    except Exception as e:
+                        logger.error("Exception creating %s on %s: %s", policy_name, siem, e)
+                        rows.append({
+                            "siem": siem, "node": node.name, "name": policy_name, "specs_count": len(specifications),
+                            "action": "CREATE", "result": "Fail", "error": str(e)
+                        })
+                        any_error = True
+
+    return rows, any_error

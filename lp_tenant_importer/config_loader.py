@@ -1,3 +1,4 @@
+
 import os
 import logging
 from pathlib import Path
@@ -77,8 +78,15 @@ def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
     """
     tenant = config.get("tenants", {}).get(tenant_name)
     if not tenant:
-        logger.error("Tenant %s not found in configuration", tenant_name)
+        logger.error("Tenant %s not found in configuration file", tenant_name)
         raise ValueError(f"Tenant {tenant_name} not found")
+    
+    defaults = config.get("tenants", {}).get("defaults", {})
+    if not defaults :
+        logger.error("defaults not found in configuration file")
+        raise ValueError(f"defaults not found in configuration file")
+    
+    tenant["efaults"] = defaults
 
     # Use explicit all_in_one from YAML, no automatic computation
     siems = tenant.get("siems", {})

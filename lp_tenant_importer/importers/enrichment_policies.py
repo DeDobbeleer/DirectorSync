@@ -412,13 +412,13 @@ def import_enrichment_policies_for_nodes(
                     try:
                         if action == 'CREATE':
                             response = client.create_enrichment_policy(pool_uuid, node_id, payload)
-                            job_id = response.json().get('job_id')
+                            job_id = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
                         elif action == 'UPDATE':
                             dest_id = node_result.get('existing_id')
                             update_payload = payload.copy()
                             update_payload['data']['id'] = dest_id
                             response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
-                            job_id = response.json().get('job_id')
+                            job_id = response.get('job_id') if isinstance(response, dict) else response.json().get('job_id')
 
                         job_status = client.monitor_job(job_id)
                         if job_status.get('success'):

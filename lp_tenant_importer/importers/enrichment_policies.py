@@ -373,9 +373,8 @@ def import_enrichment_policies_for_nodes(
     payloads, es_per_policy = build_enrichment_payloads(df_policy, df_rules, df_criteria)
     
     # Debug the number of nodes being processed
-    for target_type in targets:
-        node_names = [node.name for node in nodes.get(target_type, [])]
-        logger.debug(f"Processing {len(nodes)} nodes: {node_names}")
+
+    logger.debug(f"Processing {len(nodes)} nodes: {nodes}")
 
     # Process per node, then per policy
     for target_type in targets:

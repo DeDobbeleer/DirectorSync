@@ -1,111 +1,133 @@
-### Analyse et Contexte
-- **Problème Identifié** :
-  - Dans `core_config.xlsx` (feuille "ProcessingPolicy"), `enrich_policy` et `routing_policy` contiennent des IDs qui correspondent aux SIEMs sources, pas aux destinations.
-  - Une feuille "EnrichmentPolicy" fournit une table liant les IDs source aux noms EP (`EP Name`).
-  - Une feuille "RoutingPolicy" fournit une table liant les IDs source aux noms RP.
-  - Pour le SIEM de destination, il faut dumper les EP et RP via API (`GET /EnrichmentPolicy` et `GET /RoutingPolicy`) et mapper les noms (`EP Name`, RP name) aux IDs du SIEM cible pour construire les payloads POST/PUT.
-- **Solution Proposée** :
-  - Charger les tables "EnrichmentPolicy" et "RoutingPolicy" pour obtenir les mappings ID source → nom.
-  - Pour chaque nœud destination, récupérer les listes d'EP et RP via API, puis associer les noms aux IDs cibles.
-  - Utiliser ces IDs cibles dans les payloads.
+# Engineering Documentation for Processing Policies (PP)
 
-### Plan Détailé d'Implémentation pour Processing Policies (PP) (Mis à Jour)
-1. **Analyse et Validation (20 min)** :
-   - Charger "ProcessingPolicy", "EnrichmentPolicy", et "RoutingPolicy" avec `pandas`.
-   - Parser `original_policy_name`, `cleaned_policy_name`, `active`, `norm_policy` (nom), `enrich_policy` (ID source), `routing_policy` (ID source).
-   - Valider : SKIP si `policy_name` vide ou `norm_policy` manquant.
+## Analysis and Context
+- **Identified Issues**:
+  - In `core_config.xlsx` (sheet "ProcessingPolicy"), `enrich_policy` and `routing_policy` contain source SIEM IDs, not destination IDs.
+  - Sheet "EnrichmentPolicy" provides mapping from source IDs to EP names (`policy_name`).
+  - Sheet "RoutingPolicy" provides mapping from source IDs to RP names (`cleaned_policy_name`).
+  - For the destination SIEM, dump EP and RP via API (`GET /EnrichmentPolicy` and `GET /RoutingPolicy`) and map names to destination IDs for POST/PUT payloads.
+  - New Findings (from logs dated September 25, 2025):
+    - API requires `"policy_name"` and `"id"` in UPDATE payloads; absence causes 400 Bad Request.
+    - `"enrich_policy": "None"` is valid if no enrichment is needed, but "Threat_Intelligence" dependency often missing, leading to SKIP.
+    - Successful UPDATE for `pp_rsa` after including `"policy_name"`.
+    - NOOP correctly detects unchanged policies (e.g., `pp_windows`).
+    - 400 persists if IDs (e.g., `routing_policy`) are invalid or not linked to the node.
+    - Algorithm finalized: Dependency mapping works; explicit validation added for required fields.
 
-2. **Vérifications API et Mappage (20 min)** :
-   - Fetch existants via `GET /ProcessingPolicy`.
-   - Dump `GET /NormalizationPolicy` (noms), `GET /EnrichmentPolicy` (IDs), `GET /RoutingPolicy` (IDs) pour le nœud cible.
-   - Mapper `enrich_policy` et `routing_policy` : ID source → nom via XLSX, puis nom → ID cible via API.
+- **Proposed Solution**:
+  - Load "EnrichmentPolicy" and "RoutingPolicy" for source ID → name mapping.
+  - For each destination node, fetch EP/RP lists via API, map names to target IDs.
+  - Use target IDs in payloads.
+  - Add explicit validation in `http.py` to raise errors if `"policy_name"` or `"id"` missing in UPDATE.
 
-3. **Logique d'Actions (20 min)** :
-   - NOOP : Identique (y compris IDs mappés).
-   - SKIP : Invalide ou dépendances absentes.
-   - CREATE : N'existe pas → POST avec IDs cibles, monitor job.
-   - UPDATE : Diffère → PUT avec IDs cibles, monitor job.
+## Detailed Implementation Plan for Processing Policies (PP) (Updated)
+1. **Analysis and Validation (20 min)**:
+   - Load "ProcessingPolicy", "EnrichmentPolicy", and "RoutingPolicy" with `pandas`.
+   - Parse `original_policy_name`, `cleaned_policy_name`, `active`, `norm_policy` (name), `enrich_policy` (source ID), `routing_policy` (source ID).
+   - Validate: SKIP if `policy_name` empty or `norm_policy` missing. Explicit check for required fields.
 
-4. **Intégration et Tests (15 min)** :
-   - Intégrer dans `main.py`.
-   - Tests : Mapping correct, cas avec/sans `enrich_policy`/`routing_policy`.
+2. **API Fetch and Mapping (20 min)**:
+   - Fetch existing via `GET /ProcessingPolicy`.
+   - Dump `GET /NormalizationPolicy` (names), `GET /EnrichmentPolicy` (IDs), `GET /RoutingPolicy` (IDs) for target node.
+   - Map `enrich_policy` and `routing_policy`: source ID → name via XLSX, then name → target ID via API.
+   - New: Handle "None" for `enrich_policy` as empty string if API rejects "None".
 
-5. **Documentation (5 min)** :
-   - Mettre à jour `PROJECT_STATE.md`.
+3. **Action Logic (20 min)**:
+   - NOOP: Identical (including mapped IDs).
+   - SKIP: Invalid or missing dependencies (e.g., norm_policy not found).
+   - CREATE: Non-existent → POST with mapped IDs, monitor job (30 attempts).
+   - UPDATE: Differs → PUT with mapped IDs, monitor job.
+   - Async handling updated to 30 attempts with exponential backoff.
 
-**Temps Total** : 80 minutes. Début : 07:55 AM CEST, Fin : 09:15 AM CEST.
+4. **Integration and Tests (15 min)**:
+   - Integrate in `main.py`.
+   - Tests: Mapping validation, SKIP on missing ID, successful UPDATE for `pp_rsa`.
 
-### Spécifications API pour Processing Policies (PP) (Mis à Jour)
+5. **Documentation (5 min)**:
+   - Update `PROJECT_STATE.md`.
+
+**Estimated Time**: 80 min. Start: 08:00 AM CEST, End: 09:20 AM CEST (September 25, 2025).
+
+## Updated Algorithm in `processing_policies.py`
+The algorithm has been finalized based on your implementation:
+- Load sheets and build mappings.
+- Per node: Fetch existing PP, NP, EP, RP.
+- Validate dependencies (SKIP if missing).
+- Map source IDs to target IDs.
+- Determine action:
+  - SKIP: Dependencies invalid.
+  - CREATE: Not existing, valid dependencies.
+  - UPDATE: Existing but differs (norm/enrich/routing).
+  - NOOP: Existing and identical.
+- Explicit validation: Raise ValueError if required fields missing in UPDATE.
+
+## API Endpoints (Based on Logpoint Director v2.7.0 Documentation)
 #### Endpoint `POST /configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy`
-- **Description** : Crée une politique de traitement (asynchrone).
-- **Méthode HTTP** : POST
-- **URL** : `https://api-server-host-name/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy`
-- **En-têtes** : `Authorization: Bearer <token>`, `Content-Type: application/json`.
-- **Payload Requis** :
+- **Description**: Creates a processing policy (async).
+- **Method**: POST
+- **URL**: `https://api-server-host-name/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy`
+- **Headers**: Authorization: Bearer {token}, Content-Type: application/json.
+- **Required Payload**:
   ```json
   {
     "data": {
-      "enrich_policy": "string",  // ID Enrichment Policy cible ou "None" (facultatif)
-      "norm_policy": "string",    // Nom Normalization Policy ou "None" (obligatoire)
-      "policy_name": "string",    // Nom de la politique (obligatoire)
-      "routing_policy": "string"  // ID Routing Policy cible ou "None" (obligatoire)
+      "name": "string",             // Policy name (required)
+      "norm_policy": "string",      // Normalization policy ID or name (required)
+      "enrich_policy": "string",    // Enrichment policy ID or "None" (optional)
+      "routing_policy": "string"    // Routing policy ID (required)
     }
   }
   ```
-  - `policy_name` : Obligatoire, string non vide.
-  - `norm_policy` : Obligatoire, nom valide ou "None".
-  - `enrich_policy` : Facultatif, ID cible via mapping (ou "None" si absent dans XLSX).
-  - `routing_policy` : Obligatoire, ID cible via mapping (ou "None" si absent).
-- **Réponse Succès** :
+- **Success Response**:
   ```json
   {
     "status": "Success",
     "message": "/monitorapi/{pool_uuid}/{logpoint_id}/orders/{request_id}"
   }
   ```
-- **Réponse Échec** :
+- **Failure Response**:
   ```json
   {
     "status": "Failed",
-    "error": "string" // Ex. : "Invalid norm_policy"
+    "error": "string" // e.g., "Invalid norm_policy"
   }
   ```
 
 #### Endpoint `PUT /configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{id}`
-- **Description** : Édite une politique (asynchrone).
-- **Méthode HTTP** : PUT
-- **URL** : `https://api-server-host-name/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{id}`
-- **En-têtes** : Identiques.
-- **Payload Requis** :
+- **Description**: Edits a policy (async).
+- **Method**: PUT
+- **URL**: `https://api-server-host-name/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{id}`
+- **Headers**: Same as POST.
+- **Required Payload**:
   ```json
   {
     "data": {
-      "enrich_policy": "string",  // ID Enrichment Policy cible ou "None" (facultatif)
-      "id": "string",             // ID de la politique (obligatoire)
-      "norm_policy": "string",    // Nom Normalization Policy ou "None" (obligatoire)
-      "policy_name": "string",    // Nom (inclus mais non modifiable ?)
-      "routing_policy": "string"  // ID Routing Policy cible ou "None" (obligatoire)
+      "id": "string",               // Policy ID (required)
+      "policy_name": "string",      // Policy name (required)
+      "norm_policy": "string",      // Normalization policy ID or name (required)
+      "enrich_policy": "string",    // Enrichment policy ID or "None" (optional)
+      "routing_policy": "string"    // Routing policy ID (required)
     }
   }
   ```
-  - `id` : Obligatoire, dans URL et payload.
-  - Autres champs : Idem POST.
-- **Réponse Succès** : Identique à POST.
-- **Réponse Échec** : Identique à POST.
+  - `id`: Required in URL and payload.
+  - Other fields: Same as POST.
+- **Success Response**: Same as POST.
+- **Failure Response**: Same as POST.
 
-#### Dépendances et Validation
-- **Mappage** :
-  - Charger "EnrichmentPolicy" : ID source → EP Name.
-  - Charger "RoutingPolicy" : ID source → RP Name.
-  - Pour chaque nœud cible : Dump `GET /EnrichmentPolicy` et `GET /RoutingPolicy`, mapper EP Name → ID cible, RP Name → ID cible.
-  - Utiliser IDs cibles dans payload.
-- **Vérification** :
-  - `norm_policy` : Obligatoire, nom valide via `/NormalizationPolicy`.
-  - `enrich_policy` : Facultatif, ID cible valide si présent.
-  - `routing_policy` : Obligatoire, ID cible valide.
-  - SKIP si `norm_policy` invalide ; warning pour autres.
+#### Dependencies and Validation
+- **Mapping**:
+  - Load "EnrichmentPolicy": source ID → EP name.
+  - Load "RoutingPolicy": source ID → RP name.
+  - Per target node: Dump `GET /EnrichmentPolicy` and `GET /RoutingPolicy`, map name → target ID.
+- **Verification**:
+  - `norm_policy`: Required, valid name via `/NormalizationPolicy`.
+  - `enrich_policy`: Optional, valid target ID if present.
+  - `routing_policy`: Required, valid target ID.
+  - SKIP if `norm_policy` invalid; warning for others.
+  - Explicit validation: Raise if `"policy_name"` or `"id"` missing in UPDATE.
 
-### Prochaines Étapes
-- **Statut** : Specs mises à jour avec mappage. Code ajustable.
-- **Action** : "GO" pour implémenter, ou précisez (ex. : structure exacte des feuilles EP/RP).
-- **Temps** : 08:00 AM CEST. OK pour 09:15 AM CEST !
+## Next Steps
+- **Status**: Updated with new findings (e.g., 400 resolution via "policy_name"), finalized algorithm from .py.
+- **Action**: Test or finalize with "GO".
+- **Time**: 08:45 AM CEST (September 25, 2025). On track!

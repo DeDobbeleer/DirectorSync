@@ -438,7 +438,7 @@ class DirectorClient:
         except requests.RequestException as e:
             logger.error("Failed to update normalization policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
             return {"status": "failed", "error": str(e)}
-
+   
     def get_existing_processing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
         """Fetch existing processing policies from the SIEM."""
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
@@ -451,7 +451,7 @@ class DirectorClient:
             logger.debug("Fetched %d existing processing policies", len(policies))
             return policies
         except requests.RequestException as e:
-            logger.error("Failed to fetch existing processing policies: %s", str(e))
+            logger.error("Failed to fetch existing processing policies: %s", str(e.response.text))
             return []
 
     def create_processing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:

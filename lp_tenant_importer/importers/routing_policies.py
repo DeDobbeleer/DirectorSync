@@ -35,10 +35,10 @@ def normalize_repo_name(repo_name: str, tenant: str) -> str:
 
 
 def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
-    logging.debug("Found columns: %s", list(df.columns))
-    logging.debug("Found %d routing policies in XLSX", len(df))
+    logger.debug("Found columns: %s", list(df.columns))
+    logger.debug("Found %d routing policies in XLSX", len(df))
     target_nodes = [n.name for n in nodes['backends']]  # Ex. ['lb-backend01', 'lb-backend02']
-    logging.debug("Target nodes for RP: %s", ", ".join(target_nodes))
+    logger.debug("Target nodes for RP: %s", ", ".join(target_nodes))
 
     for policy_name in df['cleaned_policy_name'].unique():  # Par politique unique
         policy_rows = df[df['cleaned_policy_name'] == policy_name]
@@ -47,7 +47,7 @@ def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
         routing_criteria = []
 
         for index, row in policy_rows.iterrows():
-            logging.debug(f"Processing criteria for policy : {policy_name} : {row}")
+            logger.debug(f"Processing criteria for policy : {policy_name} : {row}")
             if pd.notna(row['rule_type']) and pd.notna(row['key']) and pd.notna(row['value']) and pd.notna(row['repo']):
                 criterion = {
                     "type": row['rule_type'],
@@ -58,9 +58,9 @@ def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
                 }
                 routing_criteria.append(criterion)
             else:
-                logging.debug("No criteria for this row in policy %s", policy_name)
+                logger.debug("No criteria for this row in policy %s", policy_name)
 
-        logging.debug("Routing criteria for %s: %s", policy_name, routing_criteria)
+        logger.debug("Routing criteria for %s: %s", policy_name, routing_criteria)
         data = {"data": {"policy_name": policy_name, "active": active, "catch_all": catch_all, "routing_criteria": routing_criteria}}
         # Applique aux nœuds (votre logique existante ici)
         for node in nodes['backends']:
@@ -69,10 +69,10 @@ def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
             required_repos = [crit["repo"] for crit in routing_criteria] + [catch_all] if catch_all else []
             missing_repos = [r for r in required_repos if r not in [repo["name"] for repo in existing_repos]]
             if missing_repos:
-                logging.warning("Skipping policy %s on %s (%s): missing repos %s", policy_name, node.name, node.id, missing_repos)
+                logger.warning("Skipping policy %s on %s (%s): missing repos %s", policy_name, node.name, node.id, missing_repos)
                 continue
             # Logique de mise à jour (ex. http_client.update_routing_policy)
-            logging.info("Policy %s on %s (%s): NOOP -> (N/A)", policy_name, node.name, node.id)
+            logger.info("Policy %s on %s (%s): NOOP -> (N/A)", policy_name, node.name, node.id)
 
     return  # Ajuste selon ton retour
 

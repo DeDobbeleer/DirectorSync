@@ -87,45 +87,46 @@ def cmd_import_routing_policies(args):
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["routing_policies"]
     rows, any_error = import_routing_policies_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    print_table(rows, args.format)
 
 def cmd_import_normalization_policies(args):
     """Import normalization policies command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["normalization_policies"]
     rows, any_error = import_normalization_policies_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    print_table(rows, args.format)
-
+    
 def cmd_import_processing_policies(args):
     """Import processing policies command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["processing_policies"]
     rows, any_error = import_processing_policies_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    print_table(rows, args.format)
-
+    
 def cmd_import_enrichment_policies(args):
     """Import enrichment policies command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["enrichment-policies"]
     rows, any_error = import_enrichment_policies_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    print_table(rows, args.format)
-
+    
 def cmd_import_alerts(args):
     """Import alerts command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
     targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["alerts"]
     rows, any_error = import_alerts_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    print_table(rows, args.format)
+    
 
 # def print_table(rows, format):
 #     """Print the result table in the specified format."""

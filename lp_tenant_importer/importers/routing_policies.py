@@ -120,7 +120,7 @@ def import_routing_policies_for_nodes(
             repos_to_check = set()
 
           
-            for _, crit_row in group.iterrows():
+            for _, crit_row in grouped.iterrows():
                 logger.debug(f"Criteria row for {policy_name}: {crit_row}")
                 if str(crit_row['rule_type']).strip().lower() not in ('nan', '', 'none'):
                     crit_repo = normalize_repo_name(str(crit_row['repo']).strip(), tenant)

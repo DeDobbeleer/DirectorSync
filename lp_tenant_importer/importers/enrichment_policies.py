@@ -370,8 +370,8 @@ def import_enrichment_policies_for_nodes(
 
     # Process per node, then per policy
     for node in filtered_nodes:
-        node_id = node['id']
-        node_name = node['name']
+        node_id = node.id
+        node_name = node.name
         siem = node_name  # Assuming siem is same as node_name
 
         # Check existing policies and sources

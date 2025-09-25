@@ -153,9 +153,9 @@ def check_existing_per_node(
         es_data = es_response.json()
         existing_es = {}
         if isinstance(es_data, list):
-            existing_es = {item.get('name', ''): item for item in es_data}
+            existing_es = {item.get('source_name', ''): item for item in es_data}
         else:
-            existing_es = {es['name']: es for es in es_data.get('data', [])}
+            existing_es = {es['source_name']: es for es in es_data.get('data', [])}
         logger.debug(f"Fetched ES list for node {node_name}: {existing_es.keys()}")
     except Exception as e:
         logger.error(f"Failed to fetch ES list for node {node_name}: {str(e)}")

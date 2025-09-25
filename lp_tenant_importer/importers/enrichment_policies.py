@@ -120,7 +120,7 @@ def build_enrichment_payloads(
 def check_existing_per_node(
     client,
     pool_uuid: str,
-    nodes: List[Dict],
+    node: List[Dict],
     payloads: Dict[str, Dict],
     es_per_policy: Dict[str, List[str]]
 ) -> Dict[str, Dict]:
@@ -142,63 +142,63 @@ def check_existing_per_node(
     """
     results = {policy_id: {} for policy_id in payloads.keys()}
 
-    for node in nodes:
-        node_id = node['id']
-        node_name = node['name']
 
-        # Fetch existing ES list for this node
-        es_url = f"/configapi/{pool_uuid}/{node_id}/EnrichmentSource"
-        try:
-            es_response = client.get(es_url)
-            existing_es = {es['name']: es for es in es_response.json().get('data', [])}
-            logger.debug(f"Fetched ES list for node {node_name}: {existing_es.keys()}")
-        except Exception as e:
-            logger.error(f"Failed to fetch ES list for node {node_name}: {str(e)}")
+    node_id = node.id
+    node_name = node.name
+
+    # Fetch existing ES list for this node
+    es_url = f"/configapi/{pool_uuid}/{node_id}/EnrichmentSource"
+    try:
+        es_response = client.get(es_url)
+        existing_es = {es['name']: es for es in es_response.json().get('data', [])}
+        logger.debug(f"Fetched ES list for node {node_name}: {existing_es.keys()}")
+    except Exception as e:
+        logger.error(f"Failed to fetch ES list for node {node_name}: {str(e)}")
+        return results
+
+    # Fetch existing EP list for this node
+    ep_url = f"/configapi/{pool_uuid}/{node_id}/EnrichmentPolicy"
+    try:
+        ep_response = client.get(ep_url)
+        existing_eps = {ep['name']: ep for ep in ep_response.json().get('data', [])}
+        logger.debug(f"Fetched EP list for node {node_name}: {existing_eps.keys()}")
+    except Exception as e:
+        logger.error(f"Failed to fetch EP list for node {node_name}: {str(e)}")
+        return results
+
+    for policy_id, payload in payloads.items():
+        policy_name = payload['data']['name']
+        es_list = es_per_policy[policy_id]
+
+        # Check if all required ES exist
+        missing_es = [es for es in es_list if es not in existing_es]
+        if missing_es:
+            results[policy_id][node_name] = {
+                'action': 'SKIP',
+                'error': f"Missing ES: {', '.join(missing_es)}"
+            }
+            logger.warning(f"Skipping {policy_name} on {node_name} due to missing ES: {missing_es}")
             continue
 
-        # Fetch existing EP list for this node
-        ep_url = f"/configapi/{pool_uuid}/{node_id}/EnrichmentPolicy"
-        try:
-            ep_response = client.get(ep_url)
-            existing_eps = {ep['name']: ep for ep in ep_response.json().get('data', [])}
-            logger.debug(f"Fetched EP list for node {node_name}: {existing_eps.keys()}")
-        except Exception as e:
-            logger.error(f"Failed to fetch EP list for node {node_name}: {str(e)}")
-            continue
+        # Check if EP exists and compare
+        if policy_name in existing_eps:
+            existing_ep = existing_eps[policy_name]
+            existing_specs = existing_ep.get('specifications', [])
+            new_specs = payload['data']['specifications']
 
-        for policy_id, payload in payloads.items():
-            policy_name = payload['data']['name']
-            es_list = es_per_policy[policy_id]
-
-            # Check if all required ES exist
-            missing_es = [es for es in es_list if es not in existing_es]
-            if missing_es:
-                results[policy_id][node_name] = {
-                    'action': 'SKIP',
-                    'error': f"Missing ES: {', '.join(missing_es)}"
-                }
-                logger.warning(f"Skipping {policy_name} on {node_name} due to missing ES: {missing_es}")
-                continue
-
-            # Check if EP exists and compare
-            if policy_name in existing_eps:
-                existing_ep = existing_eps[policy_name]
-                existing_specs = existing_ep.get('specifications', [])
-                new_specs = payload['data']['specifications']
-
-                # Case-sensitive comparison of specifications
-                if _compare_specifications(existing_specs, new_specs):
-                    results[policy_id][node_name] = {'action': 'NOOP'}
-                    logger.info(f"NOOP for {policy_name} on {node_name}")
-                else:
-                    results[policy_id][node_name] = {
-                        'action': 'UPDATE',
-                        'existing_id': existing_ep.get('id')
-                    }
-                    logger.info(f"UPDATE needed for {policy_name} on {node_name}")
+            # Case-sensitive comparison of specifications
+            if _compare_specifications(existing_specs, new_specs):
+                results[policy_id][node_name] = {'action': 'NOOP'}
+                logger.info(f"NOOP for {policy_name} on {node_name}")
             else:
-                results[policy_id][node_name] = {'action': 'CREATE'}
-                logger.info(f"CREATE needed for {policy_name} on {node_name}")
+                results[policy_id][node_name] = {
+                    'action': 'UPDATE',
+                    'existing_id': existing_ep.get('id')
+                }
+                logger.info(f"UPDATE needed for {policy_name} on {node_name}")
+        else:
+            results[policy_id][node_name] = {'action': 'CREATE'}
+            logger.info(f"CREATE needed for {policy_name} on {node_name}")
 
     return results
 
@@ -319,7 +319,7 @@ def execute_actions_per_node(
 def import_enrichment_policies_for_nodes(
     client,
     pool_uuid: str,
-    nodes: List[Dict],
+    nodes: Any,
     xlsx_path: str,
     dry_run: bool = False,
     targets: List[str] = None
@@ -362,71 +362,66 @@ def import_enrichment_policies_for_nodes(
     # Build payloads and get ES list
     payloads, es_per_policy = build_enrichment_payloads(df_policy, df_rules, df_criteria)
 
-    # Filter nodes based on targets if provided
-    if targets:
-        filtered_nodes = [node for node in nodes if any(role in targets for role in ['backends', 'all_in_one', 'search_heads'])]
-    else:
-        filtered_nodes = nodes
-
     # Process per node, then per policy
-    for node in filtered_nodes:
-        node_id = node.id
-        node_name = node.name
-        siem = node_name  # Assuming siem is same as node_name
+    for target_type in targets:
+        for node in nodes.get(target_type, []):
+            node_id = node.id
+            node_name = node.name
+            siem = node_name  # Assuming siem is same as node_name
 
-        # Check existing policies and sources
-        check_results = check_existing_per_node(client, pool_uuid, [node], payloads, es_per_policy)
+            # Check existing policies and sources
+            check_results = check_existing_per_node(client, pool_uuid, node, payloads, es_per_policy)
 
-        for policy_id, payload in payloads.items():
-            policy_name = payload['data']['name']
-            specs_count = len(payload['data']['specifications'])
-            node_result = check_results.get(policy_id, {}).get(node_name, {})
-            action = node_result.get('action', 'NONE')
+            for policy_id, payload in payloads.items():
+                policy_name = payload['data']['name']
+                specs_count = len(payload['data']['specifications'])
+                node_result = check_results.get(policy_id, {}).get(node_name, {})
+                action = node_result.get('action', 'NONE')
 
-            result_entry = {
-                'siem': siem,
-                'node': node_name,
-                'name': policy_name,
-                'specs_count': specs_count,
-                'action': action,
-                'result': 'N/A',
-                'error': node_result.get('error')
-            }
+                result_entry = {
+                    'siem': siem,
+                    'node': node_name,
+                    'name': policy_name,
+                    'specs_count': specs_count,
+                    'action': action,
+                    'result': 'N/A',
+                    'error': node_result.get('error')
+                }
 
-            if action in ['SKIP', 'NOOP']:
-                result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
-                logger.info(f"{action} for {policy_name} on {node_name}")
-            elif action in ['CREATE', 'UPDATE'] and not dry_run:
-                try:
-                    if action == 'CREATE':
-                        response = client.create_enrichment_policy(pool_uuid, node_id, payload)
-                        job_id = response.json().get('job_id')
-                    elif action == 'UPDATE':
-                        dest_id = node_result.get('existing_id')
-                        update_payload = payload.copy()
-                        update_payload['data']['id'] = dest_id
-                        response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
-                        job_id = response.json().get('job_id')
+                if action in ['SKIP', 'NOOP']:
+                    result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
+                    logger.info(f"{action} for {policy_name} on {node_name}")
+                elif action in ['CREATE', 'UPDATE'] and not dry_run:
+                    try:
+                        if action == 'CREATE':
+                            response = client.create_enrichment_policy(pool_uuid, node_id, payload)
+                            job_id = response.json().get('job_id')
+                        elif action == 'UPDATE':
+                            dest_id = node_result.get('existing_id')
+                            update_payload = payload.copy()
+                            update_payload['data']['id'] = dest_id
+                            response = client.update_enrichment_policy(pool_uuid, node_id, dest_id, update_payload)
+                            job_id = response.json().get('job_id')
 
-                    job_status = client.monitor_job(job_id)
-                    if job_status.get('success'):
-                        result_entry['result'] = 'Success'
-                        logger.info(f"{action} success for {policy_name} on {node_name}")
-                    else:
+                        job_status = client.monitor_job(job_id)
+                        if job_status.get('success'):
+                            result_entry['result'] = 'Success'
+                            logger.info(f"{action} success for {policy_name} on {node_name}")
+                        else:
+                            result_entry['result'] = 'Fail'
+                            result_entry['error'] = job_status.get('error', 'Unknown error')
+                            logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
+                            any_error = True
+                    except Exception as e:
                         result_entry['result'] = 'Fail'
-                        result_entry['error'] = job_status.get('error', 'Unknown error')
-                        logger.error(f"{action} fail for {policy_name} on {node_name}: {result_entry['error']}")
+                        result_entry['error'] = str(e)
+                        logger.error(f"{action} error for {policy_name} on {node_name}: {str(e)}")
                         any_error = True
-                except Exception as e:
-                    result_entry['result'] = 'Fail'
-                    result_entry['error'] = str(e)
-                    logger.error(f"{action} error for {policy_name} on {node_name}: {str(e)}")
-                    any_error = True
-            elif dry_run:
-                result_entry['result'] = 'Dry-run'
-                logger.info(f"Dry run: {action} for {policy_name} on {node_name}")
+                elif dry_run:
+                    result_entry['result'] = 'Dry-run'
+                    logger.info(f"Dry run: {action} for {policy_name} on {node_name}")
 
-            rows.append(result_entry)
+                rows.append(result_entry)
 
     # Log summary
     actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows}

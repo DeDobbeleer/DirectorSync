@@ -231,9 +231,9 @@ def _compare_specifications(existing: List[Dict], new: List[Dict]) -> bool:
     for ex_spec, new_spec in zip(existing, new):
         if ex_spec.get('source') != new_spec.get('source'):
             return False
-        if str(sorted(ex_spec.get('rules', []))) != str(sorted(new_spec.get('rules', []))):
+        if not str(sorted(ex_spec.get('rules', []))) == str(sorted(new_spec.get('rules', []))):
             return False
-        if str(sorted(ex_spec.get('criteria', []))) != str(sorted(new_spec.get('criteria', []))):
+        if not str(sorted(ex_spec.get('criteria', []))) == str(sorted(new_spec.get('criteria', []))):
             return False
     return True
 

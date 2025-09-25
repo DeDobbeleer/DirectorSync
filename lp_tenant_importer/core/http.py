@@ -627,7 +627,7 @@ class DirectorClient:
         result = response.json()
         logger.debug("Update response: %s", result)
 
-        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+        if result.get("status") == "Success" and "message" in result and result.get('message', '') and result["message"].startswith("monitorapi/"):
             monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
             logger.info("Monitoring job for update %s at %s", policy_id, monitorapi)
             

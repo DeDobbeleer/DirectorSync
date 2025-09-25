@@ -388,7 +388,9 @@ def import_enrichment_policies_for_nodes(
                 if isinstance(payload['data']['description'], float) and np.isnan(payload['data']['description']):
                     payload['data']['description'] = ''
                 if isinstance(payload['data']['tags'], float) and np.isnan(payload['data']['tags']):
-                    payload['data']['tags'] = ''               
+                    payload['data']['tags'] = ''              
+                if isinstance(payload['data']['active'], np.bool_):
+                    payload['data']['active'] = bool(payload['data']['active']) 
                 specs_count = len(payload['data']['specifications'])
                 node_result = check_results.get(policy_id, {}).get(node_name, {})
                 action = node_result.get('action', 'NONE')

@@ -81,6 +81,7 @@ def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
         logger.error("Tenant %s not found in configuration file", tenant_name)
         raise ValueError(f"Tenant {tenant_name} not found")
     
+    logger.debug(f"config dump: {tenant}")
     defaults = config.get("tenants", {}).get("defaults", {})
     if not defaults :
         logger.error("defaults not found in configuration file")

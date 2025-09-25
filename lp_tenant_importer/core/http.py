@@ -486,7 +486,7 @@ class DirectorClient:
                     return {"status": "failed", "error": error}
             return {"status": "failed", "error": json.dumps(result, indent=2)}
         except requests.RequestException as e:
-            logger.error("Failed to create processing policy %s: %s", policy["name"], str(e))
+            logger.error("Failed to create processing policy %s: %s", policy["name"], str(e.response.text))
             return {"status": "failed", "error": str(e)}
 
     def update_processing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:

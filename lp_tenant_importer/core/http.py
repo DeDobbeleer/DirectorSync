@@ -539,7 +539,7 @@ class DirectorClient:
         """
         logger.debug("Fetching enrichment sources for pool %s, node %s", pool_uuid, logpoint_id)
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentSource"
-        response = self.make_api_request("GET", url)
+        response = self.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, list):
@@ -560,7 +560,7 @@ class DirectorClient:
         """
         logger.debug("Fetching enrichment policies for pool %s, node %s", pool_uuid, logpoint_id)
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy"
-        response = self.make_api_request("GET", url)
+        response = self.get(url, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
         response.raise_for_status()
         policies = response.json()
         if not isinstance(policies, list):
@@ -585,7 +585,7 @@ class DirectorClient:
         """
         logger.debug("Creating enrichment policy on node %s", logpoint_id)
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy"
-        response = self.make_api_request("POST", url, json=policy_data)
+        response = self.get(url, json=policy_data, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
         response.raise_for_status()
         result = response.json()
         logger.debug("Creation response: %s", result)
@@ -620,7 +620,7 @@ class DirectorClient:
         """
         logger.debug("Updating policy %s on node %s", policy_id, logpoint_id)
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/EnrichmentPolicy/{policy_id}"
-        response = self.make_api_request("PUT", url, json=policy_data)
+        response = self.get(url, json=policy_data, verify=self.verify, timeout=self.timeout, proxies=self.proxies)
         response.raise_for_status()
         result = response.json()
         logger.debug("Update response: %s", result)

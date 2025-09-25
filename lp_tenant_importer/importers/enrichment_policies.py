@@ -425,8 +425,7 @@ def import_enrichment_policies_for_nodes(
                     except Exception as e:
                         result_entry['result'] = 'Fail'
                         result_entry['error'] = str(e)
-                        logger.error(f"{action} error for {policy_name} on {node_name}: {str(e)}")
-                        logger.debug(f"Payload causing error: {payload}")
+                        logger.error(f"{action} error for {policy_name} on {node_name} - payload: {payload}: {str(e)}")
                         any_error = True
                 elif dry_run:
                     result_entry['result'] = 'Dry-run'

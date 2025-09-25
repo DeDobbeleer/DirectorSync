@@ -47,8 +47,8 @@ def import_routing_policies_for_nodes(df, nodes, tenant_config, http_client):
         routing_criteria = []
 
         for index, row in policy_rows.iterrows():
+            logging.debug(f"Processing criteria for policy : {policy_name} : {row}")
             if pd.notna(row['rule_type']) and pd.notna(row['key']) and pd.notna(row['value']) and pd.notna(row['repo']):
-                logging.debug(f"Processing criteria for policy : {policy_name}")
                 criterion = {
                     "type": row['rule_type'],
                     "key": row['key'],

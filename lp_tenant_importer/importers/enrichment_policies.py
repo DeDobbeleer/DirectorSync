@@ -232,13 +232,13 @@ def _compare_specifications(existing: List[Dict], new: List[Dict]) -> bool:
         if ex_spec.get('source') != new_spec.get('source'):
             return False
         
-        old = str(sorted(ex_spec.get('rules', [])))
-        new = str(sorted(new_spec.get('rules', [])))
+        old = ex_spec.get('rules', [])
+        new = new_spec.get('rules', [])
         if old != new:
             return False
         
-        old = str(sorted(ex_spec.get('criteria', [])))
-        new = str(sorted(new_spec.get('criteria', [])))
+        old = ex_spec.get('criteria', [])
+        new = new_spec.get('criteria', [])
         if old == new:
             return False
     return True

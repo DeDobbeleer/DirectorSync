@@ -178,7 +178,7 @@ def execute_actions_per_node(
                 'name': group_name,
                 'result': 'N/A',
                 'action': action,
-                'error': node_result.get('error', '')
+                'error': node_result.get('error', '-')
             }
 
             if action == 'SKIP' or action == 'NOOP':

@@ -191,12 +191,14 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
 
     return results
 
+
 def _compare_syslog_collector(existing: Dict, new: Dict) -> bool:
     """
     Compares two Syslog Collector configurations for equality.
 
     Performs a case-sensitive comparison of proxy_condition, processpolicy, proxy_ip,
-    hostname, charset, and parser.
+    hostname, charset, and parser. Handles lists (e.g., proxy_ip, hostname) by comparing
+    sorted sets to account for order independence.
 
     Args:
         existing (Dict): Existing collector data.
@@ -205,209 +207,20 @@ def _compare_syslog_collector(existing: Dict, new: Dict) -> bool:
     Returns:
         bool: True if configurations are identical, False otherwise.
     """
-    fields_to_compare = ["proxy_condition", "processpolicy", "proxy_ip", "hostname", "charset", "parser"]
+    fields_to_compare = ["proxy_condition", "processpolicy", "charset", "parser"]
     for field in fields_to_compare:
         if existing.get(field) != new.get(field):
             return False
+
+    # Compare lists (proxy_ip, hostname) as sorted sets
+    existing_proxy_ip = set(existing.get("proxy_ip", []))
+    new_proxy_ip = set(new.get("proxy_ip", []))
+    if existing_proxy_ip != new_proxy_ip:
+        return False
+
+    existing_hostname = set(existing.get("hostname", []))
+    new_hostname = set(new.get("hostname", []))
+    if existing_hostname != new_hostname:
+        return False
+
     return True
-
-def execute_actions_per_node(client: DirectorClient, pool_uuid: str, nodes: List[Node], payloads: Dict[str, Dict], check_results: Dict[str, Dict]) -> List[Dict]:
-    """
-    Executes the actions (CREATE, UPDATE) for each Syslog Collector per node.
-
-    Loops over nodes, then over payloads, using check_results to determine actions.
-    Monitors jobs and collects results in a list of dictionaries (siem, node, name, result, action, error).
-
-    Args:
-        client (DirectorClient): API client instance.
-        pool_uuid (str): UUID of the pool.
-        nodes (List[Node]): List of node objects with id and name.
-        payloads (Dict[str, Dict]): Dictionary of payloads keyed by device_id or index.
-        check_results (Dict[str, Dict]): Results from check_existing_per_node.
-
-    Returns:
-        List[Dict]: List of result dictionaries for the output table.
-    """
-    results = []
-
-    for node in nodes:
-        node_id = node.id
-        node_name = node.name
-        siem = node_name  # Assuming siem is node_name
-
-        for device_id, payload in payloads.items():
-            device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is available
-            node_result = check_results.get(device_id, {}).get(node_name, {})
-            action = node_result.get("action", "NONE")
-
-            result_entry = {
-                "siem": siem,
-                "node": node_name,
-                "name": device_name,
-                "result": "N/A",
-                "action": action,
-                "error": node_result.get("error", "")
-            }
-
-            if action in ["SKIP", "NOOP"]:
-                result_entry["result"] = "Skipped" if action == "SKIP" else "Noop"
-                logger.info(f"{action} for {device_name} on {node_name}")
-            elif action in ["CREATE", "UPDATE"] and not "dry_run":
-                try:
-                    if action == "CREATE":
-                        response = client.create_syslog_collector(pool_uuid, node_id, payload)
-                    elif action == "UPDATE":
-                        existing_id = node_result.get("existing_id")
-                        update_payload = payload.copy()
-                        update_payload["data"]["id"] = existing_id
-                        response = client.update_syslog_collector(pool_uuid, node_id, existing_id, update_payload)
-
-                    if response.get("status") == "Success":
-                        monitorapi = response.get("message")
-                        if monitorapi and monitorapi.startswith("/monitorapi/"):
-                            job_status = client.monitor_job(monitorapi)
-                            if job_status.get("success"):
-                                result_entry["result"] = "Success"
-                                logger.info(f"{action} success for {device_name} on {node_name}")
-                            else:
-                                result_entry["result"] = "Fail"
-                                result_entry["error"] = job_status.get("error", "Unknown error")
-                                logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
-                                any_error = True
-                        else:
-                            result_entry["result"] = "Success"
-                            logger.info(f"{action} success for {device_name} on {node_name} (no monitoring)")
-                    else:
-                        result_entry["result"] = "Fail"
-                        result_entry["error"] = response.get("error", "Unknown error")
-                        logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
-                        any_error = True
-                except Exception as e:
-                    result_entry["result"] = "Fail"
-                    result_entry["error"] = str(e)
-                    logger.error(f"{action} error for {device_name} on {node_name}: {str(e)}")
-                    any_error = True
-            elif "dry_run":
-                result_entry["result"] = "Dry-run"
-                logger.info(f"Dry run: {action} for {device_name} on {node_name}")
-
-            results.append(result_entry)
-
-    return results
-
-def import_syslog_collectors_for_nodes(
-    client: DirectorClient,
-    pool_uuid: str,
-    nodes: Dict[str, List[Node]],
-    xlsx_path: str,
-    dry_run: bool = False,
-    targets: List[str] = None
-) -> Tuple[List[Dict[str, Any]], bool]:
-    """
-    Imports Syslog Collectors for specified nodes from an XLSX file.
-
-    Coordinates the workflow: loads data, builds payloads, checks existing collectors
-    per node, executes actions (CREATE, UPDATE, NOOP, SKIP), and returns results.
-
-    Args:
-        client (DirectorClient): API client instance.
-        pool_uuid (str): UUID of the pool.
-        nodes (Dict[str, List[Node]]): Dictionary of node lists by role (e.g., backends).
-        xlsx_path (str): Path to the configuration XLSX file.
-        dry_run (bool): If True, simulate without API calls.
-        targets (List[str]): List of target node roles (e.g., ['backends', 'all_in_one']).
-
-    Returns:
-        Tuple[List[Dict[str, Any]], bool]: Tuple of (list of results, error indicator).
-        Results include: siem, node, name, action, result, error.
-
-    Raises:
-        Exception: If XLSX loading or API calls fail.
-    """
-    rows = []
-    any_error = False
-
-    # Load Excel sheet with error handling
-    try:
-        df = pd.read_excel(xlsx_path, sheet_name="DeviceFetcher")
-        logger.debug(f"Loaded DeviceFetcher sheet: {len(df)} rows")
-    except Exception as e:
-        logger.error(f"Failed to load XLSX data: {str(e)}")
-        return [], True
-
-    # Build payloads
-    payloads = build_syslog_collector_payloads(df)
-
-    # Process per node, then per collector
-    for target_type in targets or ["backends", "all_in_one"]:
-        for node in nodes.get(target_type, []):
-            node_id = node.id
-            node_name = node.name
-            siem = node_name  # Assuming siem is node_name
-
-            # Check existing collectors with the DataFrame
-            check_results = check_existing_per_node(client, pool_uuid, node, payloads, df)
-
-            for device_id, payload in payloads.items():
-                device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is available
-                node_result = check_results.get(device_id, {}).get(node_name, {})
-                action = node_result.get("action", "NONE")
-
-                result_entry = {
-                    "siem": siem,
-                    "node": node_name,
-                    "name": device_name,
-                    "action": action,
-                    "result": "N/A",
-                    "error": node_result.get("error", "")
-                }
-
-                if action in ["SKIP", "NOOP"]:
-                    result_entry["result"] = "Skipped" if action == "SKIP" else "Noop"
-                    logger.info(f"{action} for {device_name} on {node_name}")
-                elif action in ["CREATE", "UPDATE"] and not dry_run:
-                    try:
-                        if action == "CREATE":
-                            response = client.create_syslog_collector(pool_uuid, node_id, payload)
-                        elif action == "UPDATE":
-                            existing_id = node_result.get("existing_id")
-                            update_payload = payload.copy()
-                            update_payload["data"]["id"] = existing_id
-                            response = client.update_syslog_collector(pool_uuid, node_id, existing_id, update_payload)
-
-                        if response.get("status") == "Success":
-                            monitorapi = response.get("message")
-                            if monitorapi and monitorapi.startswith("/monitorapi/"):
-                                job_status = client.monitor_job(monitorapi)
-                                if job_status.get("success"):
-                                    result_entry["result"] = "Success"
-                                    logger.info(f"{action} success for {device_name} on {node_name}")
-                                else:
-                                    result_entry["result"] = "Fail"
-                                    result_entry["error"] = job_status.get("error", "Unknown error")
-                                    logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
-                                    any_error = True
-                            else:
-                                result_entry["result"] = "Success"
-                                logger.info(f"{action} success for {device_name} on {node_name} (no monitoring)")
-                        else:
-                            result_entry["result"] = "Fail"
-                            result_entry["error"] = response.get("error", "Unknown error")
-                            logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
-                            any_error = True
-                    except Exception as e:
-                        result_entry["result"] = "Fail"
-                        result_entry["error"] = str(e)
-                        logger.error(f"{action} error for {device_name} on {node_name}: {str(e)}")
-                        any_error = True
-                elif dry_run:
-                    result_entry["result"] = "Dry-run"
-                    logger.info(f"Dry run: {action} for {device_name} on {node_name}")
-
-                rows.append(result_entry)
-
-    # Log summary
-    actions_summary = {r["action"]: sum(1 for res in rows if res["action"] == r["action"]) for r in rows}
-    logger.info(f"Import summary: {actions_summary}")
-
-    return rows, any_error

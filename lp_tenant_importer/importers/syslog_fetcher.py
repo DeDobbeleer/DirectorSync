@@ -85,11 +85,12 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
 
     return payloads
 
-def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, payloads: Dict[str, Dict]) -> Dict[str, Dict]:
+def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, payloads: Dict[str, Dict], df: pd.DataFrame) -> Dict[str, Dict]:
     """
     Checks existing Syslog Collectors per node.
 
-    Fetches devices via get_devices to validate existence and cross-check proxy_ip for uses_proxy.
+    Fetches devices via get_devices to validate existence.
+    Performs an internal cross-check of proxy_ip for uses_proxy against ips from the XLSX sheet.
     Determines actions (NOOP, SKIP, CREATE, UPDATE) based on matching fields.
 
     Args:
@@ -97,6 +98,7 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
         pool_uuid (str): UUID of the pool.
         node (Node): Node object with id and name.
         payloads (Dict[str, Dict]): Dictionary of payloads keyed by device_id or index.
+        df (pd.DataFrame): Original DataFrame from "DeviceFetcher" for IP extraction.
 
     Returns:
         Dict[str, Dict]: Dictionary of results per device_id, with node-specific actions.
@@ -106,7 +108,7 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
     node_name = node.name
     siem = node_name  # Assuming siem is node_name
 
-    # Fetch existing devices for cross-check
+    # Fetch existing devices for existence check (not for proxy_ip)
     try:
         devices = client.get_devices(pool_uuid, node_id)
         existing_devices = {d.get('device_id', str(i)): d for i, d in enumerate(devices)}
@@ -115,12 +117,12 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
         logger.error(f"Failed to fetch devices for node {node_name}: {str(e)}")
         return results
 
-    # Extract use_as_proxy IPs from payloads for cross-check
-    use_as_proxy_ips = set()
-    for device_id, payload in payloads.items():
-        if payload["data"].get("proxy_condition") == "use_as_proxy":
-            ips = payloads[device_id].get("ips", "").split("|") if pd.notna(payloads[device_id].get("ips")) else []
-            use_as_proxy_ips.update(ip.strip() for ip in ips if ip.strip())
+    # Extract all ips from the DataFrame for internal cross-check
+    all_ips = set()
+    for _, row in df.iterrows():
+        ips = row.get('ips', '').split('|') if pd.notna(row.get('ips')) else []
+        all_ips.update(ip.strip() for ip in ips if ip.strip())
+    logger.debug(f"Extracted all IPs from XLSX for cross-check: {all_ips}")
 
     for device_id, payload in payloads.items():
         device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is in payload
@@ -134,8 +136,13 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
-            if any(pd.notna(payload["data"].get(field)) and payload["data"].get(field) != "" for field in ["processpolicy", "proxy_ip"]):
-                result = {"action": "SKIP", "error": "Unexpected processpolicy or proxy_ip for use_as_proxy"}
+            if pd.notna(payload["data"].get("processpolicy")) and payload["data"].get("processpolicy") != "":
+                result = {"action": "SKIP", "error": "Unexpected processpolicy for use_as_proxy"}
+                logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
+                results[device_id][node_name] = result
+                continue
+            if pd.notna(payload["data"].get("proxy_ip")) and payload["data"].get("proxy_ip"):
+                result = {"action": "SKIP", "error": "Unexpected proxy_ip for use_as_proxy"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
@@ -147,10 +154,10 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
-            # Cross-check proxy_ip
+            # Internal cross-check of proxy_ip against all ips in XLSX
             proxy_ips = set(proxy_ip)
-            if not proxy_ips.issubset(use_as_proxy_ips):
-                result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - use_as_proxy_ips}"}
+            if not proxy_ips.issubset(all_ips):
+                result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - all_ips}"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue

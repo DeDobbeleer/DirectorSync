@@ -10,16 +10,18 @@ from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
+def build_syslog_collector_payloads(df: pd.DataFrame, client: DirectorClient, pool_uuid: str, node_id: str) -> Dict[str, Dict]:
     """
     Builds the Syslog Collector payloads from the DeviceFetcher DataFrame.
 
-    Filters rows where app="SyslogCollector", constructs payloads based on proxy_condition,
-    and handles list fields (hostname, proxy_ip) by splitting on "|". Excludes non-listed
-    fields except charset and parser. Includes device_id if available.
+    Fetches existing device_ids from the API, matches them with XLSX rows based on device_name,
+    and constructs payloads including the API device_id.
 
     Args:
         df (pd.DataFrame): DataFrame from "DeviceFetcher" sheet.
+        client (DirectorClient): API client instance.
+        pool_uuid (str): UUID of the pool.
+        node_id (str): ID of the current node.
 
     Returns:
         Dict[str, Dict]: Dictionary of payloads keyed by device_id (or row index if None).
@@ -27,10 +29,20 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
     payloads = {}
     df_filtered = df[df['app'] == "SyslogCollector"].copy()
 
+    # Fetch existing devices to get device_ids
+    try:
+        devices = client.get_devices(pool_uuid, node_id)
+        device_map = {d.get('device_name', str(i)): d.get('device_id') for i, d in enumerate(devices)}
+        logger.debug(f"Device map from API: {device_map}")
+    except Exception as e:
+        logger.error(f"Failed to fetch devices for node {node_id}: {str(e)}")
+        return payloads
+
     for index, row in df_filtered.iterrows():
         device_id = row.get('device_id') if pd.notna(row['device_id']) else None
         key = device_id if device_id else str(index)
-        
+        device_name = row.get('device_name', '')  # Assuming device_name is the matching field
+
         # Split list fields, handle NaN as empty lists
         hostname = row['hostname'].split('|') if pd.notna(row['hostname']) else []
         hostname = [h.strip() for h in hostname if h.strip()]
@@ -40,7 +52,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
         # Validate and build payload based on proxy_condition
         proxy_condition = row['proxy_condition']
         if proxy_condition not in ["use_as_proxy", "uses_proxy", None]:
-            logger.warning(f"Invalid proxy_condition {proxy_condition} for {row['device_name']}, skipping payload")
+            logger.warning(f"Invalid proxy_condition {proxy_condition} for {device_name}, skipping payload")
             continue
 
         payload = {"data": {}}
@@ -48,7 +60,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
 
         if proxy_condition in ["use_as_proxy", None]:
             if pd.isna(row['processpolicy']):
-                logger.warning(f"Missing processpolicy for {row['device_name']} with proxy_condition {proxy_condition}")
+                logger.warning(f"Missing processpolicy for {device_name} with proxy_condition {proxy_condition}")
                 continue
             payload["data"]["processpolicy"] = row['processpolicy']
             if pd.isna(row['proxy_ip']):
@@ -57,11 +69,11 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
                 else:
                     continue
             else:
-                logger.warning(f"Unexpected proxy_ip for {row['device_name']} with proxy_condition {proxy_condition}")
+                logger.warning(f"Unexpected proxy_ip for {device_name} with proxy_condition {proxy_condition}")
                 continue
         elif proxy_condition == "uses_proxy":
             if pd.isna(row['processpolicy']) or not proxy_ip:
-                logger.warning(f"Missing processpolicy or proxy_ip for {row['device_name']} with proxy_condition uses_proxy")
+                logger.warning(f"Missing processpolicy or proxy_ip for {device_name} with proxy_condition uses_proxy")
                 continue
             payload["data"]["processpolicy"] = row['processpolicy']
             payload["data"]["proxy_ip"] = proxy_ip
@@ -69,7 +81,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
         # Mandatory fields for use_as_proxy and None, optional for uses_proxy
         if proxy_condition in ["use_as_proxy", None]:
             if pd.isna(row['charset']) or pd.isna(row['parser']):
-                logger.warning(f"Missing charset or parser for {row['device_name']} with proxy_condition {proxy_condition}")
+                logger.warning(f"Missing charset or parser for {device_name} with proxy_condition {proxy_condition}")
                 continue
             payload["data"]["charset"] = row['charset']
             payload["data"]["parser"] = row['parser']
@@ -77,13 +89,18 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
             payload["data"]["charset"] = row['charset'] if pd.notna(row['charset']) else "utf_8"
             payload["data"]["parser"] = row['parser'] if pd.notna(row['parser']) else "SyslogParser"
 
-        # Optional fields, including device_id
-        if device_id and pd.notna(device_id):
-            payload["data"]["device_id"] = device_id
+        # Add device_id from API
+        api_device_id = device_map.get(device_name)
+        if not api_device_id:
+            logger.warning(f"No matching device_id found for {device_name} in API, skipping payload")
+            continue
+        payload["data"]["device_id"] = api_device_id
+
+        # Optional fields
         if hostname:
             payload["data"]["hostname"] = hostname
 
-        logger.debug(f"Built payload for {row['device_name']}: {payload}")
+        logger.debug(f"Built payload for {device_name}: {payload}")
         payloads[key] = payload
 
     return payloads

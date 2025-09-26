@@ -73,7 +73,7 @@ def check_existing_per_node(
     Checks existing Devices per node.
 
     For each node, fetches DeviceGroups for mapping, then lists existing Devices, matches by name or ip,
-    and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only.
+    and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only (excluding distributed_collector and logpolicy).
     Skips if any devicegroup name missing or mandatory fields invalid. Maps devicegroup IDs
     before comparison and normalizes forced empty arrays with detailed logging.
 
@@ -151,28 +151,24 @@ def check_existing_per_node(
         existing_id = None
 
         if existing:
-            # Compare specified fields (normalize forced empty arrays with detailed logging)
+            # Compare specified fields (excluding distributed_collector and logpolicy)
             existing_spec = {
                 'name': existing.get('name', '').lower(),
                 'ip': tuple(sorted(existing.get('ip', []))),
                 'timezone': existing.get('timezone', ''),
                 'devicegroup': tuple(sorted(existing.get('devicegroup', []))),
-                'distributed_collector': tuple(sorted(existing.get('distributed_collector', []) if existing.get('distributed_collector') is not None else [])),
                 'availability': existing.get('availability', ''),
                 'confidentiality': existing.get('confidentiality', ''),
-                'integrity': existing.get('integrity', ''),
-                'logpolicy': tuple(sorted(existing.get('logpolicy', []) if existing.get('logpolicy') is not None else []))
+                'integrity': existing.get('integrity', '')
             }
             new_spec = {
                 'name': mapped_data['name'].lower(),
                 'ip': tuple(sorted(mapped_data['ip'])),
                 'timezone': mapped_data['timezone'],
                 'devicegroup': tuple(sorted(mapped_data['devicegroup'])),
-                'distributed_collector': tuple(sorted(mapped_data['distributed_collector'])),
                 'availability': mapped_data['availability'],
                 'confidentiality': mapped_data['confidentiality'],
-                'integrity': mapped_data['integrity'],
-                'logpolicy': tuple(sorted(mapped_data['logpolicy']))
+                'integrity': mapped_data['integrity']
             }
             logger.debug(f"Existing spec for {mapped_data['name']} on {node_name}: {existing_spec}")
             logger.debug(f"New spec for {mapped_data['name']}: {new_spec}")

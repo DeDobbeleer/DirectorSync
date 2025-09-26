@@ -154,12 +154,12 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
                 results[device_id][node_name] = result
                 continue
             # Internal cross-check of proxy_ip against all ips in XLSX
-            proxy_ips = set(proxy_ip)
-            if not proxy_ips.issubset(all_ips):
-                result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - all_ips}"}
-                logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
-                results[device_id][node_name] = result
-                continue
+            # proxy_ips = set(proxy_ip)
+            # if not proxy_ips.issubset(all_ips):
+            #     result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - all_ips}"}
+            #     logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
+            #     results[device_id][node_name] = result
+            #     continue
         elif proxy_condition is None:
             if any(pd.isna(payload["data"].get(field)) or (field == "processpolicy" and not payload["data"].get(field)) for field in ["processpolicy", "charset", "parser"]):
                 result = {"action": "SKIP", "error": "Missing processpolicy, charset, or parser"}

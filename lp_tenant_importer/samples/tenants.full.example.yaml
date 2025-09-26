@@ -22,7 +22,7 @@ tenants:
               ip : "10.10.26.1"             
             - hostname : "rsyslog-2-2"  
               ip : "10.10.26.2"
-              
+
       # all_in_one peut rester vide : il sera calculé = backends ∪ search_heads
       all_in_one: []
 
@@ -35,6 +35,7 @@ defaults:
     processing_policies: [ backends, all_in_one ]
     enrichment_policies: [ backends, all_in_one ]
     device_groups: [ backends, all_in_one ]
+    devices: [ backends, all_in_one ]
     alerts: [ search_heads ]
 
   xlsx:

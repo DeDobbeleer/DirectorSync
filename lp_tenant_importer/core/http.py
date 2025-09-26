@@ -734,4 +734,157 @@ class DirectorClient:
                 return {"status": "Fail", "error": "Job failed"}
         else:
             logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
-            return {"status": "Fail", "error": result.get("error", "Unknown error")}    
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}   
+        
+    def get_devices(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+        """Retrieve existing devices for a node.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+
+        Returns:
+            List[Dict[str, Any]]: List of device dictionaries.
+        """
+        logger.debug("Fetching devices for pool %s, node %s", pool_uuid, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices"
+        response = self.get(url)
+        response.raise_for_status()
+        devices = response.json()
+        if not isinstance(devices, list):
+            logger.warning("Unexpected response format for devices: %s", devices)
+            return []
+        logger.debug("Found %d existing devices", len(devices))
+        return devices
+
+    def create_device(self, pool_uuid: str, logpoint_id: str, device_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new device with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            device_data (Dict[str, Any]): The device data under 'data' key.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Creating device on node %s", logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices"
+        response = self.post(url, json=device_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Creation response: %s", result)
+
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for device creation at %s", monitorapi)
+            
+            job_result = self.monitor_job(monitorapi)
+            if job_result.get("success", False):
+                logger.info("Device creation succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_result}
+            else:
+                logger.error("Device creation job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Device creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+
+    def update_device(self, pool_uuid: str, logpoint_id: str, device_id: str, device_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update an existing device with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            device_id (str): The device ID to update.
+            device_data (Dict[str, Any]): The device data under 'data' key with 'id'.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Updating device %s on node %s", device_id, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices/{device_id}"
+        response = self.put(url, json=device_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Update response: %s", result)
+
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for device update at %s", monitorapi)
+            
+            job_result = self.monitor_job(monitorapi)
+            if job_result.get("success", False):
+                logger.info("Device update succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_result}
+            else:
+                logger.error("Device update job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Device update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+
+    def get_device_plugins(self, pool_uuid: str, logpoint_id: str, device_id: str) -> List[Dict[str, Any]]:
+        """Retrieve existing plugins/fetchers for a device.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            device_id (str): The device ID.
+
+        Returns:
+            List[Dict[str, Any]]: List of plugin dictionaries.
+        """
+        logger.debug("Fetching plugins for device %s on node %s", device_id, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices/{device_id}/plugins"
+        response = self.get(url)
+        response.raise_for_status()
+        plugins = response.json()
+        if not isinstance(plugins, list):
+            logger.warning("Unexpected response format for plugins: %s", plugins)
+            return []
+        logger.debug("Found %d existing plugins for device %s", len(plugins), device_id)
+        return plugins
+
+    def create_plugin(self, pool_uuid: str, logpoint_id: str, device_id: str, plugin_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new plugin/fetcher with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            device_id (str): The device ID.
+            plugin_data (Dict[str, Any]): The plugin data under 'data' key.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Creating plugin on device %s, node %s", device_id, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices/{device_id}/plugins"
+        response = self.post(url, json=plugin_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Plugin creation response: %s", result)
+
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for plugin creation at %s", monitorapi)
+            
+            job_result = self.monitor_job(monitorapi)
+            if job_result.get("success", False):
+                logger.info("Plugin creation succeeded on device %s", device_id)
+                return {"status": "Success", "result": job_result}
+            else:
+                logger.error("Plugin creation job failed on device %s", device_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Plugin creation failed on device %s: %s", device_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")} 

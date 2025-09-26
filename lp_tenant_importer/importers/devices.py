@@ -1,0 +1,390 @@
+import logging
+import pandas as pd
+from typing import Dict, List, Any, Tuple
+import json
+import numpy as np
+
+from core.http import DirectorClient
+from core.nodes import Node
+
+logger = logging.getLogger(__name__)
+
+def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> Tuple[Dict[str, Dict], Dict[str, List[Dict]]]:
+    """
+    Builds the device payloads from the provided DataFrames.
+
+    Extracts fixed fields from the Device sheet and constructs payloads
+    for each device, using only specified fields. Handles NaN as defaults (e.g., timezone="UTC").
+    Builds fetcher payloads for SyslogCollector only, grouped by device_id.
+
+    Parameters:
+    df_device (pd.DataFrame): DataFrame from "Device" sheet.
+    df_fetcher (pd.DataFrame): DataFrame from "DeviceFetcher" sheet.
+
+    Returns:
+    Tuple[Dict[str, Dict], Dict[str, List[Dict]]]: A dictionary of payloads keyed by device_id,
+    and a dictionary of fetcher payloads lists keyed by device_id.
+    """
+    payloads = {}
+    fetchers_per_device = {}
+
+    # Process devices
+    for index, row in df_device.iterrows():
+        device_id = row['device_id']
+        name = str(row['name']) if pd.notna(row['name']) else ""
+        ip_str = row['ip']
+        ip = [str(ip_str)] if pd.notna(ip_str) and ip_str else []
+        timezone = str(row['timezone']) if pd.notna(row['timezone']) else "UTC"
+        availability = str(row['availability']) if pd.notna(row['availability']) else "Major"
+        confidentiality = str(row['confidentiality']) if pd.notna(row['confidentiality']) else "Major"
+        integrity = str(row['integrity']) if pd.notna(row['integrity']) else "Major"
+        device_groups_str = str(row['device_groups']) if pd.notna(row['device_groups']) else ""
+
+        # Temp store names for mapping
+        names = [n.strip() for n in device_groups_str.split('|') if n.strip()]
+
+        payload = {
+            "data": {
+                "name": name,
+                "ip": ip,
+                "timezone": timezone,
+                "devicegroup": [],  # To be mapped per node
+                "distributed_collector": [],
+                "availability": availability,
+                "confidentiality": confidentiality,
+                "integrity": integrity,
+                "logpolicy": [],
+                "_device_groups_names": names  # Temporary for mapping
+            }
+        }
+
+        logger.debug(f"Built base payload for device_id {device_id}: {payload}")
+
+        payloads[device_id] = payload
+        fetchers_per_device[device_id] = []  # Initialize empty list
+
+    # Process fetchers for SyslogCollector only
+    fetcher_fields = [
+        'sid', 'parser', 'processpolicy', 'charset', 'uuid', 'path', 'excludes', 'hasLCP',
+        'client_id', 'api_key', 'uri', 'fetch_interval', 'LOGGEDINUSER', 'proxy',
+        'authorization_url', 'client_secret', 'events_url', 'distributed_collector',
+        'tenant_id', 'workspace_id', 'endpoint', 'resource', 'user_query', 'generated',
+        'requestType', 'ips', 'proxy_condition', 'CSRFToken'
+    ]
+    for index, row in df_fetcher.iterrows():
+        f_device_id = row['device_id']
+        app = str(row['app']) if pd.notna(row['app']) else ""
+        if f_device_id in payloads and app == "SyslogCollector":
+            f_data = {}
+            for field in fetcher_fields:
+                if pd.notna(row[field]):
+                    if isinstance(row[field], (int, float, bool)):
+                        f_data[field] = row[field]
+                    else:
+                        f_data[field] = str(row[field])
+            if 'sid' in f_data:  # Ensure sid present
+                f_payload = {"data": f_data}
+                fetchers_per_device[f_device_id].append(f_payload)
+                logger.debug(f"Built fetcher payload for device_id {f_device_id}, sid {f_data.get('sid')}")
+
+    return payloads, fetchers_per_device
+
+def check_existing_per_node(
+    client: DirectorClient,
+    pool_uuid: str,
+    node: Node,
+    payloads: Dict[str, Dict],
+    fetchers_per_device: Dict[str, List[Dict]]
+) -> Dict[str, Dict]:
+    """
+    Checks existing Devices per node.
+
+    For each node, fetches DeviceGroups for mapping, then lists existing Devices, matches by name or ip,
+    and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only.
+    Skips if any devicegroup name missing.
+
+    Parameters:
+    client: DirectorClient instance for API calls.
+    pool_uuid (str): UUID of the pool.
+    node (Node): Node object with 'id' and 'name'.
+    payloads (Dict[str, Dict]): Dictionary of payloads keyed by device_id.
+    fetchers_per_device (Dict[str, List[Dict]]): Dictionary of fetcher payloads lists keyed by device_id.
+
+    Returns:
+    Dict[str, Dict]: Dictionary of results per device_id, with node-specific actions and mapped data.
+    """
+    results = {device_id: {} for device_id in payloads.keys()}
+
+    node_id = node.id
+    node_name = node.name
+
+    # Fetch DeviceGroups for mapping
+    try:
+        groups = client.get_device_groups(pool_uuid, node_id)
+        group_map = {g.get('name', ''): g.get('id') for g in groups}
+        logger.debug(f"Fetched DeviceGroups for node {node_name}: {list(group_map.keys())}")
+    except Exception as e:
+        logger.error(f"Failed to fetch DeviceGroups for node {node_name}: {str(e)}")
+        return results
+
+    # Fetch existing Devices
+    try:
+        devices = client.get_devices(pool_uuid, node_id)
+        existing_by_key = {}
+        for d in devices:
+            key = (d.get('name', ''), tuple(sorted(d.get('ip', []))))
+            existing_by_key[key] = d
+        logger.debug(f"Fetched Devices list for node {node_name}: {len(devices)} devices")
+    except Exception as e:
+        logger.error(f"Failed to fetch Devices list for node {node_name}: {str(e)}")
+        return results
+
+    for device_id, payload in payloads.items():
+        base_data = payload['data']
+        names = base_data.pop('_device_groups_names', [])  # Remove temp field
+
+        # Map devicegroup
+        ids = [group_map.get(n) for n in names]
+        if any(id is None for id in ids):
+            missing = [n for n, id_ in zip(names, ids) if id_ is None]
+            results[device_id][node_name] = {
+                'action': 'SKIP',
+                'error': f"Missing devicegroup(s): {', '.join(missing)}"
+            }
+            logger.warning(f"SKIP for device_id {device_id} on {node_name} due to missing groups: {missing}")
+            continue
+
+        mapped_data = base_data.copy()
+        mapped_data['devicegroup'] = ids
+
+        # Match existing by name and sorted ip
+        key = (mapped_data['name'], tuple(sorted(mapped_data['ip'])))
+        existing = existing_by_key.get(key)
+
+        action = 'SKIP'
+        error_msg = None
+        existing_id = None
+
+        if existing:
+            # Compare specified fields (normalize lists)
+            existing_spec = {
+                'name': existing.get('name', ''),
+                'ip': sorted(existing.get('ip', [])),
+                'timezone': existing.get('timezone', ''),
+                'devicegroup': sorted(existing.get('devicegroup', [])),
+                'distributed_collector': sorted(existing.get('distributed_collector', [])),
+                'availability': existing.get('availability', ''),
+                'confidentiality': existing.get('confidentiality', ''),
+                'integrity': existing.get('integrity', ''),
+                'logpolicy': sorted(existing.get('logpolicy', []))
+            }
+            new_spec = {
+                'name': mapped_data['name'],
+                'ip': sorted(mapped_data['ip']),
+                'timezone': mapped_data['timezone'],
+                'devicegroup': sorted(mapped_data['devicegroup']),
+                'distributed_collector': sorted(mapped_data['distributed_collector']),
+                'availability': mapped_data['availability'],
+                'confidentiality': mapped_data['confidentiality'],
+                'integrity': mapped_data['integrity'],
+                'logpolicy': sorted(mapped_data['logpolicy'])
+            }
+            if json.dumps(existing_spec, sort_keys=True) == json.dumps(new_spec, sort_keys=True):
+                action = 'NOOP'
+                logger.info(f"NOOP for {mapped_data['name']} on {node_name}")
+            else:
+                action = 'UPDATE'
+                existing_id = existing.get('id')
+                logger.info(f"UPDATE needed for {mapped_data['name']} on {node_name}")
+        else:
+            # Validate mandatory
+            if mapped_data['name'] and mapped_data['ip'] and "availability" in ["Minimal", "Minor", "Major", "Critical"] and "confidentiality" in ["Minimal", "Minor", "Major", "Critical"] and "integrity" in ["Minimal", "Minor", "Major", "Critical"]:
+                action = 'CREATE'
+                logger.info(f"CREATE needed for {mapped_data['name']} on {node_name}")
+            else:
+                error_msg = 'Missing mandatory fields or invalid values'
+                logger.warning(f"Skipping {mapped_data['name']} on {node_name} due to {error_msg}")
+
+        results[device_id][node_name] = {
+            'action': action,
+            'existing_id': existing_id,
+            'devicegroup_ids': ids if action != 'SKIP' else [],
+            'error': error_msg
+        }
+
+    return results
+
+def import_devices_for_nodes(
+    client: DirectorClient,
+    pool_uuid: str,
+    nodes: Dict[str, List[Node]],
+    xlsx_path: str,
+    dry_run: bool = False,
+    targets: List[str] = None
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    Imports devices for specified nodes from an XLSX file.
+
+    Coordinates the workflow: loads data, builds payloads, checks existing devices
+    per node, executes actions (CREATE, UPDATE, NOOP, SKIP), processes fetchers post-device success,
+    and returns results.
+
+    Args:
+        client: DirectorClient instance for API calls.
+        pool_uuid (str): UUID of the pool.
+        nodes (Dict[str, List[Node]]): Dictionary of nodes by role.
+        xlsx_path (str): Path to the configuration XLSX file.
+        dry_run (bool): If True, simulate without API calls.
+        targets (List[str]): List of target node roles (e.g., ['backends', 'all_in_one']).
+
+    Returns:
+        Tuple[List[Dict[str, Any]], bool]: Tuple of (list of results, error indicator).
+        Results include: siem, node, name, result, action, error (for devices and fetchers).
+
+    Raises:
+        Exception: If XLSX loading or API calls fail.
+    """
+    rows = []
+    any_error = False
+
+    # Load Excel sheets with error handling
+    try:
+        df_device = pd.read_excel(xlsx_path, sheet_name="Device")
+        df_fetcher = pd.read_excel(xlsx_path, sheet_name="DeviceFetcher")
+        logger.debug(f"Loaded sheets: Device ({len(df_device)} rows), DeviceFetcher ({len(df_fetcher)} rows)")
+    except Exception as e:
+        logger.error(f"Failed to load XLSX data: {str(e)}")
+        return [], True
+
+    # Build payloads and fetchers
+    payloads, fetchers_per_device = build_device_payloads(df_device, df_fetcher)
+
+    # Process per target type and node
+    for target_type in targets or ["backends", "all_in_one"]:
+        for node in nodes.get(target_type, []):
+            node_id = node.id
+            node_name = node.name
+            siem = node_name
+
+            # Check existing devices (includes mapping and validation)
+            check_results = check_existing_per_node(client, pool_uuid, node, payloads, fetchers_per_device)
+
+            for device_id, payload in payloads.items():
+                base_data = payload['data']
+                name = base_data['name']
+                node_result = check_results.get(device_id, {}).get(node_name, {})
+                action = node_result.get('action', 'NONE')
+                devicegroup_ids = node_result.get('devicegroup_ids', [])
+                existing_id = node_result.get('existing_id')
+
+                result_entry = {
+                    'siem': siem,
+                    'node': node_name,
+                    'name': name,
+                    'result': 'N/A',
+                    'action': action,
+                    'error': node_result.get('error', '-')
+                }
+
+                device_target_id = None
+                device_success = False
+
+                if action in ['SKIP', 'NOOP']:
+                    result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
+                    logger.info(f"{action} for {name} on {node_name}")
+                elif action in ['CREATE', 'UPDATE'] and not dry_run:
+                    # Build full payload with mapped groups
+                    exec_payload = payload.copy()
+                    exec_payload['data']['devicegroup'] = devicegroup_ids
+                    if action == 'UPDATE':
+                        exec_payload['data']['id'] = existing_id
+                        device_target_id = existing_id
+
+                    try:
+                        if action == 'CREATE':
+                            response = client.create_device(pool_uuid, node_id, exec_payload)
+                        else:
+                            response = client.update_device(pool_uuid, node_id, existing_id, exec_payload)
+                        if response.get('status') == 'Success':
+                            result_entry['result'] = 'Success'
+                            device_success = True
+                            logger.info(f"{action} success for {name} on {node_name}")
+                            if action == 'CREATE':
+                                # Fetch new device_id by name and ip
+                                new_devices = client.get_devices(pool_uuid, node_id)
+                                device_key = (name, tuple(sorted(exec_payload['data']['ip'])))
+                                new_device = next((d for d in new_devices if (d.get('name', '') == name and tuple(sorted(d.get('ip', []))) == device_key)), None)
+                                if new_device:
+                                    device_target_id = new_device['id']
+                                    logger.debug(f"Retrieved new device_id {device_target_id} for {name}")
+                                else:
+                                    logger.warning(f"Could not retrieve new device_id for {name} after creation")
+                        else:
+                            result_entry['result'] = 'Fail'
+                            result_entry['error'] = response.get('error', 'Unknown error')
+                            logger.error(f"{action} fail for {name} on {node_name}: {result_entry['error']}")
+                            any_error = True
+                    except Exception as e:
+                        result_entry['result'] = 'Fail'
+                        result_entry['error'] = str(e)
+                        logger.error(f"{action} error for {name} on {node_name}: {str(e)}")
+                        any_error = True
+                elif dry_run:
+                    result_entry['result'] = 'Dry-run'
+                    device_success = True  # Simulate success for fetchers
+                    logger.info(f"Dry run: {action} for {name} on {node_name}")
+
+                rows.append(result_entry)
+
+                # Process fetchers if device success
+                if device_success and device_target_id and device_id in fetchers_per_device:
+                    for f_payload in fetchers_per_device[device_id]:
+                        f_sid = f_payload['data'].get('sid', 'unknown')
+                        f_entry = {
+                            'siem': siem,
+                            'node': node_name,
+                            'name': f_sid,
+                            'result': 'N/A',
+                            'action': 'NOOP',  # Default
+                            'error': '-',
+                            'type': 'fetcher'
+                        }
+
+                        if dry_run:
+                            f_entry['result'] = 'Dry-run'
+                            f_entry['action'] = 'CREATE'  # Simulate
+                            logger.info(f"Dry run: CREATE fetcher {f_sid} for {name} on {node_name}")
+                            rows.append(f_entry)
+                            continue
+
+                        try:
+                            plugins = client.get_device_plugins(pool_uuid, node_id, device_target_id)
+                            existing_by_sid = {p.get('sid', ''): p for p in plugins}
+                            if f_sid in existing_by_sid:
+                                f_entry['action'] = 'NOOP'
+                                f_entry['result'] = 'Noop'
+                                logger.info(f"NOOP for fetcher {f_sid} on {name} ({node_name})")
+                            else:
+                                f_entry['action'] = 'CREATE'
+                                f_response = client.create_plugin(pool_uuid, node_id, device_target_id, f_payload)
+                                if f_response.get('status') == 'Success':
+                                    f_entry['result'] = 'Success'
+                                    logger.info(f"CREATE success for fetcher {f_sid} on {name} ({node_name})")
+                                else:
+                                    f_entry['result'] = 'Fail'
+                                    f_entry['error'] = f_response.get('error', 'Unknown error')
+                                    logger.error(f"CREATE fail for fetcher {f_sid} on {name} ({node_name}): {f_entry['error']}")
+                                    any_error = True
+                        except Exception as e:
+                            f_entry['result'] = 'Fail'
+                            f_entry['error'] = str(e)
+                            logger.error(f"Error processing fetcher {f_sid} for {name} on {node_name}: {str(e)}")
+                            any_error = True
+
+                        rows.append(f_entry)
+
+    # Log summary
+    actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows if 'type' not in r or r['type'] != 'fetcher'}
+    logger.info(f"Devices import summary: {actions_summary}")
+
+    return rows, any_error

@@ -129,36 +129,38 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
 
         # Validate mandatory fields
         if proxy_condition == "use_as_proxy":
-            if not all(pd.notna(payload["data"].get(field)) for field in ["charset", "parser"]):
+            if any(pd.isna(payload["data"].get(field)) for field in ["charset", "parser"]):
                 result = {"action": "SKIP", "error": "Missing charset or parser"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
-            if any(pd.notna(payload["data"].get(field)) for field in ["processpolicy", "proxy_ip"]):
+            if any(pd.notna(payload["data"].get(field)) and payload["data"].get(field) != "" for field in ["processpolicy", "proxy_ip"]):
                 result = {"action": "SKIP", "error": "Unexpected processpolicy or proxy_ip for use_as_proxy"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
         elif proxy_condition == "uses_proxy":
-            if not all(pd.notna(payload["data"].get(field)) for field in ["processpolicy", "proxy_ip"]):
+            processpolicy = payload["data"].get("processpolicy")
+            proxy_ip = payload["data"].get("proxy_ip", [])
+            if pd.isna(processpolicy) or not processpolicy or not proxy_ip:
                 result = {"action": "SKIP", "error": "Missing processpolicy or proxy_ip"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
             # Cross-check proxy_ip
-            proxy_ips = set(payload["data"]["proxy_ip"])
+            proxy_ips = set(proxy_ip)
             if not proxy_ips.issubset(use_as_proxy_ips):
                 result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - use_as_proxy_ips}"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
         elif proxy_condition is None:
-            if not all(pd.notna(payload["data"].get(field)) for field in ["processpolicy", "charset", "parser"]):
+            if any(pd.isna(payload["data"].get(field)) or (field == "processpolicy" and not payload["data"].get(field)) for field in ["processpolicy", "charset", "parser"]):
                 result = {"action": "SKIP", "error": "Missing processpolicy, charset, or parser"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
-            if pd.notna(payload["data"].get("proxy_ip")):
+            if pd.notna(payload["data"].get("proxy_ip")) and payload["data"].get("proxy_ip"):
                 result = {"action": "SKIP", "error": "Unexpected proxy_ip for None"}
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
@@ -169,7 +171,7 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
         if existing:
             existing_data = existing.get("data", {})
             new_data = payload["data"]
-            if (_compare_syslog_collector(existing_data, new_data)):
+            if _compare_syslog_collector(existing_data, new_data):
                 result = {"action": "NOOP"}
                 logger.info(f"NOOP for {device_name} on {node_name}")
             else:

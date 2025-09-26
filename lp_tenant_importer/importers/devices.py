@@ -15,7 +15,7 @@ def build_device_payloads(df_device: pd.DataFrame) -> Dict[str, Dict]:
 
     Extracts fixed fields from the Device sheet and constructs payloads
     for each device, using only specified fields. Handles NaN as defaults (e.g., timezone="UTC",
-    mandatory fields set to "Major" if invalid).
+    mandatory fields set to "Major" if invalid). Stores device group names for mapping.
 
     Parameters:
     df_device (pd.DataFrame): DataFrame from "Device" sheet.
@@ -48,11 +48,11 @@ def build_device_payloads(df_device: pd.DataFrame) -> Dict[str, Dict]:
                 "ip": ip,
                 "timezone": timezone,
                 "devicegroup": [],  # To be mapped per node
-                "distributed_collector": [],
+                "distributed_collector": [],  # Forced empty as per client request
                 "availability": availability,
                 "confidentiality": confidentiality,
                 "integrity": integrity,
-                "logpolicy": [],
+                "logpolicy": [],  # Forced empty as per client request
                 "_device_groups_names": names  # Temporary for mapping
             }
         }
@@ -74,7 +74,8 @@ def check_existing_per_node(
 
     For each node, fetches DeviceGroups for mapping, then lists existing Devices, matches by name or ip,
     and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only.
-    Skips if any devicegroup name missing or mandatory fields invalid.
+    Skips if any devicegroup name missing or mandatory fields invalid. Maps devicegroup IDs
+    before comparison and normalizes forced empty arrays.
 
     Parameters:
     client: DirectorClient instance for API calls.
@@ -130,7 +131,7 @@ def check_existing_per_node(
             continue
 
         mapped_data = base_data.copy()
-        mapped_data['devicegroup'] = ids
+        mapped_data['devicegroup'] = sorted(ids)  # Sort for consistent comparison
 
         # Validate mandatory fields
         if not mapped_data['name'] or not mapped_data['ip'] or mapped_data['availability'] not in valid_levels or mapped_data['confidentiality'] not in valid_levels or mapped_data['integrity'] not in valid_levels:
@@ -150,17 +151,17 @@ def check_existing_per_node(
         existing_id = None
 
         if existing:
-            # Compare specified fields (normalize lists)
+            # Compare specified fields (normalize forced empty arrays)
             existing_spec = {
                 'name': existing.get('name', '').lower(),
                 'ip': sorted(existing.get('ip', [])),
                 'timezone': existing.get('timezone', ''),
                 'devicegroup': sorted(existing.get('devicegroup', [])),
-                'distributed_collector': sorted(existing.get('distributed_collector', [])),
+                'distributed_collector': [],
                 'availability': existing.get('availability', ''),
                 'confidentiality': existing.get('confidentiality', ''),
                 'integrity': existing.get('integrity', ''),
-                'logpolicy': sorted(existing.get('logpolicy', []))
+                'logpolicy': []
             }
             new_spec = {
                 'name': mapped_data['name'].lower(),
@@ -173,6 +174,8 @@ def check_existing_per_node(
                 'integrity': mapped_data['integrity'],
                 'logpolicy': sorted(mapped_data['logpolicy'])
             }
+            logger.debug(f"Existing spec for {mapped_data['name']}: {existing_spec}")
+            logger.debug(f"New spec for {mapped_data['name']}: {new_spec}")
             if json.dumps(existing_spec, sort_keys=True) == json.dumps(new_spec, sort_keys=True):
                 action = 'NOOP'
                 logger.info(f"NOOP for {mapped_data['name']} on {node_name}")

@@ -864,8 +864,8 @@ class DirectorClient:
         else:
             error = json.dumps(job_result, indent=2)
             logger.error("Create job failed for %s", error)
-            logger.error("Syslog Collector creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
-            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+            logger.error("Syslog Collector creation failed on %s: %s", logpoint_id, error))
+            return {"status": "Fail", "error": error}
 
     def update_syslog_collector(self, pool_uuid: str, logpoint_id: str, collector_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing Syslog Collector with async job monitoring.

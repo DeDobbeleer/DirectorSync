@@ -14,7 +14,7 @@ def build_device_group_payloads(df_group: pd.DataFrame) -> Tuple[Dict[str, Dict]
     Builds the device group payloads from the provided DataFrame.
 
     Extracts fixed fields from the DeviceGroups sheet and constructs payloads
-    for each group, ignoring device_ids.
+    for each group, ignoring device_ids. Converts np.bool_ to bool and NaN to empty strings.
 
     Parameters:
     df_group (pd.DataFrame): DataFrame from "DeviceGroups" sheet.
@@ -32,9 +32,9 @@ def build_device_group_payloads(df_group: pd.DataFrame) -> Tuple[Dict[str, Dict]
     for group_id, group in grouped_group:
         # Extract fixed fields (assume consistent across group)
         group_name = group['name'].iloc[0]
-        description = group['description'].iloc[0] if 'description' in group.columns else ""
-        tags = group['tags'].iloc[0] if 'tags' in group.columns else ""
-        active = group['active'].iloc[0] if 'active' in group.columns else True
+        description = str(group['description'].iloc[0]) if pd.notna(group['description'].iloc[0]) else ""
+        tags = str(group['tags'].iloc[0]) if pd.notna(group['tags'].iloc[0]) else ""
+        active = bool(group['active'].iloc[0]) if pd.notna(group['active'].iloc[0]) else False
 
         # Construct payload
         payload = {
@@ -66,7 +66,7 @@ def check_existing_per_node(
     Checks existing DeviceGroups per node.
 
     For each node, fetches the list of existing DeviceGroups, matches by case-sensitive
-    name, and determines the action (NOOP, SKIP, CREATE, UPDATE).
+    name, and determines the action (NOOP, SKIP, CREATE, UPDATE) based on name and description only.
 
     Parameters:
     client: DirectorClient instance for API calls.
@@ -101,18 +101,19 @@ def check_existing_per_node(
 
     for group_id, payload in payloads.items():
         group_name = payload['data']['name']
+        description = payload['data']['description']
 
-        # Check if DeviceGroup exists and compare
+        # Extract existing data for comparison (only name and description)
         if group_name in existing_dgs:
             existing_dg = existing_dgs[group_name]
             existing_data = {
                 'name': existing_dg.get('name', ''),
-                'description': existing_dg.get('description', ''),
-                'active': existing_dg.get('active', False),
-                'tags': existing_dg.get('tags', '')
+                'description': existing_dg.get('description', '')
             }
-            new_data = payload['data'].copy()
-            new_data.pop('id', None)  # Remove id for comparison
+            new_data = {
+                'name': group_name,
+                'description': description
+            }
             if json.dumps(existing_data, sort_keys=True) == json.dumps(new_data, sort_keys=True):
                 results[group_id][node_name] = {'action': 'NOOP'}
                 logger.info(f"NOOP for {group_name} on {node_name}")

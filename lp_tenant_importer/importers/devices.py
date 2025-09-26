@@ -75,7 +75,7 @@ def check_existing_per_node(
     For each node, fetches DeviceGroups for mapping, then lists existing Devices, matches by name or ip,
     and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only.
     Skips if any devicegroup name missing or mandatory fields invalid. Maps devicegroup IDs
-    before comparison and normalizes forced empty arrays.
+    before comparison and normalizes forced empty arrays with detailed logging.
 
     Parameters:
     client: DirectorClient instance for API calls.
@@ -151,30 +151,30 @@ def check_existing_per_node(
         existing_id = None
 
         if existing:
-            # Compare specified fields (normalize forced empty arrays)
+            # Compare specified fields (normalize forced empty arrays with detailed logging)
             existing_spec = {
                 'name': existing.get('name', '').lower(),
-                'ip': sorted(existing.get('ip', [])),
+                'ip': tuple(sorted(existing.get('ip', []))),
                 'timezone': existing.get('timezone', ''),
-                'devicegroup': sorted(existing.get('devicegroup', [])),
-                'distributed_collector': [],
+                'devicegroup': tuple(sorted(existing.get('devicegroup', []))),
+                'distributed_collector': tuple(sorted(existing.get('distributed_collector', []) if existing.get('distributed_collector') is not None else [])),
                 'availability': existing.get('availability', ''),
                 'confidentiality': existing.get('confidentiality', ''),
                 'integrity': existing.get('integrity', ''),
-                'logpolicy': []
+                'logpolicy': tuple(sorted(existing.get('logpolicy', []) if existing.get('logpolicy') is not None else []))
             }
             new_spec = {
                 'name': mapped_data['name'].lower(),
-                'ip': sorted(mapped_data['ip']),
+                'ip': tuple(sorted(mapped_data['ip'])),
                 'timezone': mapped_data['timezone'],
-                'devicegroup': sorted(mapped_data['devicegroup']),
-                'distributed_collector': sorted(mapped_data['distributed_collector']),
+                'devicegroup': tuple(sorted(mapped_data['devicegroup'])),
+                'distributed_collector': tuple(sorted(mapped_data['distributed_collector'])),
                 'availability': mapped_data['availability'],
                 'confidentiality': mapped_data['confidentiality'],
                 'integrity': mapped_data['integrity'],
-                'logpolicy': sorted(mapped_data['logpolicy'])
+                'logpolicy': tuple(sorted(mapped_data['logpolicy']))
             }
-            logger.debug(f"Existing spec for {mapped_data['name']}: {existing_spec}")
+            logger.debug(f"Existing spec for {mapped_data['name']} on {node_name}: {existing_spec}")
             logger.debug(f"New spec for {mapped_data['name']}: {new_spec}")
             if json.dumps(existing_spec, sort_keys=True) == json.dumps(new_spec, sort_keys=True):
                 action = 'NOOP'
@@ -182,7 +182,7 @@ def check_existing_per_node(
             else:
                 action = 'UPDATE'
                 existing_id = existing.get('id')
-                logger.info(f"UPDATE needed for {mapped_data['name']} on {node_name}")
+                logger.info(f"UPDATE needed for {mapped_data['name']} on {node_name} due to spec mismatch")
         else:
             action = 'CREATE'
             logger.info(f"CREATE needed for {mapped_data['name']} on {node_name}")

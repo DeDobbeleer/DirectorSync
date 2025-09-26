@@ -17,6 +17,7 @@ from importers.enrichment_policies import import_enrichment_policies_for_nodes
 from importers.device_groups import import_device_groups_for_nodes
 from importers.alerts import import_alerts_for_nodes
 from importers.devices import import_devices_for_nodes
+from importers.syslog_fetcher import import_syslog_collectors_for_nodes
 
 logging_utils = __import__("logging_utils")
 logging_utils.setup_logging()
@@ -139,6 +140,15 @@ def cmd_import_devices(args):
     if any_error:
         sys.exit(1)
 
+def cmd_import_syslog_collectors(args):
+    """Import Syslog Collectors command handler."""
+    client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
+    targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"].get("syslog_collectors", ["backends", "all_in_one"])
+    rows, any_error = import_syslog_collectors_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
+    if any_error:
+        sys.exit(1)
+
 def cmd_import_alerts(args):
     """Import alerts command handler."""
     client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
@@ -229,6 +239,9 @@ def main():
     
     parser_import_devices = subparsers.add_parser("import-devices", help="Import devices")
     parser_import_devices.set_defaults(func=cmd_import_devices)
+    
+    parser_import_syslog_collectors = subparsers.add_parser("import-syslog-collectors", help="Import Syslog Collectors")
+    parser_import_syslog_collectors.set_defaults(func=cmd_import_syslog_collectors)
 
     parser_import_alerts = subparsers.add_parser("import-alerts", help="Import alerts")
     parser_import_alerts.set_defaults(func=cmd_import_alerts)

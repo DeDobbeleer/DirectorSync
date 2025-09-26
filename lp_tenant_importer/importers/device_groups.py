@@ -290,7 +290,7 @@ def import_device_groups_for_nodes(
                     'name': group_name,
                     'result': 'N/A',
                     'action': action,
-                    'error': node_result.get('error', '')
+                    'error': node_result.get('error', '-')
                 }
 
                 if action in ['SKIP', 'NOOP']:

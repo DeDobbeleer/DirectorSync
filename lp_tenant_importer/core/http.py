@@ -641,5 +641,97 @@ class DirectorClient:
         else:
             logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
-    
-    
+         
+    def get_device_groups(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+        """Retrieve existing device groups for a node.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+
+        Returns:
+            List[Dict[str, Any]]: List of device group dictionaries.
+        """
+        logger.debug("Fetching device groups for pool %s, node %s", pool_uuid, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/DeviceGroups"
+        response = self.get(url)
+        response.raise_for_status()
+        device_groups = response.json()
+        if not isinstance(device_groups, list):
+            logger.warning("Unexpected response format for device groups: %s", device_groups)
+            return []
+        logger.debug("Found %d existing device groups", len(device_groups))
+        return device_groups
+
+    def create_device_group(self, pool_uuid: str, logpoint_id: str, group_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new device group with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            group_data (Dict[str, Any]): The group data under 'data' key.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Creating device group on node %s", logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/DeviceGroups"
+        response = self.post(url, json=group_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Creation response: %s", result)
+
+        if result.get("status") == "Success" and "message" in result and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for update %s", monitorapi)
+            
+            job_success = self.monitor_job(monitorapi)
+            if job_success:
+                logger.info("Device group creation succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_success}
+            else:
+                logger.error("Device group creation job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}
+
+    def update_device_group(self, pool_uuid: str, logpoint_id: str, group_id: str, group_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update an existing device group with async job monitoring.
+
+        Args:
+            pool_uuid (str): The tenant pool UUID.
+            logpoint_id (str): The SIEM node ID.
+            group_id (str): The group ID to update.
+            group_data (Dict[str, Any]): The group data under 'data' key with 'id'.
+
+        Returns:
+            Dict[str, Any]: API response with 'status' and job result.
+
+        Raises:
+            requests.exceptions.RequestException: If API call fails.
+        """
+        logger.debug("Updating device group %s on node %s", group_id, logpoint_id)
+        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/DeviceGroups/{group_id}"
+        response = self.put(url, json=group_data)
+        response.raise_for_status()
+        result = response.json()
+        logger.debug("Update response: %s", result)
+
+        if result.get("status") == "Success" and "message" in result and result.get('message', '') and result["message"].startswith("monitorapi/"):
+            monitorapi = '/' + result["message"] if not result["message"].startswith('/') else result["message"]
+            logger.info("Monitoring job for update %s at %s", group_id, monitorapi)
+            
+            job_success = self.monitor_job(monitorapi)
+            if job_success:
+                logger.info("Device group update succeeded on %s", logpoint_id)
+                return {"status": "Success", "result": job_success}
+            else:
+                logger.error("Device group update job failed on %s", logpoint_id)
+                return {"status": "Fail", "error": "Job failed"}
+        else:
+            logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
+            return {"status": "Fail", "error": result.get("error", "Unknown error")}    

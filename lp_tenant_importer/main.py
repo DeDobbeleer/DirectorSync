@@ -14,6 +14,7 @@ from importers.routing_policies import import_routing_policies_for_nodes
 from importers.normalization_policies import import_normalization_policies_for_nodes
 from importers.processing_policies import import_processing_policies_for_nodes
 from importers.enrichment_policies import import_enrichment_policies_for_nodes
+from importers.device_groups import import_device_groups_for_nodes
 from importers.alerts import import_alerts_for_nodes
 
 logging_utils = __import__("logging_utils")
@@ -117,6 +118,15 @@ def cmd_import_enrichment_policies(args):
     print_table(rows, args.format)
     if any_error:
         sys.exit(1)
+        
+def cmd_import_device_groups(args):
+    """Import device groups command handler."""
+    client, tenants_file, tenant_name, pool_uuid, nodes, xlsx_path = _prepare_context(args)
+    targets = get_tenant(load_tenants_file(tenants_file), tenant_name)["defaults"]["target"]["device_groups"]
+    rows, any_error = import_device_groups_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, targets)
+    print_table(rows, args.format)
+    if any_error:
+        sys.exit(1)
     
 def cmd_import_alerts(args):
     """Import alerts command handler."""
@@ -126,20 +136,7 @@ def cmd_import_alerts(args):
     print_table(rows, args.format)
     if any_error:
         sys.exit(1)
-    
-
-# def print_table(rows, format):
-#     """Print the result table in the specified format."""
-#     if format == "table":
-#         headers = ["siem", "node", "name", "result", "action", "error"]
-#         print(f"| {' | '.join(headers)} |")
-#         print(f"| {' | '.join(['-' * len(h) for h in headers])} |")
-#         for row in rows:
-#             print(f"| {' | '.join(str(row.get(h, '')) for h in headers)} |")
-#     elif format == "json":
-#         import json
-#         print(json.dumps(rows, indent=2))
-        
+   
 def print_table(rows: list, format ) -> None:
     """Pretty markdown-like table commune (Repos / Routing / Normalization / Processing)."""
     def _present(v) -> bool:
@@ -218,6 +215,9 @@ def main():
 
     parser_import_alerts = subparsers.add_parser("import-alerts", help="Import alerts")
     parser_import_alerts.set_defaults(func=cmd_import_alerts)
+
+    parser_import_device_groups = subparsers.add_parser("import-device-groups", help="Import device groups")
+    parser_import_device_groups.set_defaults(func=cmd_import_device_groups)
 
     args = parser.parse_args()
     logger.debug("Parsed arguments: %s", vars(args))

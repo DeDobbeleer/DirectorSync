@@ -6,8 +6,23 @@ tenants:
     siems:
       search_heads: []
       backends:
-        - { id: "506caf32de83054497d07c3c632a98cb", name: "lb-backend01" }
-        - { id: "01925abf82fe0db0a75c190c4316b8a6", name: "lb-backend02" }
+        - name: "lb-backend01" 
+          id: "506caf32de83054497d07c3c632a98cb"
+          syslog_ips : 
+            - hostname : "rsyslog-1-1"
+              ip : "10.10.25.1"
+              hostname: "rsyslog-1-1"
+            - hostname : "rsyslog-1-1"
+              ip : "10.10.25.2"
+              
+        - name: "lb-backend02"
+          id: "01925abf82fe0db0a75c190c4316b8a6"
+          syslog_ips :           
+            - hostname: "rsyslog-2-1"
+              ip : "10.10.26.1"             
+            - hostname : "rsyslog-2-2"  
+              ip : "10.10.26.2"
+              
       # all_in_one peut rester vide : il sera calculé = backends ∪ search_heads
       all_in_one: []
 
@@ -19,6 +34,7 @@ defaults:
     normalization_policies: [ backends, all_in_one ]
     processing_policies: [ backends, all_in_one ]
     enrichment_policies: [ backends, all_in_one ]
+    device_groups: [ backends, all_in_one ]
     alerts: [ search_heads ]
 
   xlsx:

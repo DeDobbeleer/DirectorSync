@@ -16,7 +16,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
 
     Filters rows where app="SyslogCollector", constructs payloads based on proxy_condition,
     and handles list fields (hostname, proxy_ip) by splitting on "|". Excludes non-listed
-    fields except charset and parser. Includes device_id if available.
+    fields except charset and parser.
 
     Args:
         df (pd.DataFrame): DataFrame from "DeviceFetcher" sheet.
@@ -77,9 +77,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
             payload["data"]["charset"] = row['charset'] if pd.notna(row['charset']) else "utf_8"
             payload["data"]["parser"] = row['parser'] if pd.notna(row['parser']) else "SyslogParser"
 
-        # Optional fields, including device_id
-        if device_id and pd.notna(device_id):
-            payload["data"]["device_id"] = device_id
+        # Optional fields
         if hostname:
             payload["data"]["hostname"] = hostname
 

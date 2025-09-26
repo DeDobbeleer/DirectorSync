@@ -328,6 +328,7 @@ def import_syslog_collectors_for_nodes(
 
     Coordinates the workflow: loads data, builds payloads, checks existing collectors
     per node, executes actions (CREATE, UPDATE, NOOP, SKIP), and returns results.
+    Creates use_as_proxy collectors first, followed by uses_proxy and None.
 
     Args:
         client (DirectorClient): API client instance.
@@ -355,78 +356,78 @@ def import_syslog_collectors_for_nodes(
         logger.error(f"Failed to load XLSX data: {str(e)}")
         return [], True
 
-    # Build payloads
-    payloads = build_syslog_collector_payloads(df)
-
-    # Process per node, then per collector
+    # Build payloads with API context
     for target_type in targets or ["backends", "all_in_one"]:
         for node in nodes.get(target_type, []):
             node_id = node.id
             node_name = node.name
             siem = node_name  # Assuming siem is node_name
+            payloads = build_syslog_collector_payloads(df, client, pool_uuid, node_id)
 
             # Check existing collectors with the DataFrame
             check_results = check_existing_per_node(client, pool_uuid, node, payloads, df)
 
-            for device_id, payload in payloads.items():
-                device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is available
-                node_result = check_results.get(device_id, {}).get(node_name, {})
-                action = node_result.get("action", "NONE")
+            # Process in order: use_as_proxy, uses_proxy, None
+            for proxy_type in ["use_as_proxy", "uses_proxy", None]:
+                for device_id, payload in payloads.items():
+                    device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is available
+                    node_result = check_results.get(device_id, {}).get(node_name, {})
+                    action = node_result.get("action", "NONE")
 
-                result_entry = {
-                    "siem": siem,
-                    "node": node_name,
-                    "name": device_name,
-                    "action": action,
-                    "result": "N/A",
-                    "error": node_result.get("error", "")
-                }
+                    result_entry = {
+                        "siem": siem,
+                        "node": node_name,
+                        "name": device_name,
+                        "action": action,
+                        "result": "N/A",
+                        "error": node_result.get("error", "")
+                    }
 
-                if action in ["SKIP", "NOOP"]:
-                    result_entry["result"] = "Skipped" if action == "SKIP" else "Noop"
-                    logger.info(f"{action} for {device_name} on {node_name}")
-                elif action in ["CREATE", "UPDATE"] and not dry_run:
-                    try:
-                        if action == "CREATE":
-                            response = client.create_syslog_collector(pool_uuid, node_id, payload)
-                        elif action == "UPDATE":
-                            existing_id = node_result.get("existing_id")
-                            update_payload = payload.copy()
-                            update_payload["data"]["id"] = existing_id
-                            response = client.update_syslog_collector(pool_uuid, node_id, existing_id, update_payload)
+                    if action in ["SKIP", "NOOP"]:
+                        result_entry["result"] = "Skipped" if action == "SKIP" else "Noop"
+                        logger.info(f"{action} for {device_name} on {node_name}")
+                    elif action in ["CREATE", "UPDATE"] and not dry_run:
+                        try:
+                            if action == "CREATE":
+                                response = client.create_syslog_collector(pool_uuid, node_id, payload)
+                            elif action == "UPDATE":
+                                existing_id = node_result.get("existing_id")
+                                update_payload = payload.copy()
+                                update_payload["data"]["id"] = existing_id
+                                response = client.update_syslog_collector(pool_uuid, node_id, existing_id, update_payload)
 
-                        if response.get("status") == "Success":
-                            monitorapi = response.get("message")
-                            if monitorapi and monitorapi.startswith("/monitorapi/"):
-                                job_status = client.monitor_job(monitorapi)
-                                if job_status.get("success"):
-                                    result_entry["result"] = "Success"
-                                    logger.info(f"{action} success for {device_name} on {node_name}")
+                            if response.get("status") == "Success":
+                                monitorapi = response.get("message")
+                                if monitorapi and monitorapi.startswith("/monitorapi/"):
+                                    job_status = client.monitor_job(monitorapi)
+                                    if job_status.get("success"):
+                                        result_entry["result"] = "Success"
+                                        logger.info(f"{action} success for {device_name} on {node_name}")
+                                    else:
+                                        result_entry["result"] = "Fail"
+                                        result_entry["error"] = job_status.get("error", "Unknown error")
+                                        logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
+                                        any_error = True
                                 else:
-                                    result_entry["result"] = "Fail"
-                                    result_entry["error"] = job_status.get("error", "Unknown error")
-                                    logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
-                                    any_error = True
+                                    result_entry["result"] = "Success"
+                                    logger.info(f"{action} success for {device_name} on {node_name} (no monitoring)")
                             else:
-                                result_entry["result"] = "Success"
-                                logger.info(f"{action} success for {device_name} on {node_name} (no monitoring)")
-                        else:
+                                result_entry["result"] = "Fail"
+                                result_entry["error"] = response.get("error", "Unknown error")
+                                logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
+                                any_error = True
+                        except requests.RequestException as e:
+                            logger.error("Failed to create syslog collectot policy: %s", str(e.response.text))
+                        except Exception as e:
                             result_entry["result"] = "Fail"
-                            result_entry["error"] = response.get("error", "Unknown error")
-                            logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
+                            result_entry["error"] = str(e)
+                            logger.error(f"{action} error for {device_name} on {node_name}: {str(e)}")
                             any_error = True
-                    except requests.RequestException as e:
-                        logger.error("Failed to create syslog collectot policy: %s", str(e.response.text))
-                    except Exception as e:
-                        result_entry["result"] = "Fail"
-                        result_entry["error"] = str(e)
-                        logger.error(f"{action} error for {device_name} on {node_name}: {str(e)}")
-                        any_error = True
-                elif dry_run:
-                    result_entry["result"] = "Dry-run"
-                    logger.info(f"Dry run: {action} for {device_name} on {node_name}")
+                    elif dry_run:
+                        result_entry["result"] = "Dry-run"
+                        logger.info(f"Dry run: {action} for {device_name} on {node_name}")
 
-                rows.append(result_entry)
+                    rows.append(result_entry)
 
     # Log summary
     actions_summary = {r["action"]: sum(1 for res in rows if res["action"] == r["action"]) for r in rows}

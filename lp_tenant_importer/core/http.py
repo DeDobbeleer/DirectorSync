@@ -830,29 +830,7 @@ class DirectorClient:
             logger.error("Device update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def get_device_plugins(self, pool_uuid: str, logpoint_id: str, device_id: str) -> List[Dict[str, Any]]:
-        """Retrieve existing plugins/fetchers for a device.
 
-        Args:
-            pool_uuid (str): The tenant pool UUID.
-            logpoint_id (str): The SIEM node ID.
-            device_id (str): The device ID.
-
-        Returns:
-            List[Dict[str, Any]]: List of plugin dictionaries.
-        """
-        logger.debug("Fetching plugins for device %s on node %s", device_id, logpoint_id)
-        url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/Devices/{device_id}/plugins"
-        response = self.get(url)
-        response.raise_for_status()
-        plugins = response.json()
-        if not isinstance(plugins, list):
-            logger.warning("Unexpected response format for plugins: %s", plugins)
-            return []
-        logger.debug("Found %d existing plugins for device %s", len(plugins), device_id)
-        return plugins
-
-    def create_plugin(self, pool_uuid: str, logpoint_id: str, device_id: str, plugin_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new plugin/fetcher with async job monitoring.
 
         Args:

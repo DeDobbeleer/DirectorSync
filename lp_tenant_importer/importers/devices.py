@@ -9,25 +9,21 @@ from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> Tuple[Dict[str, Dict], Dict[str, List[Dict]]]:
+def build_device_payloads(df_device: pd.DataFrame) -> Dict[str, Dict]:
     """
-    Builds the device payloads from the provided DataFrames.
+    Builds the device payloads from the provided DataFrame.
 
     Extracts fixed fields from the Device sheet and constructs payloads
     for each device, using only specified fields. Handles NaN as defaults (e.g., timezone="UTC",
-    mandatory fields set to "Major" if invalid). Builds fetcher payloads for SyslogCollector only,
-    grouped by device_id.
+    mandatory fields set to "Major" if invalid).
 
     Parameters:
     df_device (pd.DataFrame): DataFrame from "Device" sheet.
-    df_fetcher (pd.DataFrame): DataFrame from "DeviceFetcher" sheet.
 
     Returns:
-    Tuple[Dict[str, Dict], Dict[str, List[Dict]]]: A dictionary of payloads keyed by device_id,
-    and a dictionary of fetcher payloads lists keyed by device_id.
+    Dict[str, Dict]: A dictionary of payloads keyed by device_id.
     """
     payloads = {}
-    fetchers_per_device = {}
 
     valid_levels = ["Minimal", "Minor", "Major", "Critical"]
 
@@ -64,40 +60,14 @@ def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> 
         logger.debug(f"Built base payload for device_id {device_id}: {payload}")
 
         payloads[device_id] = payload
-        fetchers_per_device[device_id] = []  # Initialize empty list
 
-    # Process fetchers for SyslogCollector only
-    fetcher_fields = [
-        'sid', 'parser', 'processpolicy', 'charset', 'uuid', 'path', 'excludes', 'hasLCP',
-        'client_id', 'api_key', 'uri', 'fetch_interval', 'LOGGEDINUSER', 'proxy',
-        'authorization_url', 'client_secret', 'events_url', 'distributed_collector',
-        'tenant_id', 'workspace_id', 'endpoint', 'resource', 'user_query', 'generated',
-        'requestType', 'ips', 'proxy_condition', 'CSRFToken'
-    ]
-    for index, row in df_fetcher.iterrows():
-        f_device_id = row['device_id']
-        app = str(row['app']) if pd.notna(row['app']) else ""
-        if f_device_id in payloads and app == "SyslogCollector":
-            f_data = {}
-            for field in fetcher_fields:
-                if pd.notna(row[field]):
-                    if isinstance(row[field], (int, float, bool)):
-                        f_data[field] = row[field]
-                    else:
-                        f_data[field] = str(row[field])
-            if 'sid' in f_data:  # Ensure sid present
-                f_payload = {"data": f_data}
-                fetchers_per_device[f_device_id].append(f_payload)
-                logger.debug(f"Built fetcher payload for device_id {f_device_id}, sid {f_data.get('sid')}")
-
-    return payloads, fetchers_per_device
+    return payloads
 
 def check_existing_per_node(
     client: DirectorClient,
     pool_uuid: str,
     node: Node,
-    payloads: Dict[str, Dict],
-    fetchers_per_device: Dict[str, List[Dict]]
+    payloads: Dict[str, Dict]
 ) -> Dict[str, Dict]:
     """
     Checks existing Devices per node.
@@ -111,7 +81,6 @@ def check_existing_per_node(
     pool_uuid (str): UUID of the pool.
     node (Node): Node object with 'id' and 'name'.
     payloads (Dict[str, Dict]): Dictionary of payloads keyed by device_id.
-    fetchers_per_device (Dict[str, List[Dict]]): Dictionary of fetcher payloads lists keyed by device_id.
 
     Returns:
     Dict[str, Dict]: Dictionary of results per device_id, with node-specific actions and mapped data.
@@ -236,8 +205,7 @@ def import_devices_for_nodes(
     Imports devices for specified nodes from an XLSX file.
 
     Coordinates the workflow: loads data, builds payloads, checks existing devices
-    per node, executes actions (CREATE, UPDATE, NOOP, SKIP), processes fetchers post-device success,
-    and returns results.
+    per node, executes actions (CREATE, UPDATE, NOOP, SKIP), and returns results.
 
     Args:
         client: DirectorClient instance for API calls.
@@ -249,7 +217,7 @@ def import_devices_for_nodes(
 
     Returns:
         Tuple[List[Dict[str, Any]], bool]: Tuple of (list of results, error indicator).
-        Results include: siem, node, name, result, action, error (for devices and fetchers).
+        Results include: siem, node, name, result, action, error.
 
     Raises:
         Exception: If XLSX loading or API calls fail.
@@ -257,17 +225,16 @@ def import_devices_for_nodes(
     rows = []
     any_error = False
 
-    # Load Excel sheets with error handling
+    # Load Excel sheet with error handling
     try:
         df_device = pd.read_excel(xlsx_path, sheet_name="Device")
-        df_fetcher = pd.read_excel(xlsx_path, sheet_name="DeviceFetcher")
-        logger.debug(f"Loaded sheets: Device ({len(df_device)} rows), DeviceFetcher ({len(df_fetcher)} rows)")
+        logger.debug(f"Loaded sheet: Device ({len(df_device)} rows)")
     except Exception as e:
         logger.error(f"Failed to load XLSX data: {str(e)}")
         return [], True
 
-    # Build payloads and fetchers
-    payloads, fetchers_per_device = build_device_payloads(df_device, df_fetcher)
+    # Build payloads
+    payloads = build_device_payloads(df_device)
 
     # Process per target type and node
     for target_type in targets or ["backends", "all_in_one"]:
@@ -277,7 +244,7 @@ def import_devices_for_nodes(
             siem = node_name
 
             # Check existing devices (includes mapping and validation)
-            check_results = check_existing_per_node(client, pool_uuid, node, payloads, fetchers_per_device)
+            check_results = check_existing_per_node(client, pool_uuid, node, payloads)
 
             for device_id, payload in payloads.items():
                 base_data = payload['data']
@@ -296,9 +263,6 @@ def import_devices_for_nodes(
                     'error': node_result.get('error', '-')
                 }
 
-                device_target_id = None
-                device_success = False
-
                 if action in ['SKIP', 'NOOP']:
                     result_entry['result'] = 'Skipped' if action == 'SKIP' else 'Noop'
                     logger.info(f"{action} for {name} on {node_name}")
@@ -308,7 +272,6 @@ def import_devices_for_nodes(
                     exec_payload['data']['devicegroup'] = devicegroup_ids
                     if action == 'UPDATE':
                         exec_payload['data']['id'] = existing_id
-                        device_target_id = existing_id
 
                     try:
                         if action == 'CREATE':
@@ -317,18 +280,7 @@ def import_devices_for_nodes(
                             response = client.update_device(pool_uuid, node_id, existing_id, exec_payload)
                         if response.get('status') == 'Success':
                             result_entry['result'] = 'Success'
-                            device_success = True
                             logger.info(f"{action} success for {name} on {node_name}")
-                            if action == 'CREATE':
-                                # Fetch new device_id by name and ip
-                                new_devices = client.get_devices(pool_uuid, node_id)
-                                device_key = (name, tuple(sorted(exec_payload['data']['ip'])))
-                                new_device = next((d for d in new_devices if (d.get('name', '') == name and tuple(sorted(d.get('ip', []))) == device_key)), None)
-                                if new_device:
-                                    device_target_id = new_device['id']
-                                    logger.debug(f"Retrieved new device_id {device_target_id} for {name}")
-                                else:
-                                    logger.warning(f"Could not retrieve new device_id for {name} after creation")
                         else:
                             result_entry['result'] = 'Fail'
                             result_entry['error'] = response.get('error', 'Unknown error')
@@ -341,60 +293,12 @@ def import_devices_for_nodes(
                         any_error = True
                 elif dry_run:
                     result_entry['result'] = 'Dry-run'
-                    device_success = True  # Simulate success for fetchers
                     logger.info(f"Dry run: {action} for {name} on {node_name}")
 
                 rows.append(result_entry)
 
-                # Process fetchers if device success
-                if device_success and device_target_id and device_id in fetchers_per_device:
-                    for f_payload in fetchers_per_device[device_id]:
-                        f_sid = f_payload['data'].get('sid', 'unknown')
-                        f_entry = {
-                            'siem': siem,
-                            'node': node_name,
-                            'name': f_sid,
-                            'result': 'N/A',
-                            'action': 'NOOP',  # Default
-                            'error': '-',
-                            'type': 'fetcher'
-                        }
-
-                        if dry_run:
-                            f_entry['result'] = 'Dry-run'
-                            f_entry['action'] = 'CREATE'  # Simulate
-                            logger.info(f"Dry run: CREATE fetcher {f_sid} for {name} on {node_name}")
-                            rows.append(f_entry)
-                            continue
-
-                        try:
-                            plugins = client.get_device_plugins(pool_uuid, node_id, device_target_id)
-                            existing_by_sid = {p.get('sid', ''): p for p in plugins}
-                            if f_sid in existing_by_sid:
-                                f_entry['action'] = 'NOOP'
-                                f_entry['result'] = 'Noop'
-                                logger.info(f"NOOP for fetcher {f_sid} on {name} ({node_name})")
-                            else:
-                                f_entry['action'] = 'CREATE'
-                                f_response = client.create_plugin(pool_uuid, node_id, device_target_id, f_payload)
-                                if f_response.get('status') == 'Success':
-                                    f_entry['result'] = 'Success'
-                                    logger.info(f"CREATE success for fetcher {f_sid} on {name} ({node_name})")
-                                else:
-                                    f_entry['result'] = 'Fail'
-                                    f_entry['error'] = f_response.get('error', 'Unknown error')
-                                    logger.error(f"CREATE fail for fetcher {f_sid} on {name} ({node_name}): {f_entry['error']}")
-                                    any_error = True
-                        except Exception as e:
-                            f_entry['result'] = 'Fail'
-                            f_entry['error'] = str(e)
-                            logger.error(f"Error processing fetcher {f_sid} for {name} on {node_name}: {str(e)}")
-                            any_error = True
-
-                        rows.append(f_entry)
-
     # Log summary
-    actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows if 'type' not in r or r['type'] != 'fetcher'}
+    actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows}
     logger.info(f"Devices import summary: {actions_summary}")
 
     return rows, any_error

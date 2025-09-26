@@ -77,12 +77,8 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
             payload["data"]["parser"] = row['parser'] if pd.notna(row['parser']) else "SyslogParser"
 
         # Optional fields
-        if pd.notna(row['device_id']):
-            payload["data"]["device_id"] = row['device_id']
         if hostname:
             payload["data"]["hostname"] = hostname
-        if pd.notna(row['policy_id']):
-            payload["data"]["policy_id"] = row['policy_id']
 
         logger.debug(f"Built payload for {row['device_name']}: {payload}")
         payloads[key] = payload

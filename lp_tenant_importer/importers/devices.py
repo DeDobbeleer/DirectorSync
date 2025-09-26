@@ -14,8 +14,9 @@ def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> 
     Builds the device payloads from the provided DataFrames.
 
     Extracts fixed fields from the Device sheet and constructs payloads
-    for each device, using only specified fields. Handles NaN as defaults (e.g., timezone="UTC").
-    Builds fetcher payloads for SyslogCollector only, grouped by device_id.
+    for each device, using only specified fields. Handles NaN as defaults (e.g., timezone="UTC",
+    mandatory fields set to "Major" if invalid). Builds fetcher payloads for SyslogCollector only,
+    grouped by device_id.
 
     Parameters:
     df_device (pd.DataFrame): DataFrame from "Device" sheet.
@@ -28,6 +29,8 @@ def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> 
     payloads = {}
     fetchers_per_device = {}
 
+    valid_levels = ["Minimal", "Minor", "Major", "Critical"]
+
     # Process devices
     for index, row in df_device.iterrows():
         device_id = row['device_id']
@@ -35,9 +38,9 @@ def build_device_payloads(df_device: pd.DataFrame, df_fetcher: pd.DataFrame) -> 
         ip_str = row['ip']
         ip = [str(ip_str)] if pd.notna(ip_str) and ip_str else []
         timezone = str(row['timezone']) if pd.notna(row['timezone']) else "UTC"
-        availability = str(row['availability']) if pd.notna(row['availability']) else "Major"
-        confidentiality = str(row['confidentiality']) if pd.notna(row['confidentiality']) else "Major"
-        integrity = str(row['integrity']) if pd.notna(row['integrity']) else "Major"
+        availability = str(row['availability']) if pd.notna(row['availability']) and str(row['availability']) in valid_levels else "Major"
+        confidentiality = str(row['confidentiality']) if pd.notna(row['confidentiality']) and str(row['confidentiality']) in valid_levels else "Major"
+        integrity = str(row['integrity']) if pd.notna(row['integrity']) and str(row['integrity']) in valid_levels else "Major"
         device_groups_str = str(row['device_groups']) if pd.notna(row['device_groups']) else ""
 
         # Temp store names for mapping
@@ -101,7 +104,7 @@ def check_existing_per_node(
 
     For each node, fetches DeviceGroups for mapping, then lists existing Devices, matches by name or ip,
     and determines the action (NOOP, SKIP, CREATE, UPDATE) based on specified fields only.
-    Skips if any devicegroup name missing.
+    Skips if any devicegroup name missing or mandatory fields invalid.
 
     Parameters:
     client: DirectorClient instance for API calls.
@@ -121,7 +124,7 @@ def check_existing_per_node(
     # Fetch DeviceGroups for mapping
     try:
         groups = client.get_device_groups(pool_uuid, node_id)
-        group_map = {g.get('name', ''): g.get('id') for g in groups}
+        group_map = {g.get('name', '').lower(): g.get('id') for g in groups}  # Case-insensitive match
         logger.debug(f"Fetched DeviceGroups for node {node_name}: {list(group_map.keys())}")
     except Exception as e:
         logger.error(f"Failed to fetch DeviceGroups for node {node_name}: {str(e)}")
@@ -132,19 +135,22 @@ def check_existing_per_node(
         devices = client.get_devices(pool_uuid, node_id)
         existing_by_key = {}
         for d in devices:
-            key = (d.get('name', ''), tuple(sorted(d.get('ip', []))))
+            key = (d.get('name', '').lower(), tuple(sorted(d.get('ip', []))))
             existing_by_key[key] = d
         logger.debug(f"Fetched Devices list for node {node_name}: {len(devices)} devices")
     except Exception as e:
         logger.error(f"Failed to fetch Devices list for node {node_name}: {str(e)}")
         return results
 
+    valid_levels = ["Minimal", "Minor", "Major", "Critical"]
+
     for device_id, payload in payloads.items():
         base_data = payload['data']
         names = base_data.pop('_device_groups_names', [])  # Remove temp field
 
-        # Map devicegroup
-        ids = [group_map.get(n) for n in names]
+        # Map devicegroup (case-insensitive)
+        ids = [group_map.get(n.lower()) for n in names]
+        logger.debug(f"Mapping device_groups for {device_id}: names={names}, ids={ids}")
         if any(id is None for id in ids):
             missing = [n for n, id_ in zip(names, ids) if id_ is None]
             results[device_id][node_name] = {
@@ -157,8 +163,17 @@ def check_existing_per_node(
         mapped_data = base_data.copy()
         mapped_data['devicegroup'] = ids
 
-        # Match existing by name and sorted ip
-        key = (mapped_data['name'], tuple(sorted(mapped_data['ip'])))
+        # Validate mandatory fields
+        if not mapped_data['name'] or not mapped_data['ip'] or mapped_data['availability'] not in valid_levels or mapped_data['confidentiality'] not in valid_levels or mapped_data['integrity'] not in valid_levels:
+            results[device_id][node_name] = {
+                'action': 'SKIP',
+                'error': 'Missing mandatory fields or invalid values'
+            }
+            logger.warning(f"Skipping {mapped_data['name']} on {node_name} due to {results[device_id][node_name]['error']}")
+            continue
+
+        # Match existing by name and sorted ip (case-insensitive)
+        key = (mapped_data['name'].lower(), tuple(sorted(mapped_data['ip'])))
         existing = existing_by_key.get(key)
 
         action = 'SKIP'
@@ -168,7 +183,7 @@ def check_existing_per_node(
         if existing:
             # Compare specified fields (normalize lists)
             existing_spec = {
-                'name': existing.get('name', ''),
+                'name': existing.get('name', '').lower(),
                 'ip': sorted(existing.get('ip', [])),
                 'timezone': existing.get('timezone', ''),
                 'devicegroup': sorted(existing.get('devicegroup', [])),
@@ -179,7 +194,7 @@ def check_existing_per_node(
                 'logpolicy': sorted(existing.get('logpolicy', []))
             }
             new_spec = {
-                'name': mapped_data['name'],
+                'name': mapped_data['name'].lower(),
                 'ip': sorted(mapped_data['ip']),
                 'timezone': mapped_data['timezone'],
                 'devicegroup': sorted(mapped_data['devicegroup']),
@@ -197,18 +212,13 @@ def check_existing_per_node(
                 existing_id = existing.get('id')
                 logger.info(f"UPDATE needed for {mapped_data['name']} on {node_name}")
         else:
-            # Validate mandatory
-            if mapped_data['name'] and mapped_data['ip'] and "availability" in ["Minimal", "Minor", "Major", "Critical"] and "confidentiality" in ["Minimal", "Minor", "Major", "Critical"] and "integrity" in ["Minimal", "Minor", "Major", "Critical"]:
-                action = 'CREATE'
-                logger.info(f"CREATE needed for {mapped_data['name']} on {node_name}")
-            else:
-                error_msg = 'Missing mandatory fields or invalid values'
-                logger.warning(f"Skipping {mapped_data['name']} on {node_name} due to {error_msg}")
+            action = 'CREATE'
+            logger.info(f"CREATE needed for {mapped_data['name']} on {node_name}")
 
         results[device_id][node_name] = {
             'action': action,
             'existing_id': existing_id,
-            'devicegroup_ids': ids if action != 'SKIP' else [],
+            'devicegroup_ids': ids,
             'error': error_msg
         }
 

@@ -346,8 +346,8 @@ def import_syslog_collectors_for_nodes(
             node_name = node.name
             siem = node_name  # Assuming siem is node_name
 
-            # Check existing collectors
-            check_results = check_existing_per_node(client, pool_uuid, node, payloads)
+            # Check existing collectors with the DataFrame
+            check_results = check_existing_per_node(client, pool_uuid, node, payloads, df)
 
             for device_id, payload in payloads.items():
                 device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is available

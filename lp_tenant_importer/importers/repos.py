@@ -52,7 +52,13 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
         name = row["name"]
         active = bool(row["active"])
         storage_paths = [p.strip() for p in row["storage_paths"].replace("|", ",").split(",") if p.strip()]
-        retention_days = [r.strip() for r in row["retention_days"].replace("|", ",").split(",") if r.strip()]
+        
+        # TODO convert as str
+        if isinstance(row["retention_days"], int):
+            retention_days = str(row["retention_days"])
+        else:
+            retention_days = [str(r).strip() for r in str(row["retention_days"]).replace("|", ",").split(",") if r.strip()]
+            
         if len(storage_paths) != len(retention_days):
             logger.error("Mismatch between storage_paths and retention_days for repo %s: %s vs %s", name, storage_paths, retention_days)
             rows.append({"siem": "", "node": "", "name": name, "result": "Fail", "action": "NONE", "error": "Mismatch in storage and retention data"})

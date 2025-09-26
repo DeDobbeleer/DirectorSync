@@ -1,4 +1,5 @@
 import logging
+import requests
 import pandas as pd
 from typing import Dict, List, Any, Tuple
 import json
@@ -395,6 +396,8 @@ def import_syslog_collectors_for_nodes(
                             result_entry["error"] = response.get("error", "Unknown error")
                             logger.error(f"{action} fail for {device_name} on {node_name}: {result_entry['error']}")
                             any_error = True
+                    except requests.RequestException as e:
+                        logger.error("Failed to create syslog collectot policy: %s", str(e.response.text))
                     except Exception as e:
                         result_entry["result"] = "Fail"
                         result_entry["error"] = str(e)

@@ -327,5 +327,6 @@ def import_device_groups_for_nodes(
     # Log summary
     actions_summary = {r['action']: sum(1 for res in rows if res['action'] == r['action']) for r in rows}
     logger.info(f"Import summary: {actions_summary}")
+    logger.debug(f"result data: {rows}")
 
     return rows, any_error

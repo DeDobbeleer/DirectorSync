@@ -155,6 +155,11 @@ class DirectorClient:
     def configapi(pool_uuid: str, node_id: str, resource: str) -> str:
         """Build the *configapi* path for a given resource under a pool/node."""
         return f"configapi/{pool_uuid}/{node_id}/{resource.strip('/')}"
+    
+    @staticmethod
+    def configapi_id(self, pool_uuid: str, node_id: str, resource: str, resource_id: str) -> str:
+        """Build config API path for a single resource id."""
+        return f"{self.configapi(pool_uuid, node_id, resource)}/{resource_id}"
 
     @staticmethod
     def monitorapi(pool_uuid: str, node_id: str, job_id: str) -> str:
@@ -308,7 +313,7 @@ class DirectorClient:
 
 
     def update_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, payload: Dict[str, Any], monitor: bool = True) -> Dict[str, Any]:
-        res = self.put_json(self.configapi(pool_uuid, node_id, resource, resource_id), {"data": payload})
+        res = self.put_json(self.configapi_id(pool_uuid, node_id, resource, resource_id), {"data": payload})
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
 
@@ -326,7 +331,7 @@ class DirectorClient:
 
 
     def delete_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, monitor: bool = True) -> Dict[str, Any]:
-        res = self.delete_json(self.configapi(pool_uuid, node_id, resource, resource_id))
+        res = self.delete_json(self.configapi_id(pool_uuid, node_id, resource, resource_id))
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
 

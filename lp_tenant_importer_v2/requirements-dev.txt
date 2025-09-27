@@ -1,0 +1,24 @@
+# DirectorSync v2 — development dependencies
+# Python >= 3.10
+
+# --- Testing
+pytest==8.3.3
+pytest-cov==5.0.0
+responses==0.25.3          # HTTP mocking for requests
+
+# --- Type checking & style (PEP 8)
+mypy==1.11.2
+black==24.8.0
+isort==5.13.2
+flake8==7.1.1
+
+# Optional: Ruff (fast linter/formatter). If you use Ruff, you can skip flake8/isort/black.
+# ruff==0.6.8
+
+# --- Typings for better IDE support (optional)
+types-requests==2.32.0.20240914
+types-PyYAML==6.0.12.20240808
+
+# --- Packaging & build helpers (optional)
+build==1.2.2.post1
+auto-py-to-exe==2.44.1

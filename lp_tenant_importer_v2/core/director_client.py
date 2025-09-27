@@ -22,8 +22,9 @@ from __future__ import annotations
 import time
 import os
 import uuid
+import json
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Union, Tuple
 
 import warnings
 import urllib3
@@ -185,121 +186,161 @@ class DirectorClient:
         return f"monitorapi/{pool_uuid}/{node_id}/orders/{job_id}"
 
 # --- Helpers: extract monitor path and job id from response ---
+
     def _extract_monitor_path(self, response: Dict[str, Any]) -> Optional[str]:
-        """
-        Legacy Director: HTTP 200 + {'message': 'monitorapi/...'}
-        Return the relative monitor path if present, else None.
-        """
-        if not isinstance(response, dict):
-            return None
-        msg = response.get("message")
+        msg = isinstance(response, dict) and response.get("message")
         if isinstance(msg, str) and msg.lstrip().startswith(("monitorapi/", "/monitorapi/")):
-            return msg.lstrip("/")  # keep it relative to the API base
+            return msg.lstrip("/")
         return None
 
+
     def _extract_job_id(self, response: Dict[str, Any]) -> Optional[str]:
-        """
-        Modern Director: HTTP 200 + JSON containing an 'orders' job id or similar.
-        Adjust this if your server returns a different key.
-        """
         if not isinstance(response, dict):
             return None
-        job = response.get("job") or response.get("orderId") or response.get("id")
-        if isinstance(job, str) and job:
-            return job
-        # sometimes nested
+        for key in ("job", "orderId", "id"):
+            val = response.get(key)
+            if isinstance(val, str) and val:
+                return val
         data = response.get("data")
         if isinstance(data, dict):
-            job = data.get("job") or data.get("orderId") or data.get("id")
-            if isinstance(job, str) and job:
-                return job
+            for key in ("job", "orderId", "id"):
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    return val
         return None
 
 # --- Monitor by job id: modern flow, but also accept response.success ---
-    def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> bool:
+
+    def _monitor_error_text(data: Dict[str, Any]) -> str:
         """
-        Poll 'monitorapi/{pool}/{node}/orders/{job_id}' until completion.
-        Success criteria:
-        - modern: top-level status in {'completed','success','ok'}
-        - legacy: response.success == True / False
+        Produce a short human-readable error from a monitor payload.
+        Looks into legacy `response.errors/message` and top-level `message/status`.
+        """
+        if not isinstance(data, dict):
+            return "monitor: invalid payload"
+
+        # Legacy: {response: {success, errors, message}}
+        resp = data.get("response")
+        if isinstance(resp, dict):
+            errs = resp.get("errors")
+            if isinstance(errs, list) and errs:
+                # Join list of strings or dicts
+                parts = []
+                for e in errs:
+                    if isinstance(e, str):
+                        parts.append(e)
+                    elif isinstance(e, dict):
+                        # pick something readable
+                        parts.append(e.get("message") or e.get("error") or _short_json(e, 200))
+                    else:
+                        parts.append(str(e))
+                return "; ".join(parts)[:400]
+            msg = resp.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()[:400]
+
+        # Fallbacks
+        msg2 = data.get("message")
+        if isinstance(msg2, str) and msg2.strip():
+            return msg2.strip()[:400]
+
+        status = data.get("status")
+        if isinstance(status, str) and status.strip():
+            return f"status={status.strip()[:100]}"
+
+        return "monitor: failed (no error details)"
+
+    def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Poll 'monitorapi/{pool}/{node}/orders/{job_id}'.
+        Return (ok, last_payload).
         """
         deadline = time.time() + self.options.monitor_timeout_sec
         seen_status, stagnant = None, 0
+        last: Dict[str, Any] = {}
 
         while time.time() < deadline:
             data = self.get_json(self.monitorapi(pool_uuid, node_id, job_id)) or {}
+            last = data
 
-            # Legacy support (if server responds with 'response.success')
             resp = data.get("response")
             if isinstance(resp, dict):
                 success = resp.get("success")
                 errors = resp.get("errors", [])
                 if success is True:
-                    return True
+                    log.debug("monitor_job: success payload=%s", _short_json(_redact(data)))
+                    return True, data
                 if success is False or errors:
-                    return False
+                    log.error("monitor_job: failed payload=%s", _short_json(_redact(data)))
+                    return False, data
 
-            # Modern contract: top-level 'status'
             status = str(data.get("status", "")).lower()
             if status in {"completed", "success", "ok"}:
-                return True
+                log.debug("monitor_job: success status=%s payload=%s", status, _short_json(_redact(data)))
+                return True, data
             if status in {"failed", "error"}:
-                return False
+                log.error("monitor_job: failed status=%s payload=%s", status, _short_json(_redact(data)))
+                return False, data
 
             stagnant = stagnant + 1 if status == seen_status else 0
             seen_status = status
-            if stagnant >= self.options.monitor_stagnant_max:
-                log.error("monitor_job: stagnant status=%s for %d polls (giving up)", status, stagnant)
-                return False
-
             time.sleep(self.options.monitor_poll_interval_sec)
+            if stagnant >= self.options.monitor_stagnant_max:
+                log.error("monitor_job: stagnant status=%s polls=%d last=%s",
+                        status, stagnant, _short_json(_redact(data)))
+                return False, data
 
-        log.error("Monitor timeout for job_id=%s", job_id)
-        return False
+        log.error("monitor_job: timeout last=%s", _short_json(_redact(last)))
+        return False, last
+
 
 # --- Monitor by URL: legacy flow reading response.success ---
-    def monitor_job_url(self, monitor_path: str) -> bool:
+
+    def monitor_job_url(self, monitor_path: str) -> Tuple[bool, Dict[str, Any]]:
         """
         Poll a legacy monitor endpoint like 'monitorapi/...'.
-        Success criteria:
-        - data.response.success == True → success
-        - data.response.success == False OR data.response.errors → failed
-        - fallback on top-level 'status' if present
+        Return (ok, last_payload).
         """
         path = monitor_path.lstrip("/")
         deadline = time.time() + self.options.monitor_timeout_sec
         seen_status, stagnant = None, 0
+        last: Dict[str, Any] = {}
 
         while time.time() < deadline:
             data = self.get_json(path) or {}
+            last = data
 
-            # Legacy contract: { "response": { "success": bool, "errors": [...] } }
+            # Legacy: nested response.success/errors
             resp = data.get("response")
             if isinstance(resp, dict):
                 success = resp.get("success")
                 errors = resp.get("errors", [])
                 if success is True:
-                    return True
+                    log.debug("monitor_url: success payload=%s", _short_json(_redact(data)))
+                    return True, data
                 if success is False or errors:
-                    return False
+                    log.error("monitor_url: failed payload=%s", _short_json(_redact(data)))
+                    return False, data
 
-            # Fallback: top-level status
+            # Modern-ish fallback: top-level status
             status = str(data.get("status", "")).lower()
             if status in {"completed", "success", "ok"}:
-                return True
+                log.debug("monitor_url: success status=%s payload=%s", status, _short_json(_redact(data)))
+                return True, data
             if status in {"failed", "error"}:
-                return False
+                log.error("monitor_url: failed status=%s payload=%s", status, _short_json(_redact(data)))
+                return False, data
 
             stagnant = stagnant + 1 if status == seen_status else 0
             seen_status = status
-            if stagnant >= self.options.monitor_stagnant_max:
-                log.error("monitor_job_url: stagnant status=%s for %d polls (giving up)", status, stagnant)
-                return False
-
             time.sleep(self.options.monitor_poll_interval_sec)
+            if stagnant >= self.options.monitor_stagnant_max:
+                log.error("monitor_url: stagnant status=%s polls=%d last=%s",
+                        status, stagnant, _short_json(_redact(data)))
+                return False, data
 
-        log.error("Monitor timeout for %s", path)
-        return False
+        log.error("monitor_url: timeout last=%s", _short_json(_redact(last)))
+        return False, last
 
     # ---------------- generic resource helpers ----------------
     def list_resource(self, pool_uuid: str, node_id: str, resource: str) -> JSON[str, Any]:
@@ -360,6 +401,7 @@ class DirectorClient:
         payload: Dict[str, Any],
         monitor: bool = True,
     ) -> Dict[str, Any]:
+        
         corr = uuid.uuid4().hex[:8]
         base = self.configapi(pool_uuid, node_id, resource)
         path = f"{base}/{resource_id}"

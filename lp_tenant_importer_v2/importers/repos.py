@@ -1,445 +1,185 @@
-"""
-Repos importer (profile-driven).
-
-Behavior:
-- Parses the "Repo" sheet (aliases supported) with multi-value cells (| or ,).
-- All parsed values are normalized to strings.
-- Builds payloads using only documented API fields (Director 2.7).
-- Canonicalizes GET responses for order-insensitive equality (NOOP vs UPDATE).
-- Verifies RepoPaths before applying; if missing, returns 'Skipped' status.
-
-Note:
-- No '--force-create': the Director API enforces path integrity.
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Set, Union, Tuple
-import json
+from typing import Any, Dict, List, Set, Tuple, Union
 import logging
-import pandas as pd
 
-from ..core.config import NodeRef
-from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError
-from ..utils.resource_profiles import REPOS_PROFILE
-from .base import BaseImporter
+from lp_tenant_importer_v2.core.director_client import DirectorClient
+from lp_tenant_importer_v2.utils.validators import ValidationError  # if you prefer, you can remove this import
+from lp_tenant_importer_v2.importers.base import BaseImporter, NodeRef
 
 JSON = Union[Dict[str, Any], List[Any]]
-NodeKey = Tuple[str, str]  # (pool_uuid, node_id)
-
-def _short(obj: Any, limit: int = 400) -> str:
-    """Safe, short preview for logs."""
-    try:
-        if isinstance(obj, (dict, list)):
-            s = json.dumps(obj)[:limit]
-        else:
-            s = repr(obj)[:limit]
-        return s
-    except Exception:
-        return f"<unrepr {type(obj).__name__}>"
-
-def _normalize_path_str(path: Any) -> str:
-    """
-    Normalize a repository path for comparison.
-    Logs non-string inputs to reveal offenders (e.g., tuple/list).
-    """
-    logger = logging.getLogger(__name__)
-    if isinstance(path, str):
-        s = path.strip()
-        logger.debug("normalize_path: input=str len=%d -> %r", len(path), s)
-        return s
-
-    logger.warning(
-        "normalize_path: non-string input type=%s value=%s (coercing to str)",
-        type(path).__name__, _short(path)
-    )
-    try:
-        s = str(path).strip()
-        logger.debug("normalize_path: coerced -> %r", s)
-        return s
-    except Exception:
-        logger.exception("normalize_path: failed to coerce input to str")
-        raise
-
-def _collect_paths_any(shape: Any, out: Set[str]) -> None:
-    """
-    Recursively collect path strings from any JSON shape.
-    Emits DEBUG for each branch type encountered.
-    """
-    logger = logging.getLogger(__name__)
-
-    if shape is None:
-        logger.debug("_collect_paths_any: None")
-        return
-
-    if isinstance(shape, str):
-        p = _normalize_path_str(shape)
-        out.add(p)
-        logger.debug("_collect_paths_any: str -> %r", p)
-        return
-
-    if isinstance(shape, dict):
-        if "paths" in shape:
-            logger.debug("_collect_paths_any: dict with 'paths' -> recurse")
-            _collect_paths_any(shape.get("paths"), out)
-            return
-        if "path" in shape:
-            v = shape.get("path")
-            logger.debug("_collect_paths_any: dict with 'path' -> %s", type(v).__name__)
-            if isinstance(v, str):
-                out.add(_normalize_path_str(v))
-                return
-        logger.debug("_collect_paths_any: dict (scan values); keys=%s", list(shape.keys())[:10])
-        for v in shape.values():
-            _collect_paths_any(v, out)
-        return
-
-    if isinstance(shape, (list, tuple)):
-        logger.debug("_collect_paths_any: %s of len=%d", type(shape).__name__, len(shape))
-        for v in shape:
-            _collect_paths_any(v, out)
-        return
-
-    logger.debug("_collect_paths_any: ignore type=%s", type(shape).__name__)
-
-def _extract_paths(avail: JSON) -> Set[str]:
-    logger = logging.getLogger(__name__)
-    logger.debug("_extract_paths: avail type=%s preview=%s", type(avail).__name__, _short(avail))
-    paths: Set[str] = set()
-    _collect_paths_any(avail, paths)
-    logger.debug("_extract_paths: collected paths=%d sample=%s",
-                 len(paths), list(sorted(paths))[:5])
-    return paths
-
-def _decannonize_hiddenrepopath(hrp: Any) -> List[Dict[str, str]]:
-    """
-    Accepts either a list[dict] (payload shape) or a canonical list of tuples:
-    [ ((path_val, ...), (("retention", val), ...)), ... ]
-    Returns a payload-friendly list[{"path": "...", "retention": "..."}].
-    """
-    if not hrp:
-        return []
-    if isinstance(hrp, list) and hrp and isinstance(hrp[0], dict):
-        # Already in payload shape
-        return [
-            {
-                "path": str(x.get("path", "")).strip(),
-                "retention": str(x.get("retention", "")).strip(),
-            }
-            for x in hrp
-        ]
-
-    # Canonical tuple shape produced by _canon_list_of_dict_unordered
-    out: List[Dict[str, str]] = []
-    for item in hrp or []:
-        # item is expected to be a 2-tuple: (key_tuple, val_tuple)
-        # key_tuple: tuple of key field values -> first is 'path'
-        # val_tuple: tuple of (field_name, value) pairs -> contains ('retention', value)
-        if not isinstance(item, tuple) or len(item) != 2:
-            continue
-        key_tuple, val_tuple = item
-        path_val = ""
-        if isinstance(key_tuple, tuple) and key_tuple:
-            path_val = str(key_tuple[0]).strip()
-        retention_val = ""
-        if isinstance(val_tuple, tuple):
-            try:
-                retention_val = str(dict(val_tuple).get("retention", "")).strip()
-            except Exception:
-                # Be defensive if val_tuple is malformed
-                retention_val = ""
-        out.append({"path": path_val, "retention": retention_val})
-    return out
-
-def _decannonize_repoha(rha: Any) -> List[Dict[str, str]]:
-    """
-    Accepts either a list[dict] (payload shape) or canonical list of tuples:
-    [ ((ha_li_val,), (("ha_day", val),)), ... ]
-    Returns a payload-friendly list[{"ha_li": "...", "ha_day": "..."}].
-    """
-    if not rha:
-        return []
-    if isinstance(rha, list) and rha and isinstance(rha[0], dict):
-        return [
-            {"ha_li": str(x.get("ha_li", "")).strip(), "ha_day": str(x.get("ha_day", "")).strip()}
-            for x in rha
-        ]
-
-    out: List[Dict[str, str]] = []
-    for item in rha or []:
-        if not isinstance(item, tuple) or len(item) != 2:
-            continue
-        key_tuple, val_tuple = item
-        ha_li = ""
-        if isinstance(key_tuple, tuple) and key_tuple:
-            ha_li = str(key_tuple[0]).strip()
-        ha_day = ""
-        if isinstance(val_tuple, tuple):
-            try:
-                ha_day = str(dict(val_tuple).get("ha_day", "")).strip()
-            except Exception:
-                ha_day = ""
-        out.append({"ha_li": ha_li, "ha_day": ha_day})
-    return out
-
-
-from typing import Any, Dict, List, Tuple
-
-def _hrp_to_payload(hrp: Any) -> List[Dict[str, str]]:
-    """
-    Convert 'hiddenrepopath' from canonical tuples to payload list[dict].
-    Accepts:
-      - list[dict]  (already payload)
-      - list[tuple] (canonical: [(key_tuple, val_tuple), ...])
-    Returns list like: [{"path": "...", "retention": "..."}].
-    """
-    if not hrp:
-        return []
-    if isinstance(hrp, list) and hrp and isinstance(hrp[0], dict):
-        # Already payload shape
-        return [
-            {"path": str(x.get("path", "")).strip(),
-             "retention": str(x.get("retention", "")).strip()}
-            for x in hrp
-        ]
-
-    out: List[Dict[str, str]] = []
-    for item in hrp or []:
-        # Expected canonical shape: (key_tuple, val_tuple)
-        if not isinstance(item, tuple) or len(item) != 2:
-            continue
-        key_tuple, val_tuple = item
-        path_val = ""
-        if isinstance(key_tuple, tuple) and key_tuple:
-            path_val = str(key_tuple[0]).strip()
-        retention_val = ""
-        if isinstance(val_tuple, tuple):
-            try:
-                retention_val = str(dict(val_tuple).get("retention", "")).strip()
-            except Exception:
-                retention_val = ""
-        out.append({"path": path_val, "retention": retention_val})
-    return out
-
-
-def _repoha_to_payload(rha: Any) -> List[Dict[str, str]]:
-    """
-    Convert 'repoha' from canonical tuples to payload list[dict].
-    Returns list like: [{"ha_li": "...", "ha_day": "..."}].
-    """
-    if not rha:
-        return []
-    if isinstance(rha, list) and rha and isinstance(rha[0], dict):
-        return [
-            {"ha_li": str(x.get("ha_li", "")).strip(),
-             "ha_day": str(x.get("ha_day", "")).strip()}
-            for x in rha
-        ]
-
-    out: List[Dict[str, str]] = []
-    for item in rha or []:
-        if not isinstance(item, tuple) or len(item) != 2:
-            continue
-        key_tuple, val_tuple = item
-        ha_li = ""
-        if isinstance(key_tuple, tuple) and key_tuple:
-            ha_li = str(key_tuple[0]).strip()
-        ha_day = ""
-        if isinstance(val_tuple, tuple):
-            try:
-                ha_day = str(dict(val_tuple).get("ha_day", "")).strip()
-            except Exception:
-                ha_day = ""
-        out.append({"ha_li": ha_li, "ha_day": ha_day})
-    return out
-
+log = logging.getLogger(__name__)
 
 
 class ReposImporter(BaseImporter):
-    resource_name = "repos"
-    sheet_names = (REPOS_PROFILE.sheet,)
-    required_columns = (REPOS_PROFILE.col_storage_paths, REPOS_PROFILE.col_retention_days)
-    compare_keys = ("hiddenrepopath", "repoha")
-    _paths_cache: Dict[NodeKey, Set[str]] = {}
+    """Minimal, straightforward implementation for Repos."""
 
-    RESOURCE = REPOS_PROFILE.api_resource
-    SUB_REPO_PATHS = REPOS_PROFILE.sub_repo_paths
+    RESOURCE = "Repos"
+    SUB_REPO_PATHS = "RepoPaths"
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
-        df: pd.DataFrame = sheets[REPOS_PROFILE.sheet]
-        # Ensure 'name' or alias exists in the sheet header set (runtime check)
-        cols = set(df.columns.str.lower())
-        if (REPOS_PROFILE.col_name not in cols) and not any(a in cols for a in REPOS_PROFILE.col_name_aliases):
-            raise ValidationError(f"Missing required column: '{REPOS_PROFILE.col_name}' (or one of aliases {REPOS_PROFILE.col_name_aliases})")
+    # Keep your compare keys as defined in your project (example below).
+    # The decide() in BaseImporter still uses canonical shapes; apply() receives RAW desired.
+    compare_keys: Tuple[str, ...] = (
+        "name",
+        "hiddenrepopath",
+        "repoha",
+        "description",
+        "type",
+        "hiddenrepo",
+    )
 
-        for _, row in df.iterrows():
-            try:
-                desired = REPOS_PROFILE.parse_row(row)
-            except Exception as exc:
-                raise ValidationError(str(exc)) from exc
-            yield desired
-
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
-        return desired_row["name"]
-
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        return REPOS_PROFILE.canon_for_compare(desired_row)
-
-    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
-        if not existing_obj:
-            return None
-        return REPOS_PROFILE.canon_for_compare(existing_obj)
+    # ---------- Fetch existing ----------
 
     def fetch_existing(
         self,
         client: DirectorClient,
         pool_uuid: str,
-        node: NodeRef
+        node: NodeRef,
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Fetch existing repos from Director, tolerating list/dict payloads.
-        Logs the payload shape to help diagnose structure mismatches.
+        Return existing repos as a map: repo_name -> repo_object.
+        Tolerates Director APIs returning either a list or a dict wrapper.
         """
-        logger = getattr(self, "logger", logging.getLogger(__name__))
-        payload: JSON = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+        data: JSON = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
 
-        logger.debug(
-            "fetch_existing: payload type=%s preview=%s",
-            type(payload).__name__, _short(payload)
-        )
-
-        items: List[Dict[str, Any]] = []
-
-        if isinstance(payload, list):
-            items = [x for x in payload if isinstance(x, dict)]
-        elif isinstance(payload, dict):
-            def get_ci(d: Dict[str, Any], key: str) -> Any:
-                for k, v in d.items():
-                    if str(k).lower() == key.lower():
-                        return v
-                return None
-
-            candidates = (
-                get_ci(payload, "repos")
-                or get_ci(payload, "items")
-                or get_ci(payload, "data")
-                or get_ci(payload, "results")
-                or payload
+        # Normalize to a list of dicts
+        if isinstance(data, list):
+            items = [x for x in data if isinstance(x, dict)]
+        elif isinstance(data, dict):
+            items_any = (
+                data.get("repos")
+                or data.get("items")
+                or data.get("data")
+                or []
             )
-            logger.debug(
-                "fetch_existing: candidates type=%s preview=%s",
-                type(candidates).__name__, _short(candidates)
-            )
-
-            if isinstance(candidates, list):
-                items = [x for x in candidates if isinstance(x, dict)]
-            elif isinstance(candidates, dict):
-                nested = (
-                    get_ci(candidates, "items")
-                    or get_ci(candidates, "repos")
-                    or get_ci(candidates, "results")
-                    or get_ci(candidates, "data")
-                )
-                logger.debug(
-                    "fetch_existing: nested type=%s preview=%s",
-                    type(nested).__name__, _short(nested)
-                )
-                if isinstance(nested, list):
-                    items = [x for x in nested if isinstance(x, dict)]
-                else:
-                    items = [candidates]
-            else:
-                items = []
+            items = [x for x in items_any if isinstance(x, dict)]
         else:
-            logger.error(
-                "fetch_existing: unexpected payload type=%s preview=%s",
-                type(payload).__name__, _short(payload)
-            )
-            raise TypeError(f"Unexpected payload type: {type(payload).__name__}")
+            items = []
 
         result: Dict[str, Dict[str, Any]] = {}
         for it in items:
-            if not isinstance(it, dict):
-                logger.warning("fetch_existing: skipping non-dict item type=%s", type(it).__name__)
-                continue
-            name = it.get("name") or it.get("label") or it.get("RepoName")
-            if isinstance(name, str):
-                key = name.strip()
-                if key:
-                    if key in result:
-                        logger.warning("fetch_existing: duplicate repo name: %s (overwriting)", key)
-                    result[key] = it
-            else:
-                logger.warning(
-                    "fetch_existing: item without string name: keys=%s",
-                    list(it.keys())[:10]
-                )
-
-        logger.debug("fetch_existing: collected repos=%d", len(result))
+            name = (it.get("name") or it.get("label") or "").strip()
+            if name:
+                result[name] = it
         return result
 
-    # ---------------- verification ----------------
+    # ---------- Path verification (simple) ----------
+
+    def _extract_paths(self, obj: Any, out: Set[str]) -> None:
+        """Collect path strings from any RepoPaths JSON shape."""
+        if obj is None:
+            return
+        if isinstance(obj, str):
+            out.add(obj.strip())
+            return
+        if isinstance(obj, dict):
+            # common keys first
+            if "paths" in obj:
+                self._extract_paths(obj.get("paths"), out)
+                return
+            if "path" in obj and isinstance(obj["path"], str):
+                out.add(obj["path"].strip())
+                return
+            # otherwise scan values
+            for v in obj.values():
+                self._extract_paths(v, out)
+            return
+        if isinstance(obj, (list, tuple)):
+            for v in obj:
+                self._extract_paths(v, out)
 
     def _verify_paths(
         self,
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-        storage_paths: List[str]
+        storage_paths: List[str],
     ) -> List[str]:
         """
-        Return missing storage paths for the node (no exception).
-        Uses a per-node cache to avoid re-fetching RepoPaths for every repo.
+        Return missing storage paths for this node.
+        No exception is raised; caller decides what to do (usually: Skipped).
         """
-        logger = getattr(self, "logger", logging.getLogger(__name__))
-        key: NodeKey = (pool_uuid, node.id)
+        if not storage_paths:
+            return []
+        avail = client.list_subresource(
+            pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
+        ) or {}
+        available: Set[str] = set()
+        self._extract_paths(avail, available)
 
-        # Cache RepoPaths per node
-        if key not in self._paths_cache:
-            avail = client.list_subresource(
-                pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
-            ) or {}
-            available_paths = _extract_paths(avail)
-            self._paths_cache[key] = available_paths
-            logger.debug(
-                "_verify_paths: cached RepoPaths for %s/%s count=%d sample=%s",
-                pool_uuid, node.name, len(available_paths),
-                list(sorted(available_paths))[:5],
-            )
-        else:
-            available_paths = self._paths_cache[key]
-
-        desired = {_normalize_path_str(p) for p in storage_paths}
-        missing = sorted(p for p in desired if p not in available_paths)
+        desired = {p.strip() for p in storage_paths if isinstance(p, str) and p.strip()}
+        missing = sorted(p for p in desired if p not in available)
 
         if missing:
-            logger.error("_verify_paths: missing=%s", missing)
-
+            log.debug("RepoPaths missing on %s/%s: %s", pool_uuid, node.name, missing)
         return missing
 
-    # ---------------- payloads & apply ----------------
+    # ---------- Payload builders (pass-through minimal) ----------
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        return REPOS_PROFILE.build_post_payload(desired_row)
+    def build_payload_create(self, desired: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Keep it simple: pass through only known/needed keys.
+        Add/remove keys here to match your Director version if needed.
+        """
+        keep = {
+            "name",
+            "hiddenrepopath",
+            "repoha",
+            "description",
+            "type",
+            "hiddenrepo",
+        }
+        return {k: v for k, v in desired.items() if k in keep}
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
-        return REPOS_PROFILE.build_put_payload(existing_obj.get("id", ""), desired_row)
+    def build_payload_update(
+        self, desired: Dict[str, Any], existing: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Same philosophy as create; include only fields you want to update.
+        """
+        return self.build_payload_create(desired)
 
-    def apply(self, client: DirectorClient, pool_uuid: str, node: NodeRef, decision, existing_id: str | None) -> Dict[str, Any]:
-        desired = decision.desired or {}
-        desired_paths = [p["path"] for p in (desired.get("hiddenrepopath") or [])]
+    # ---------- Apply (RAW desired expected) ----------
+
+    def apply(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+        decision,
+        existing_id: str | None,
+    ) -> Dict[str, Any]:
+        """
+        decision.desired is RAW (payload shape), not canonical.
+        We only:
+          1) verify RepoPaths,
+          2) create or update using minimal payloads,
+          3) return a compact status dict.
+        """
+        desired: Dict[str, Any] = (decision.desired or {}).copy()
+
+        # 1) Verify storage paths (from hiddenrepopath)
+        desired_paths = [
+            p.get("path", "").strip()
+            for p in (desired.get("hiddenrepopath") or [])
+            if isinstance(p, dict)
+        ]
         missing = self._verify_paths(client, pool_uuid, node, desired_paths)
         if missing:
-            # Do not attempt write calls when paths are absent
             return {"status": "Skipped", "result": {"missing_paths": missing}}
 
+        # 2) Apply
         if decision.op == "CREATE":
             payload = self.build_payload_create(desired)
-            return client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+            res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+            return res
 
         if decision.op == "UPDATE" and existing_id:
             payload = self.build_payload_update(desired, {"id": existing_id})
-            return client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
+            res = client.update_resource(
+                pool_uuid, node.id, self.RESOURCE, existing_id, payload
+            )
+            return res
 
+        # NOOP or nothing to change
         return {"status": "Success"}

@@ -13,8 +13,15 @@ JSON = Union[Dict[str, Any], List[Any]]
 log = logging.getLogger(__name__)
 
 
+def _node_tag(node: NodeRef) -> str:
+    """Printable node tag 'name|id' for logs."""
+    name = getattr(node, "name", None) or getattr(node, "id", "")
+    nid = getattr(node, "id", "")
+    return f"{name}|{nid}"
+
+
 class ReposImporter(BaseImporter):
-    """Minimal importer for Repos (profils + payloads whitelistés)."""
+    """Minimal importer for Repos (profiles + whitelisted payloads)."""
 
     resource_name = "repos"
     sheet_names = (REPOS_PROFILE.sheet,)
@@ -46,7 +53,7 @@ class ReposImporter(BaseImporter):
     def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
         return REPOS_PROFILE.canon_for_compare(existing_obj) if existing_obj else None
 
-    # -------------------- Lecture existant --------------------
+    # -------------------- Read existing --------------------
 
     def fetch_existing(
         self,
@@ -54,8 +61,17 @@ class ReposImporter(BaseImporter):
         pool_uuid: str,
         node: NodeRef,
     ) -> Dict[str, Dict[str, Any]]:
-        """Retourne {name -> objet} en tolérant list/dict côté API."""
+        """Return {name -> object}, tolerating list/dict from the API."""
+        node_t = _node_tag(node)
+        log.info("fetch_existing: start [node=%s]", node_t)
         data: JSON = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+
+        log.debug(
+            "fetch_existing: payload type=%s len=%s [node=%s]",
+            type(data).__name__,
+            (len(data) if hasattr(data, "__len__") else "n/a"),
+            node_t,
+        )
 
         if isinstance(data, list):
             items = [x for x in data if isinstance(x, dict)]
@@ -70,17 +86,19 @@ class ReposImporter(BaseImporter):
             name = (it.get("name") or it.get("label") or "").strip()
             if name:
                 out[name] = it
+
+        log.info("fetch_existing: found %d repos [node=%s]", len(out), node_t)
         return out
 
-    # -------------------- Vérification paths --------------------
+    # -------------------- RepoPaths verification --------------------
 
     def _extract_paths(self, raw: Any) -> Set[str]:
-        """Récupère les RepoPaths valides depuis n’importe quelle forme courante."""
+        """Collect valid RepoPaths from common shapes."""
         paths: Set[str] = set()
         if raw is None:
             return paths
 
-        # cas standard: {"paths":[...]} ou [{"paths":[...]}]
+        # Standard common shapes first
         if isinstance(raw, dict) and isinstance(raw.get("paths"), list):
             src = raw["paths"]
         elif isinstance(raw, list) and raw and isinstance(raw[0], dict) and isinstance(raw[0].get("paths"), list):
@@ -94,7 +112,7 @@ class ReposImporter(BaseImporter):
                     paths.add(p if p.endswith("/") else p + "/")
             return paths
 
-        # fallback: scan récursif très simple
+        # Fallback: simple recursive scan
         def _walk(o: Any):
             if isinstance(o, str) and o:
                 s = o if o.endswith("/") else o + "/"
@@ -116,10 +134,19 @@ class ReposImporter(BaseImporter):
         node: NodeRef,
         storage_paths: List[str],
     ) -> List[str]:
+        node_t = _node_tag(node)
         if not storage_paths:
+            log.info("verify_paths: nothing to verify (empty) [node=%s]", node_t)
             return []
+
+        log.info("verify_paths: desired=%d [node=%s]", len(storage_paths), node_t)
         avail_raw = client.list_subresource(pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS) or {}
         available = self._extract_paths(avail_raw)
+
+        log.debug(
+            "verify_paths: available=%d sample=%s [node=%s]",
+            len(available), list(sorted(available))[:5], node_t
+        )
 
         desired = {
             (p.strip() if p.strip().endswith("/") else p.strip() + "/")
@@ -128,16 +155,20 @@ class ReposImporter(BaseImporter):
         }
         missing = sorted(p for p in desired if p not in available)
         if missing:
-            log.debug("RepoPaths missing on %s/%s: %s", pool_uuid, node.name, missing)
+            log.warning("verify_paths: missing=%s [node=%s]", missing, node_t)
+        else:
+            log.info("verify_paths: all ok (%d paths) [node=%s]", len(desired), node_t)
         return missing
 
-    # -------------------- Payloads & apply --------------------
+    # -------------------- Payloads --------------------
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         return REPOS_PROFILE.build_post_payload(desired_row)
 
     def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
         return REPOS_PROFILE.build_put_payload(existing_obj.get("id", ""), desired_row)
+
+    # -------------------- Apply (RAW desired) --------------------
 
     def apply(
         self,
@@ -147,26 +178,48 @@ class ReposImporter(BaseImporter):
         decision,
         existing_id: str | None,
     ) -> Dict[str, Any]:
-        # decision.desired est **payload** (pas canonique)
-        desired = decision.desired or {}
+        node_t = _node_tag(node)
+        desired = (decision.desired or {}).copy()
+        repo_name = desired.get("name") or "(unnamed)"
 
-        # 1) vérif RepoPaths
+        log.info("apply: op=%s repo=%s [node=%s]", getattr(decision, "op", "?"), repo_name, node_t)
+        log.debug("apply: desired keys=%s [node=%s]", list(desired.keys()), node_t)
+
+        # 1) verify paths
         desired_paths = [
             p.get("path", "").strip()
             for p in (desired.get("hiddenrepopath") or [])
-            if isinstance(p, dict)
+            if isinstance(p, dict) and p.get("path")
         ]
         missing = self._verify_paths(client, pool_uuid, node, desired_paths)
         if missing:
+            log.warning(
+                "apply: skipping repo %s due to missing paths=%s [node=%s]",
+                repo_name, missing, node_t
+            )
             return {"status": "Skipped", "result": {"missing_paths": missing}}
 
-        # 2) apply
-        if decision.op == "CREATE":
-            payload = self.build_payload_create(desired)
-            return client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+        # 2) create or update
+        try:
+            if decision.op == "CREATE":
+                payload = self.build_payload_create(desired)
+                log.info("apply: CREATE repo=%s [node=%s]", repo_name, node_t)
+                log.debug("apply: CREATE payload=%s [node=%s]", payload, node_t)
+                res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+                log.debug("apply: CREATE result=%s [node=%s]", res, node_t)
+                return res
 
-        if decision.op == "UPDATE" and existing_id:
-            payload = self.build_payload_update(desired, {"id": existing_id})
-            return client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
+            if decision.op == "UPDATE" and existing_id:
+                payload = self.build_payload_update(desired, {"id": existing_id})
+                log.info("apply: UPDATE repo=%s id=%s [node=%s]", repo_name, existing_id, node_t)
+                log.debug("apply: UPDATE payload=%s [node=%s]", payload, node_t)
+                res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
+                log.debug("apply: UPDATE result=%s [node=%s]", res, node_t)
+                return res
 
-        return {"status": "Success"}
+            log.info("apply: NOOP repo=%s [node=%s]", repo_name, node_t)
+            return {"status": "Success"}
+
+        except Exception:
+            log.exception("apply: API call failed for repo=%s [node=%s]", repo_name, node_t)
+            raise

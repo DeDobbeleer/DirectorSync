@@ -14,7 +14,7 @@ Note:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Set, Union
+from typing import Any, Dict, Iterable, List, Set, Union, Tuple
 import json
 import logging
 import pandas as pd
@@ -26,6 +26,7 @@ from ..utils.resource_profiles import REPOS_PROFILE
 from .base import BaseImporter
 
 JSON = Union[Dict[str, Any], List[Any]]
+NodeKey = Tuple[str, str]  # (pool_uuid, node_id)
 
 def _short(obj: Any, limit: int = 400) -> str:
     """Safe, short preview for logs."""
@@ -187,6 +188,7 @@ class ReposImporter(BaseImporter):
     sheet_names = (REPOS_PROFILE.sheet,)
     required_columns = (REPOS_PROFILE.col_storage_paths, REPOS_PROFILE.col_retention_days)
     compare_keys = ("hiddenrepopath", "repoha")
+    _paths_cache: Dict[NodeKey, Set[str]] = {}
 
     RESOURCE = REPOS_PROFILE.api_resource
     SUB_REPO_PATHS = REPOS_PROFILE.sub_repo_paths
@@ -305,46 +307,43 @@ class ReposImporter(BaseImporter):
         return result
 
     # ---------------- verification ----------------
+
     def _verify_paths(
         self,
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
         storage_paths: List[str]
-    ) -> None:
+    ) -> List[str]:
         """
-        Validate that all desired storage paths exist on the node.
-        Tolerant to dict/list/tuple shapes returned by Repos/RepoPaths.
+        Return missing storage paths for the node (no exception).
+        Uses a per-node cache to avoid re-fetching RepoPaths for every repo.
         """
         logger = getattr(self, "logger", logging.getLogger(__name__))
-        try:
+        key: NodeKey = (pool_uuid, node.id)
+
+        # Cache RepoPaths per node
+        if key not in self._paths_cache:
             avail = client.list_subresource(
                 pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
             ) or {}
-            logger.debug(
-                "_verify_paths: RepoPaths type=%s preview=%s",
-                type(avail).__name__, _short(avail)
-            )
-
             available_paths = _extract_paths(avail)
-            desired = {_normalize_path_str(p) for p in storage_paths}
-            missing = sorted(p for p in desired if p not in available_paths)
-
+            self._paths_cache[key] = available_paths
             logger.debug(
-                "_verify_paths: available=%d desired=%d missing=%d",
-                len(available_paths), len(desired), len(missing)
+                "_verify_paths: cached RepoPaths for %s/%s count=%d sample=%s",
+                pool_uuid, node.name, len(available_paths),
+                list(sorted(available_paths))[:5],
             )
-            if missing:
-                logger.error("_verify_paths: missing=%s", missing)
-                raise ValidationError(f"Missing storage paths: {', '.join(missing)}")
+        else:
+            available_paths = self._paths_cache[key]
 
-        except Exception:
-            # This will include function/line thanks to the formatter and stack trace
-            logger.exception(
-                "_verify_paths: unhandled exception (pool=%s node=%s)",
-                pool_uuid, getattr(node, "name", node.id)
-            )
-            raise
+        desired = {_normalize_path_str(p) for p in storage_paths}
+        missing = sorted(p for p in desired if p not in available_paths)
+
+        if missing:
+            logger.error("_verify_paths: missing=%s", missing)
+
+        return missing
 
     # ---------------- payloads & apply ----------------
 
@@ -354,29 +353,14 @@ class ReposImporter(BaseImporter):
     def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
         return REPOS_PROFILE.build_put_payload(existing_obj.get("id", ""), desired_row)
 
-    def apply(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-        decision,
-        existing_id: str | None
-    ) -> Dict[str, Any]:
-        # decision.desired is CANONICAL -> convert back to payload shape
-        desired_canon = decision.desired or {}
-        desired: Dict[str, Any] = {
-            "name": str(desired_canon.get("name", "")).strip(),  # may be absent in canon
-            "hiddenrepopath": _decannonize_hiddenrepopath(desired_canon.get("hiddenrepopath")),
-            "repoha": _decannonize_repoha(desired_canon.get("repoha")),
-        }
-
-        # 1) Verify repo paths
+    def apply(self, client: DirectorClient, pool_uuid: str, node: NodeRef, decision, existing_id: str | None) -> Dict[str, Any]:
+        desired = decision.desired or {}
         desired_paths = [p["path"] for p in (desired.get("hiddenrepopath") or [])]
         missing = self._verify_paths(client, pool_uuid, node, desired_paths)
         if missing:
+            # Do not attempt write calls when paths are absent
             return {"status": "Skipped", "result": {"missing_paths": missing}}
 
-        # 2) Apply
         if decision.op == "CREATE":
             payload = self.build_payload_create(desired)
             return client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)

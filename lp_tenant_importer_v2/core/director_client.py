@@ -20,6 +20,8 @@ Example:
 from __future__ import annotations
 
 import time
+import os
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from typing import Any, Dict, List, Union
@@ -46,7 +48,8 @@ class ClientOptions:
     timeout_sec: int = 60
     monitor_timeout_sec: int = 180
     monitor_poll_interval_sec: float = 1.0
-
+    monitor_stagnant_max: int = 120  # new: max same-status polls
+    monitor_enabled: bool = True     # new: allow disabling monitoring
 
 class DirectorClient:
     """High-level HTTP client for Logpoint Director API.
@@ -70,6 +73,13 @@ class DirectorClient:
         self.options = options or ClientOptions()
         if verify is not None:
             self.options.verify = bool(verify)
+        
+        self.options.monitor_timeout_sec = int(os.getenv("LP_MONITOR_TIMEOUT_SEC", self.options.monitor_timeout_sec))
+        self.options.monitor_poll_interval_sec = float(os.getenv("LP_MONITOR_POLL_SEC", self.options.monitor_poll_interval_sec))
+        self.options.monitor_stagnant_max = int(os.getenv("LP_MONITOR_STAGNANT_MAX", self.options.monitor_stagnant_max))
+        me = os.getenv("LP_MONITOR_ENABLED")
+        if me is not None:
+            self.options.monitor_enabled = me.strip().lower() not in {"0", "false", "no"}
 
     # ---------------- low-level ----------------
     def _url(self, path: str) -> str:
@@ -151,20 +161,37 @@ class DirectorClient:
         return None
 
     def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> bool:
-        """Poll the monitor API until completion or timeout.
-
-        Returns:
-            True if the job reached a success/completed state, False otherwise.
+        """
+        Poll the monitor API until completion or timeout.
+        Returns True on success-like status, False otherwise.
         """
         deadline = time.time() + self.options.monitor_timeout_sec
+        seen_status: str | None = None
+        stagnant = 0
+
         while time.time() < deadline:
-            data = self.get_json(self.monitorapi(pool_uuid, node_id, job_id))
-            status = (data or {}).get("status", "").lower()
+            data = self.get_json(self.monitorapi(pool_uuid, node_id, job_id)) or {}
+            status = str(data.get("status", "")).lower()
+
+            log.debug(
+                "monitor_job: job_id=%s status=%s data=%s",
+                job_id, status, json.dumps(data)[:300]
+            )
+
             if status in {"completed", "success", "ok"}:
                 return True
             if status in {"failed", "error"}:
                 return False
+
+            stagnant = stagnant + 1 if status == seen_status else 0
+            seen_status = status
+
+            if stagnant >= self.options.monitor_stagnant_max:
+                log.error("monitor_job: stagnant status=%s for %d polls (giving up)", status, stagnant)
+                return False
+
             time.sleep(self.options.monitor_poll_interval_sec)
+
         log.error("Monitor timeout for job_id=%s", job_id)
         return False
 
@@ -184,7 +211,7 @@ class DirectorClient:
             A dict with shape ``{"status": "Success"|"Failed", "result": ...}``.
         """
         res = self.post_json(self.configapi(pool_uuid, node_id, resource), {"data": payload})
-        if not monitor:
+        if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
         job = self._extract_job_id(res)
         if job:
@@ -195,7 +222,7 @@ class DirectorClient:
     def update_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, payload: Dict[str, Any], *, monitor: bool = True) -> Dict[str, Any]:
         """Update a resource by id and optionally monitor the resulting job."""
         res = self.put_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{resource_id}"), {"data": payload})
-        if not monitor:
+        if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
         job = self._extract_job_id(res)
         if job:
@@ -206,7 +233,7 @@ class DirectorClient:
     def delete_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, *, monitor: bool = True) -> Dict[str, Any]:
         """Delete a resource by id and optionally monitor the resulting job."""
         res = self.delete_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{resource_id}"))
-        if not monitor:
+        if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
         job = self._extract_job_id(res)
         if job:

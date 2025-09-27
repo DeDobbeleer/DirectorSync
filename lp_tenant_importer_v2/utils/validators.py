@@ -4,6 +4,7 @@ XLSX validators (required sheets/columns).
 from __future__ import annotations
 
 from typing import Dict, Iterable
+import pandas as pd
 
 
 class ValidationError(Exception):

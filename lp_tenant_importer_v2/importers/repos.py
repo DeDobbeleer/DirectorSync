@@ -183,6 +183,79 @@ def _decannonize_repoha(rha: Any) -> List[Dict[str, str]]:
         out.append({"ha_li": ha_li, "ha_day": ha_day})
     return out
 
+
+from typing import Any, Dict, List, Tuple
+
+def _hrp_to_payload(hrp: Any) -> List[Dict[str, str]]:
+    """
+    Convert 'hiddenrepopath' from canonical tuples to payload list[dict].
+    Accepts:
+      - list[dict]  (already payload)
+      - list[tuple] (canonical: [(key_tuple, val_tuple), ...])
+    Returns list like: [{"path": "...", "retention": "..."}].
+    """
+    if not hrp:
+        return []
+    if isinstance(hrp, list) and hrp and isinstance(hrp[0], dict):
+        # Already payload shape
+        return [
+            {"path": str(x.get("path", "")).strip(),
+             "retention": str(x.get("retention", "")).strip()}
+            for x in hrp
+        ]
+
+    out: List[Dict[str, str]] = []
+    for item in hrp or []:
+        # Expected canonical shape: (key_tuple, val_tuple)
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        key_tuple, val_tuple = item
+        path_val = ""
+        if isinstance(key_tuple, tuple) and key_tuple:
+            path_val = str(key_tuple[0]).strip()
+        retention_val = ""
+        if isinstance(val_tuple, tuple):
+            try:
+                retention_val = str(dict(val_tuple).get("retention", "")).strip()
+            except Exception:
+                retention_val = ""
+        out.append({"path": path_val, "retention": retention_val})
+    return out
+
+
+def _repoha_to_payload(rha: Any) -> List[Dict[str, str]]:
+    """
+    Convert 'repoha' from canonical tuples to payload list[dict].
+    Returns list like: [{"ha_li": "...", "ha_day": "..."}].
+    """
+    if not rha:
+        return []
+    if isinstance(rha, list) and rha and isinstance(rha[0], dict):
+        return [
+            {"ha_li": str(x.get("ha_li", "")).strip(),
+             "ha_day": str(x.get("ha_day", "")).strip()}
+            for x in rha
+        ]
+
+    out: List[Dict[str, str]] = []
+    for item in rha or []:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        key_tuple, val_tuple = item
+        ha_li = ""
+        if isinstance(key_tuple, tuple) and key_tuple:
+            ha_li = str(key_tuple[0]).strip()
+        ha_day = ""
+        if isinstance(val_tuple, tuple):
+            try:
+                ha_day = str(dict(val_tuple).get("ha_day", "")).strip()
+            except Exception:
+                ha_day = ""
+        out.append({"ha_li": ha_li, "ha_day": ha_day})
+    return out
+
+
+
 class ReposImporter(BaseImporter):
     resource_name = "repos"
     sheet_names = (REPOS_PROFILE.sheet,)

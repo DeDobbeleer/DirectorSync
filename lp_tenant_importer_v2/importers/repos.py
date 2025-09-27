@@ -111,6 +111,77 @@ def _extract_paths(avail: JSON) -> Set[str]:
                  len(paths), list(sorted(paths))[:5])
     return paths
 
+def _decannonize_hiddenrepopath(hrp: Any) -> List[Dict[str, str]]:
+    """
+    Accepts either a list[dict] (payload shape) or a canonical list of tuples:
+    [ ((path_val, ...), (("retention", val), ...)), ... ]
+    Returns a payload-friendly list[{"path": "...", "retention": "..."}].
+    """
+    if not hrp:
+        return []
+    if isinstance(hrp, list) and hrp and isinstance(hrp[0], dict):
+        # Already in payload shape
+        return [
+            {
+                "path": str(x.get("path", "")).strip(),
+                "retention": str(x.get("retention", "")).strip(),
+            }
+            for x in hrp
+        ]
+
+    # Canonical tuple shape produced by _canon_list_of_dict_unordered
+    out: List[Dict[str, str]] = []
+    for item in hrp or []:
+        # item is expected to be a 2-tuple: (key_tuple, val_tuple)
+        # key_tuple: tuple of key field values -> first is 'path'
+        # val_tuple: tuple of (field_name, value) pairs -> contains ('retention', value)
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        key_tuple, val_tuple = item
+        path_val = ""
+        if isinstance(key_tuple, tuple) and key_tuple:
+            path_val = str(key_tuple[0]).strip()
+        retention_val = ""
+        if isinstance(val_tuple, tuple):
+            try:
+                retention_val = str(dict(val_tuple).get("retention", "")).strip()
+            except Exception:
+                # Be defensive if val_tuple is malformed
+                retention_val = ""
+        out.append({"path": path_val, "retention": retention_val})
+    return out
+
+def _decannonize_repoha(rha: Any) -> List[Dict[str, str]]:
+    """
+    Accepts either a list[dict] (payload shape) or canonical list of tuples:
+    [ ((ha_li_val,), (("ha_day", val),)), ... ]
+    Returns a payload-friendly list[{"ha_li": "...", "ha_day": "..."}].
+    """
+    if not rha:
+        return []
+    if isinstance(rha, list) and rha and isinstance(rha[0], dict):
+        return [
+            {"ha_li": str(x.get("ha_li", "")).strip(), "ha_day": str(x.get("ha_day", "")).strip()}
+            for x in rha
+        ]
+
+    out: List[Dict[str, str]] = []
+    for item in rha or []:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        key_tuple, val_tuple = item
+        ha_li = ""
+        if isinstance(key_tuple, tuple) and key_tuple:
+            ha_li = str(key_tuple[0]).strip()
+        ha_day = ""
+        if isinstance(val_tuple, tuple):
+            try:
+                ha_day = str(dict(val_tuple).get("ha_day", "")).strip()
+            except Exception:
+                ha_day = ""
+        out.append({"ha_li": ha_li, "ha_day": ha_day})
+    return out
+
 class ReposImporter(BaseImporter):
     resource_name = "repos"
     sheet_names = (REPOS_PROFILE.sheet,)
@@ -144,77 +215,6 @@ class ReposImporter(BaseImporter):
         if not existing_obj:
             return None
         return REPOS_PROFILE.canon_for_compare(existing_obj)
-
-    def _decannonize_hiddenrepopath(hrp: Any) -> List[Dict[str, str]]:
-        """
-        Accepts either a list[dict] (payload shape) or a canonical list of tuples:
-        [ ((path_val, ...), (("retention", val), ...)), ... ]
-        Returns a payload-friendly list[{"path": "...", "retention": "..."}].
-        """
-        if not hrp:
-            return []
-        if isinstance(hrp, list) and hrp and isinstance(hrp[0], dict):
-            # Already in payload shape
-            return [
-                {
-                    "path": str(x.get("path", "")).strip(),
-                    "retention": str(x.get("retention", "")).strip(),
-                }
-                for x in hrp
-            ]
-
-        # Canonical tuple shape produced by _canon_list_of_dict_unordered
-        out: List[Dict[str, str]] = []
-        for item in hrp or []:
-            # item is expected to be a 2-tuple: (key_tuple, val_tuple)
-            # key_tuple: tuple of key field values -> first is 'path'
-            # val_tuple: tuple of (field_name, value) pairs -> contains ('retention', value)
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            key_tuple, val_tuple = item
-            path_val = ""
-            if isinstance(key_tuple, tuple) and key_tuple:
-                path_val = str(key_tuple[0]).strip()
-            retention_val = ""
-            if isinstance(val_tuple, tuple):
-                try:
-                    retention_val = str(dict(val_tuple).get("retention", "")).strip()
-                except Exception:
-                    # Be defensive if val_tuple is malformed
-                    retention_val = ""
-            out.append({"path": path_val, "retention": retention_val})
-        return out
-
-    def _decannonize_repoha(rha: Any) -> List[Dict[str, str]]:
-        """
-        Accepts either a list[dict] (payload shape) or canonical list of tuples:
-        [ ((ha_li_val,), (("ha_day", val),)), ... ]
-        Returns a payload-friendly list[{"ha_li": "...", "ha_day": "..."}].
-        """
-        if not rha:
-            return []
-        if isinstance(rha, list) and rha and isinstance(rha[0], dict):
-            return [
-                {"ha_li": str(x.get("ha_li", "")).strip(), "ha_day": str(x.get("ha_day", "")).strip()}
-                for x in rha
-            ]
-
-        out: List[Dict[str, str]] = []
-        for item in rha or []:
-            if not isinstance(item, tuple) or len(item) != 2:
-                continue
-            key_tuple, val_tuple = item
-            ha_li = ""
-            if isinstance(key_tuple, tuple) and key_tuple:
-                ha_li = str(key_tuple[0]).strip()
-            ha_day = ""
-            if isinstance(val_tuple, tuple):
-                try:
-                    ha_day = str(dict(val_tuple).get("ha_day", "")).strip()
-                except Exception:
-                    ha_day = ""
-            out.append({"ha_li": ha_li, "ha_day": ha_day})
-        return out
 
     def fetch_existing(
         self,
@@ -366,8 +366,8 @@ class ReposImporter(BaseImporter):
         desired_canon = decision.desired or {}
         desired: Dict[str, Any] = {
             "name": str(desired_canon.get("name", "")).strip(),  # may be absent in canon
-            "hiddenrepopath": self._decannonize_hiddenrepopath(desired_canon.get("hiddenrepopath")),
-            "repoha": self._decannonize_repoha(desired_canon.get("repoha")),
+            "hiddenrepopath": _decannonize_hiddenrepopath(desired_canon.get("hiddenrepopath")),
+            "repoha": _decannonize_repoha(desired_canon.get("repoha")),
         }
 
         # 1) Verify repo paths

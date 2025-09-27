@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from typing import Any, Dict, List, Union
 
+import warnings
+import urllib3
 import requests
 
 from .logging_utils import get_logger
@@ -33,6 +35,8 @@ from .logging_utils import get_logger
 log = get_logger(__name__)
 
 JSON = Union[Dict[str, Any], List[Any]]
+
+me = os.getenv("LP_SUPPRESS_TLS_WARNINGS")
 
 @dataclass
 class ClientOptions:
@@ -77,9 +81,22 @@ class DirectorClient:
         self.options.monitor_timeout_sec = int(os.getenv("LP_MONITOR_TIMEOUT_SEC", self.options.monitor_timeout_sec))
         self.options.monitor_poll_interval_sec = float(os.getenv("LP_MONITOR_POLL_SEC", self.options.monitor_poll_interval_sec))
         self.options.monitor_stagnant_max = int(os.getenv("LP_MONITOR_STAGNANT_MAX", self.options.monitor_stagnant_max))
+        
         me = os.getenv("LP_MONITOR_ENABLED")
         if me is not None:
             self.options.monitor_enabled = me.strip().lower() not in {"0", "false", "no"}
+        
+        me = os.getenv("LP_SUPPRESS_TLS_WARNINGS")
+        if me is not None:
+            self.options.suppress_insecure_warning = me.strip().lower() not in {"0", "false", "no"}
+        
+        if not self.options.verify and self.options.suppress_insecure_warning:
+            warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+            try:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+        
 
     # ---------------- low-level ----------------
     def _url(self, path: str) -> str:

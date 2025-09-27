@@ -21,10 +21,9 @@ from __future__ import annotations
 
 import time
 import os
-import json
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, Optional, List, Union
 
 import warnings
 import urllib3
@@ -35,8 +34,33 @@ from .logging_utils import get_logger
 log = get_logger(__name__)
 
 JSON = Union[Dict[str, Any], List[Any]]
-
 me = os.getenv("LP_SUPPRESS_TLS_WARNINGS")
+
+_LOG_PREVIEW = int(os.getenv("LP_HTTP_PREVIEW", "600"))
+_REDACT_KEYS = {"token", "authorization", "password", "api_token", "x-api-key"}
+
+def _short_json(obj: Any, limit: int = _LOG_PREVIEW) -> str:
+    try:
+        if isinstance(obj, (dict, list)):
+            s = json.dumps(obj, ensure_ascii=False)
+        else:
+            s = str(obj)
+        return s[:limit]
+    except Exception:
+        return f"<unserializable:{type(obj).__name__}>"
+
+def _redact(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if str(k).lower() in _REDACT_KEYS:
+                out[k] = "***REDACTED***"
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact(x) for x in obj]
+    return obj
 
 @dataclass
 class ClientOptions:
@@ -97,7 +121,6 @@ class DirectorClient:
             except Exception:
                 pass
         
-
     # ---------------- low-level ----------------
     def _url(self, path: str) -> str:
         """Resolve an absolute URL from a relative *path*."""
@@ -288,56 +311,126 @@ class DirectorClient:
         return self.get_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{subpath.lstrip('/')}"))
 
 # --- Create / Update / Delete: prefer monitor URL, else job id, else synchronous ---
-    def create_resource(self, pool_uuid: str, node_id: str, resource: str, payload: Dict[str, Any], monitor: bool = True) -> Dict[str, Any]:
-        res = self.post_json(self.configapi(pool_uuid, node_id, resource), {"data": payload})
+    def create_resource(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        payload: Dict[str, Any],
+        monitor: bool = True,
+    ) -> Dict[str, Any]:
+        corr = uuid.uuid4().hex[:8]
+        path = self.configapi(pool_uuid, node_id, resource)
+        safe_payload = _redact({"data": payload})
+
+        log.info("CREATE[%s] POST %s pool=%s node=%s resource=%s", corr, path, pool_uuid, node_id, resource)
+        log.debug("CREATE[%s] payload=%s", corr, _short_json(safe_payload))
+
+        try:
+            res = self.post_json(path, safe_payload)
+            log.debug("CREATE[%s] response=%s", corr, _short_json(_redact(res)))
+        except Exception:
+            log.exception("CREATE[%s] HTTP POST failed", corr)
+            raise
+
         if not monitor or not self.options.monitor_enabled:
-            return {"status": "Success", "result": res}
+            return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}
 
         mon_path = self._extract_monitor_path(res)
         if mon_path:
+            log.info("CREATE[%s] monitor via URL: %s", corr, mon_path)
             ok = self.monitor_job_url(mon_path)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         job = self._extract_job_id(res)
         if job:
+            log.info("CREATE[%s] monitor via job id: %s", corr, job)
             ok = self.monitor_job(pool_uuid, node_id, job)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
-        # No monitor info → treat as synchronous success.
-        return {"status": "Success", "result": res}
+        log.info("CREATE[%s] no monitor info, treating as synchronous", corr)
+        return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "sync", "corr": corr}
 
+    def update_resource(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        resource_id: str,
+        payload: Dict[str, Any],
+        monitor: bool = True,
+    ) -> Dict[str, Any]:
+        corr = uuid.uuid4().hex[:8]
+        base = self.configapi(pool_uuid, node_id, resource)
+        path = f"{base}/{resource_id}"
+        safe_payload = _redact({"data": payload})
 
-    def update_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, payload: Dict[str, Any], monitor: bool = True) -> Dict[str, Any]:
-        res = self.put_json(f"{self.configapi(pool_uuid, node_id, resource)}/{resource_id})", {"data": payload})
+        log.info("UPDATE[%s] PUT %s pool=%s node=%s resource=%s id=%s", corr, path, pool_uuid, node_id, resource, resource_id)
+        log.debug("UPDATE[%s] payload=%s", corr, _short_json(safe_payload))
+
+        try:
+            res = self.put_json(path, safe_payload)
+            log.debug("UPDATE[%s] response=%s", corr, _short_json(_redact(res)))
+        except Exception:
+            log.exception("UPDATE[%s] HTTP PUT failed", corr)
+            raise
+
         if not monitor or not self.options.monitor_enabled:
-            return {"status": "Success", "result": res}
+            return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}
 
         mon_path = self._extract_monitor_path(res)
         if mon_path:
+            log.info("UPDATE[%s] monitor via URL: %s", corr, mon_path)
             ok = self.monitor_job_url(mon_path)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         job = self._extract_job_id(res)
         if job:
+            log.info("UPDATE[%s] monitor via job id: %s", corr, job)
             ok = self.monitor_job(pool_uuid, node_id, job)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
-        return {"status": "Success", "result": res}
+        log.info("UPDATE[%s] no monitor info, treating as synchronous", corr)
+        return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "sync", "corr": corr}
+    
+    def delete_resource(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        resource_id: str,
+        monitor: bool = True,
+    ) -> Dict[str, Any]:
+        corr = uuid.uuid4().hex[:8]
+        base = self.configapi(pool_uuid, node_id, resource)
+        path = f"{base}/{resource_id}"
 
+        log.info("DELETE[%s] DELETE %s pool=%s node=%s resource=%s id=%s", corr, path, pool_uuid, node_id, resource, resource_id)
 
-    def delete_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, monitor: bool = True) -> Dict[str, Any]:
-        res = self.delete_json(f"{self.configapi(pool_uuid, node_id, resource)}/{resource_id}")
+        try:
+            res = self.delete_json(path)
+            log.debug("DELETE[%s] response=%s", corr, _short_json(_redact(res)))
+        except Exception:
+            log.exception("DELETE[%s] HTTP DELETE failed", corr)
+            raise
+
         if not monitor or not self.options.monitor_enabled:
-            return {"status": "Success", "result": res}
+            return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}
 
         mon_path = self._extract_monitor_path(res)
         if mon_path:
+            log.info("DELETE[%s] monitor via URL: %s", corr, mon_path)
             ok = self.monitor_job_url(mon_path)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         job = self._extract_job_id(res)
         if job:
+            log.info("DELETE[%s] monitor via job id: %s", corr, job)
             ok = self.monitor_job(pool_uuid, node_id, job)
-            return {"status": "Success" if ok else "Failed", "result": res}
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
-        return {"status": "Success", "result": res}
+        log.info("DELETE[%s] no monitor info, treating as synchronous", corr)
+        return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "sync", "corr": corr}
+
+
+

@@ -1,0 +1,43 @@
+Tu as ce message parce que tu exécutes depuis **`lp_tenant_importer_v2/`** et, dans ce cas, Python **ne voit pas** le package `lp_tenant_importer_v2` (le parent n’est pas sur `sys.path`). Deux façons pro de régler ça :
+
+## Option A — Lancer depuis la racine du repo (le plus simple)
+
+```bash
+cd ~/dev/DirectorSync
+source lp_tenant_importer_v2/.venv/bin/activate
+git pull origin main
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ./tenants.yml \
+  --xlsx ./lp_tenant_importer/samples/core_config.xlsx \
+  --dry-run \
+  --no-verify \
+  import-repos
+```
+
+## Option B — Rester dans `lp_tenant_importer_v2/` mais ajouter le parent au PYTHONPATH
+
+```bash
+cd ~/dev/DirectorSync/lp_tenant_importer_v2
+export PYTHONPATH=..
+cd ~/dev/DirectorSync
+source lp_tenant_importer_v2/.venv/bin/activate
+git pull origin mai
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ../tenants.yml \
+  --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
+  --dry-run \
+  --no-verify \
+  import-repos
+```
+
+### Vérif rapide
+
+```bash
+# Toujours depuis lp_tenant_importer_v2/
+export PYTHONPATH=..
+python -c "import lp_tenant_importer_v2, sys; print('OK:', lp_tenant_importer_v2.__file__)"
+```
+
+> Astuce pro : utilise des **chemins absolus** dans `.env` (`LP_TENANTS_FILE`, `LP_PROFILE_FILE`) pour être insensible au répertoire courant.

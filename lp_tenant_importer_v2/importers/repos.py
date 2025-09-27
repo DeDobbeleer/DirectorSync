@@ -61,7 +61,11 @@ class ReposImporter(BaseImporter):
 
     def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
         data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or {}
-        items = data.get("repos") or data.get("data") or data
+        if isinstance(data,dict):
+            items = data.get("repos") or data.get("data") or data
+        else:
+            items = data
+            
         result: Dict[str, Dict[str, Any]] = {}
         if isinstance(items, list):
             for it in items:

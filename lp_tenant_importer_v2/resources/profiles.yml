@@ -1,0 +1,254 @@
+# DirectorSync v2 — Universal Resource Profiles (overrides)
+version: 1
+profiles:
+
+######### Repos ######################################################################
+  Repos:
+    resource: "Repos"
+
+    api:
+      resource: "Repos"
+      methods:
+        get:
+          list_key_candidates: ["data", "repos"]
+        post:
+          whitelist: ["name", "hiddenrepopath", "repoha"]
+        put:
+          whitelist: ["id", "hiddenrepopath", "repoha"]
+      subresources:
+        - name: "repo_paths"
+          path: "RepoPaths"
+          extract:
+            list_field_candidates: ["0.paths", "paths"]
+
+    xlsx:
+      sheet: "Repo"
+      columns:
+        name:
+          required: true
+          aliases: ["cleaned_repo_name"]
+          normalize: { strip: true }
+        storage_paths:
+          required: true
+          split_on: ["|", ","]
+          normalize:
+            trim_each: true
+            ensure_trailing_slash: true
+        retention_days:
+          required: true
+          split_on: ["|", ","]
+          normalize: { trim_each: true }
+          validate: { same_length_as: "storage_paths" }
+        repoha_li:
+          required: false
+          split_on: ["|", ","]
+          normalize: { trim_each: true }
+        repoha_day:
+          required: false
+          split_on: ["|", ","]
+          normalize: { trim_each: true }
+
+    mapping:
+      api_fields:
+        post: ["name", "hiddenrepopath", "repoha"]
+        put:  ["id", "hiddenrepopath", "repoha"]
+      fields:
+        name:
+          from: "name"
+          op: "copy"
+        hiddenrepopath:
+          from: ["storage_paths", "retention_days"]
+          op: "zip_list_of_dict"
+          keys: ["path", "retention"]
+        repoha:
+          from: ["repoha_li", "repoha_day"]
+          op: "zip_list_of_dict"
+          keys: ["ha_li", "ha_day"]
+
+    compare:
+      eq_fields: ["hiddenrepopath", "repoha"]
+      list_dict_unordered:
+        hiddenrepopath: { key_fields: ["path"],  value_fields: ["retention"] }
+        repoha:         { key_fields: ["ha_li"], value_fields: ["ha_day"] }
+      ignore_fields: []
+
+    verify:
+      - name: "repo_paths_exist"
+        using_subresource: "repo_paths"
+        expect: "paths"
+        on_missing: "skip"
+
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true
+
+######### RoutingPolicy ##############################################################
+  RoutingPolicy:
+    resource: "RoutingPolicy"
+
+    api:
+      resource: "RoutingPolicy"
+      methods:
+        get:
+          list_key_candidates: ["data", "routing_policies"]
+        post:
+          whitelist: ["policy_name", "rules", "catch_all", "active"]
+        put:
+          whitelist: ["id", "rules", "catch_all", "active"]
+
+    xlsx:
+      sheet: "RoutingPolicy"
+      columns:
+        policy_name:   { required: true,  normalize: { strip: true } }
+        active:        { required: false, default: "true" }
+        catch_all:     { required: false, default: "false" }
+        rule_type:     { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        key:           { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        value:         { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        repo_name:     { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        drop:          { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
+
+    mapping:
+      api_fields:
+        post: ["policy_name", "rules", "catch_all", "active"]
+        put:  ["id", "rules", "catch_all", "active"]
+      fields:
+        policy_name: { from: "policy_name", op: "copy" }
+        catch_all:   { from: "catch_all",   op: "copy" }
+        active:      { from: "active",      op: "copy" }
+        rules:
+          from: ["rule_type", "key", "value", "repo_name", "drop"]
+          op: "zip_list_of_dict"
+          keys: ["rule_type", "key", "value", "repo_id", "drop"]
+          lookup:
+            resource: "Repos"      # repo_name -> repo_id
+            source_key: "repo_name"
+            target_key: "id"
+            cache: "per-node"
+            required: true
+
+    compare:
+      eq_fields: ["catch_all", "active"]
+      list_dict_unordered:
+        rules: { key_fields: ["rule_type", "key", "value", "repo_id"], value_fields: ["drop"] }
+      ignore_fields: []
+
+    verify:
+      - name: "repos_exist"
+        using_subresource: ""
+        expect: "repo_ids"
+        on_missing: "skip"
+
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true
+
+  NormalizationPolicy:
+    resource: "NormalizationPolicy"
+
+    api:
+      resource: "NormalizationPolicy"
+      methods:
+        get:
+          list_key_candidates: ["data", "normalization_policies"]
+        post:
+          whitelist: ["policy_name", "normalization_packages", "compiled_normalizer"]
+        put:
+          whitelist: ["id", "normalization_packages", "compiled_normalizer"]
+
+    xlsx:
+      sheet: "NormalizationPolicy"
+      columns:
+        policy_name:            { required: true,  normalize: { strip: true } }
+        normalization_packages: { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        compiled_normalizer:    { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
+
+    mapping:
+      api_fields:
+        post: ["policy_name", "normalization_packages", "compiled_normalizer"]
+        put:  ["id", "normalization_packages", "compiled_normalizer"]
+      fields:
+        policy_name:            { from: "policy_name",            op: "copy" }
+        normalization_packages: { from: "normalization_packages", op: "copy" }
+        compiled_normalizer:    { from: "compiled_normalizer",    op: "copy" }
+
+    compare:
+      eq_fields: ["normalization_packages", "compiled_normalizer"]
+      ignore_fields: []
+
+    verify: []
+
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true
+
+
+######### ProcessingPolicy ############################################################
+  ProcessingPolicy:
+    resource: "ProcessingPolicy"
+
+    api:
+      resource: "ProcessingPolicy"
+      methods:
+        get:
+          list_key_candidates: ["data", "processing_policies"]
+        post:
+          whitelist: ["policy_name", "norm_policy", "enrich_policy", "routing_policy"]
+        put:
+          whitelist: ["id", "norm_policy", "enrich_policy", "routing_policy"]
+
+    xlsx:
+      sheet: "ProcessingPolicy"
+      columns:
+        policy_name:    { required: true,  normalize: { strip: true } }
+        norm_policy:    { required: true,  normalize: { strip: true } }
+        enrich_policy:  { required: false, normalize: { strip: true } }
+        routing_policy: { required: true,  normalize: { strip: true } }
+
+    mapping:
+      api_fields:
+        post: ["policy_name", "norm_policy", "enrich_policy", "routing_policy"]
+        put:  ["id", "norm_policy", "enrich_policy", "routing_policy"]
+      fields:
+        policy_name: { from: "policy_name", op: "copy" }
+        norm_policy:
+          from: "norm_policy"
+          op: "lookup"
+          lookup:
+            resource: "NormalizationPolicy"
+            source_key: "name"
+            target_key: "id"
+            cache: "per-node"
+            required: true
+        enrich_policy:
+          from: "enrich_policy"
+          op: "lookup"
+          lookup:
+            resource: "EnrichmentPolicy"
+            source_key: "name"
+            target_key: "id"
+            cache: "per-node"
+            required: false
+        routing_policy:
+          from: "routing_policy"
+          op: "lookup"
+          lookup:
+            resource: "RoutingPolicy"
+            source_key: "name"
+            target_key: "id"
+            cache: "per-node"
+            required: true
+
+    compare:
+      eq_fields: ["norm_policy", "enrich_policy", "routing_policy"]
+      ignore_fields: []
+
+    verify:
+      - name: "dependencies_exist"
+        using_subresource: ""
+        expect: "ids"
+        on_missing: "skip"
+
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true

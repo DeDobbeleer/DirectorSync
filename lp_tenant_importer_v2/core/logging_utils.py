@@ -25,7 +25,7 @@ DEF_FORMAT = (
 
 def setup_logging(level: str | None = None) -> None:
     """Configure root logger with a verbose format (module, func, line)."""
-    lvl = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
+    lvl = (level or os.getenv("LP_LOG_LEVEL") or "INFO").upper()
     logging.captureWarnings(True)
     root = logging.getLogger()
     if not root.handlers:

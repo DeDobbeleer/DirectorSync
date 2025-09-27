@@ -7,19 +7,34 @@ import argparse
 import os
 import sys
 from typing import Dict, List, Tuple
+import requests
 
 from .core.config import Config, NodeRef
 from .core.director_client import DirectorClient
 from .core.logging_utils import setup_logging, get_logger
 from .importers.repos import ReposImporter
 from .utils.reporting import print_rows
-
+from .utils.validators import ValidationError
+from .core.config import ConfigError
 setup_logging()
 log = get_logger(__name__)
 
+EXIT_OK = 0
+EXIT_GENERIC_ERROR = 1
+EXIT_CONFIG_ERROR = 2
+EXIT_VALIDATION_ERROR = 3
+EXIT_NETWORK_ERROR = 4
 
 def _prepare_context(args) -> Tuple[DirectorClient, str, str, Dict[str, List[NodeRef]], str, Config]:
-    cfg = Config.from_env()
+    # Friendly fallback: honor --tenants-file if env is missing
+    if args.tenants_file and not os.getenv("LP_TENANTS_FILE"):
+        os.environ["LP_TENANTS_FILE"] = args.tenants_file
+    try:
+        cfg = Config.from_env()
+    except ConfigError as exc:
+        log.error("Configuration error: %s", exc)
+        raise
+    
     client = DirectorClient(cfg.director_url, os.getenv("LP_DIRECTOR_API_TOKEN", ""), verify=not args.no_verify)
     tenant = cfg.get_tenant(args.tenant)
     pool_uuid = tenant.pool_uuid
@@ -33,13 +48,29 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, Dict[str, List[Nod
 
 
 def cmd_import_repos(args):
-    client, pool_uuid, tenant_name, _nodes_map, xlsx_path, cfg = _prepare_context(args)
-    nodes = cfg.get_targets(cfg.get_tenant(tenant_name), "repos")
-    importer = ReposImporter()
-    result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
-    print_rows(result.rows, args.format)
-    if result.any_error:
-        sys.exit(1)
+    try:
+        client, pool_uuid, tenant_name, _nodes_map, xlsx_path, cfg = _prepare_context(args)
+        nodes = cfg.get_targets(cfg.get_tenant(tenant_name), "repos")
+        importer = ReposImporter()
+        result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
+        print_rows(result.rows, args.format)
+        if result.any_error:
+            raise RuntimeError("One or more operations failed; see rows above.")
+    except ConfigError as exc:
+        log.error("Configuration error: %s", exc)
+        sys.exit(EXIT_CONFIG_ERROR)
+    except FileNotFoundError as exc:
+        log.error("File not found: %s", exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
+    except ValidationError as exc:
+        log.error("Validation error: %s", exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
+    except requests.RequestException as exc:
+        log.error("Network/HTTP error: %s", exc)
+        sys.exit(EXIT_NETWORK_ERROR)
+    except Exception as exc:
+        log.error("Unexpected error: %s", exc, exc_info=True)
+        sys.exit(EXIT_GENERIC_ERROR)
 
 
 # Stubs for other commands — wired to preserve CLI; will be migrated progressively.
@@ -96,8 +127,16 @@ def main():
     sp.set_defaults(func=cmd_import_alerts)
 
     args = parser.parse_args()
-    return args.func(args)
-
+    
+    try:
+        args.func(args)
+        return EXIT_OK
+    except SystemExit as e:
+        # Propagate explicit exits (we set them above)
+        return int(e.code) if isinstance(e.code, int) else EXIT_GENERIC_ERROR
+    except Exception as exc:
+        log.error("Fatal error: %s", exc, exc_info=True)
+        return EXIT_GENERIC_ERROR
 
 if __name__ == "__main__":
     main()

@@ -24,6 +24,10 @@ from .logging_utils import get_logger
 
 log = get_logger(__name__)
 
+class ConfigError(Exception):
+    """Raised when runtime configuration cannot be resolved."""
+    pass
+
 
 @dataclass(frozen=True)
 class NodeRef:
@@ -58,9 +62,8 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         """Load `.env` and build a :class:`Config` instance.
-
         Raises:
-            ValueError: If required environment variables are missing.
+            ConfigError: If required environment variables are missing.
         """
         env_path = find_dotenv(usecwd=True) or ""
         load_dotenv(env_path, override=True)
@@ -68,8 +71,24 @@ class Config:
         api_token = os.getenv("LP_DIRECTOR_API_TOKEN")
         tenants_file = os.getenv("LP_TENANTS_FILE")
 
-        if not director_url or not api_token or not tenants_file:
-            raise ValueError("Missing env: LP_DIRECTOR_URL, LP_DIRECTOR_API_TOKEN, LP_TENANTS_FILE")
+        missing = [k for k, v in {
+            "LP_DIRECTOR_URL": director_url,
+            "LP_DIRECTOR_API_TOKEN": api_token,
+            "LP_TENANTS_FILE": tenants_file,
+        }.items() if not v]
+        if missing:
+            hint = (
+                "Create a .env at the repo root or export them in your shell. "
+                "Example:\n"
+                "  LP_DIRECTOR_URL=https://director.example.local\n"
+                "  LP_DIRECTOR_API_TOKEN=***\n"
+                "  LP_TENANTS_FILE=./tenants.yml\n"
+            )
+            raise ConfigError(
+                "Missing required environment variables: "
+                + ", ".join(missing)
+                + ". " + hint
+            )
 
         return cls(director_url=director_url, api_token=api_token, tenants_file=Path(tenants_file))
 
@@ -77,12 +96,12 @@ class Config:
         """Read and parse the tenants YAML into a raw dict.
 
         Raises:
-            ValueError: If mandatory top-level keys are missing.
+            ConfigError: If mandatory top-level keys are missing.
         """
         with open(self.tenants_file, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if "tenants" not in data or "defaults" not in data:
-            raise ValueError("tenants.yml must contain 'tenants' and 'defaults' top-level keys")
+            raise ConfigError("tenants.yml must contain 'tenants' and 'defaults' top-level keys")
         return data
 
     def get_tenant(self, tenant_name: str) -> TenantConfig:
@@ -94,11 +113,11 @@ class Config:
         data = self.load_tenants()
         t_block = data["tenants"].get(tenant_name)
         if not t_block:
-            raise KeyError(f"Tenant '{tenant_name}' not found in {self.tenants_file}")
+            raise ConfigError(f"Tenant '{tenant_name}' not found in {self.tenants_file}")
 
         pool_uuid = t_block.get("pool_uuid")
         if not pool_uuid:
-            raise ValueError(f"Tenant '{tenant_name}' missing 'pool_uuid'")
+            raise ConfigError(f"Tenant '{tenant_name}' missing 'pool_uuid'")
 
         siems = t_block.get("siems") or {}
         # warn & ignore tenant-level defaults.target
@@ -108,14 +127,14 @@ class Config:
 
         defaults = data.get("defaults") or {}
         if "target" not in defaults:
-            raise ValueError("Global 'defaults.target' missing in tenants.yml")
+            raise ConfigError("Global 'defaults.target' missing in tenants.yml")
 
         def to_nodes(lst: Optional[List[Dict[str, str]]]) -> List[NodeRef]:
             res: List[NodeRef] = []
             for it in lst or []:
                 nid, nname = it.get("id"), it.get("name")
                 if not nid or not nname:
-                    raise ValueError("Every node must have 'id' and 'name' fields")
+                    raise ConfigError("Every node must have 'id' and 'name' fields")
                 res.append(NodeRef(id=str(nid), name=str(nname)))
             return res
 
@@ -143,11 +162,11 @@ class Config:
             De-duplicated list of :class:`NodeRef` representing the target nodes.
 
         Raises:
-            ValueError: If the element is not configured under ``defaults.target``.
+            ConfigError: If the element is not configured under ``defaults.target``.
         """
         targets_cfg = (tenant.defaults.get("target") or {}).get(element)
         if not targets_cfg:
-            raise ValueError(f"Global defaults.target.{element} missing in tenants.yml")
+            raise ConfigError(f"Global defaults.target.{element} missing in tenants.yml")
 
         role_to_nodes = {
             "backends": tenant.siems["backends"],

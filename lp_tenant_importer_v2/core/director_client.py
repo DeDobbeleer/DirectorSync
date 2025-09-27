@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Union
 
 import requests
 
@@ -29,6 +30,7 @@ from .logging_utils import get_logger
 
 log = get_logger(__name__)
 
+JSON = Union[Dict[str, Any], List[Any]]
 
 @dataclass
 class ClientOptions:
@@ -105,7 +107,7 @@ class DirectorClient:
             log.warning("Non-JSON response from %s %s, returning empty dict", method, url)
             return {}
 
-    def get_json(self, path: str) -> Dict[str, Any]:
+    def get_json(self, path: str) -> JSON[str, Any]:
         """GET a JSON resource and return it as a dict (empty dict on no-content)."""
         return self._req("GET", path)
 
@@ -167,11 +169,11 @@ class DirectorClient:
         return False
 
     # ---------------- generic resource helpers ----------------
-    def list_resource(self, pool_uuid: str, node_id: str, resource: str) -> Dict[str, Any]:
+    def list_resource(self, pool_uuid: str, node_id: str, resource: str) -> JSON[str, Any]:
         """List a top-level resource under ``configapi`` (e.g., ``Repos``)."""
         return self.get_json(self.configapi(pool_uuid, node_id, resource))
 
-    def list_subresource(self, pool_uuid: str, node_id: str, resource: str, subpath: str) -> Dict[str, Any]:
+    def list_subresource(self, pool_uuid: str, node_id: str, resource: str, subpath: str) -> JSON[str, Any]:
         """List a sub-resource (e.g., ``Repos/RepoPaths``)."""
         return self.get_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{subpath.lstrip('/')}"))
 

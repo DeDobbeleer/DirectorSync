@@ -49,6 +49,13 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, Dict[str, List[Nod
 
 def cmd_import_repos(args):
     try:
+        # Early check: XLSX path exists
+        if not os.path.isfile(args.xlsx):
+            raise FileNotFoundError(
+                f"XLSX file not found: {args.xlsx}. "
+                "Hint: try ./lp_tenant_importer/samples/core_config.xlsx "
+                "or provide an absolute path."
+            )
         client, pool_uuid, tenant_name, _nodes_map, xlsx_path, cfg = _prepare_context(args)
         nodes = cfg.get_targets(cfg.get_tenant(tenant_name), "repos")
         importer = ReposImporter()
@@ -64,6 +71,10 @@ def cmd_import_repos(args):
         sys.exit(EXIT_VALIDATION_ERROR)
     except ValidationError as exc:
         log.error("Validation error: %s", exc)
+    except RuntimeError as exc:
+        # Catch loader errors (e.g., pandas/openpyxl issues) and surface as validation failures
+        log.error("Validation error: %s", exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
         sys.exit(EXIT_VALIDATION_ERROR)
     except requests.RequestException as exc:
         log.error("Network/HTTP error: %s", exc)

@@ -46,6 +46,10 @@ class BaseImporter:
         Raises:
             RuntimeError: If the file cannot be read.
         """
+        from pathlib import Path
+        p = Path(xlsx_path)
+        if not p.is_file():
+            raise FileNotFoundError(f"{xlsx_path}")
         try:
             xl = pd.read_excel(xlsx_path, sheet_name=None, engine="openpyxl")
         except Exception as exc:

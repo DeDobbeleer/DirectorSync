@@ -14,7 +14,7 @@ Note:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Set, Union
 
 import pandas as pd
 
@@ -24,6 +24,52 @@ from ..utils.validators import ValidationError
 from ..utils.resource_profiles import REPOS_PROFILE
 from .base import BaseImporter
 
+JSON = Union[Dict[str, Any], List[Any]]
+
+def _normalize_path_str(path: str) -> str:
+    """
+    Normalize a repository path string for consistent comparison.
+    Adjust here if a trailing slash policy is required.
+    """
+    return path.strip()
+
+def _collect_paths_any(shape: Any, out: Set[str]) -> None:
+        """
+        Recursively collect path strings from any JSON shape:
+        - str directly
+        - dict with 'paths' (list) or 'path' (str)
+        - list/tuple containing str/dict/list/tuple (nested-friendly)
+        - arbitrary dict: traverse values
+        """
+        if shape is None:
+            return
+
+        if isinstance(shape, str):
+            out.add(_normalize_path_str(shape))
+            return
+
+        if isinstance(shape, dict):
+            if "paths" in shape:
+                _collect_paths_any(shape.get("paths"), out)
+                return
+            if "path" in shape:
+                v = shape.get("path")
+                if isinstance(v, str):
+                    out.add(_normalize_path_str(v))
+                    return
+            for v in shape.values():
+                _collect_paths_any(v, out)
+            return
+
+        if isinstance(shape, (list, tuple)):
+            for v in shape:
+                _collect_paths_any(v, out)
+            return
+
+def _extract_paths(avail: JSON) -> Set[str]:
+    paths: Set[str] = set()
+    _collect_paths_any(avail, paths)
+    return paths
 
 class ReposImporter(BaseImporter):
     resource_name = "repos"
@@ -59,29 +105,96 @@ class ReposImporter(BaseImporter):
             return None
         return REPOS_PROFILE.canon_for_compare(existing_obj)
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
-        data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or {}
-        if isinstance(data,dict):
-            items = data.get("repos") or data.get("data") or data
+    def fetch_existing(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch existing repos from Director, tolerating list/dict payloads and
+        common key shapes. Returns a mapping: repo_name -> repo_object.
+        """
+        payload: JSON = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+
+        # Normalize to a list of dicts named `items`
+        items: List[Dict[str, Any]] = []
+
+        if isinstance(payload, list):
+            items = [x for x in payload if isinstance(x, dict)]
+        elif isinstance(payload, dict):
+            def get_ci(d: Dict[str, Any], key: str) -> Any:
+                for k, v in d.items():
+                    if str(k).lower() == key.lower():
+                        return v
+                return None
+
+            candidates = (
+                get_ci(payload, "repos")
+                or get_ci(payload, "items")
+                or get_ci(payload, "data")
+                or get_ci(payload, "results")
+                or payload  # fallback: treat whole dict as a single object
+            )
+
+            if isinstance(candidates, list):
+                items = [x for x in candidates if isinstance(x, dict)]
+            elif isinstance(candidates, dict):
+                nested = (
+                    get_ci(candidates, "items")
+                    or get_ci(candidates, "repos")
+                    or get_ci(candidates, "results")
+                    or get_ci(candidates, "data")
+                )
+                if isinstance(nested, list):
+                    items = [x for x in nested if isinstance(x, dict)]
+                else:
+                    items = [candidates]
+            else:
+                items = []
         else:
-            items = data
-            
+            raise TypeError(f"Unexpected payload type: {type(payload).__name__}")
+
+        # Build name -> object map (support name/label/RepoName)
         result: Dict[str, Dict[str, Any]] = {}
-        if isinstance(items, list):
-            for it in items:
-                name = str(it.get("name") or "").strip()
-                if name:
-                    result[name] = it
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            name = it.get("name") or it.get("label") or it.get("RepoName")
+            if isinstance(name, str):
+                key = name.strip()
+                if key:
+                    if key in result and hasattr(self, "logger"):
+                        self.logger.warning(
+                            "Duplicate repo name encountered: %s (overwriting)", key
+                        )
+                    result[key] = it
+
         return result
 
     # ---------------- verification ----------------
+  
+    def _verify_paths(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+        storage_paths: List[str]
+    ) -> None:
+        """
+        Validate that all desired storage paths exist on the node.
+        Tolerates all RepoPaths JSON shapes (dict/list/tuple; nested).
+        """
+        avail = client.list_subresource(
+            pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
+        ) or {}
+        available_paths = _extract_paths(avail)
 
-    def _verify_paths(self, client: DirectorClient, pool_uuid: str, node: NodeRef, desired_paths: List[str]) -> List[str]:
-        raw = client.list_subresource(pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS) or {}
-        valid = REPOS_PROFILE.extract_repo_paths(raw)
-        valid_set = set(valid)
-        missing = [p for p in desired_paths if p not in valid_set]
-        return missing
+        desired = {_normalize_path_str(p) for p in storage_paths}
+        missing = sorted(p for p in desired if p not in available_paths)
+
+        if missing:
+            raise ValidationError(f"Missing storage paths: {', '.join(missing)}")
 
     # ---------------- payloads & apply ----------------
 

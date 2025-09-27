@@ -15,7 +15,8 @@ Note:
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Set, Union
-
+import json
+import logging
 import pandas as pd
 
 from ..core.config import NodeRef
@@ -26,49 +27,88 @@ from .base import BaseImporter
 
 JSON = Union[Dict[str, Any], List[Any]]
 
-def _normalize_path_str(path: str) -> str:
+def _short(obj: Any, limit: int = 400) -> str:
+    """Safe, short preview for logs."""
+    try:
+        if isinstance(obj, (dict, list)):
+            s = json.dumps(obj)[:limit]
+        else:
+            s = repr(obj)[:limit]
+        return s
+    except Exception:
+        return f"<unrepr {type(obj).__name__}>"
+
+def _normalize_path_str(path: Any) -> str:
     """
-    Normalize a repository path string for consistent comparison.
-    Adjust here if a trailing slash policy is required.
+    Normalize a repository path for comparison.
+    Logs non-string inputs to reveal offenders (e.g., tuple/list).
     """
-    return path.strip()
+    logger = logging.getLogger(__name__)
+    if isinstance(path, str):
+        s = path.strip()
+        logger.debug("normalize_path: input=str len=%d -> %r", len(path), s)
+        return s
+
+    logger.warning(
+        "normalize_path: non-string input type=%s value=%s (coercing to str)",
+        type(path).__name__, _short(path)
+    )
+    try:
+        s = str(path).strip()
+        logger.debug("normalize_path: coerced -> %r", s)
+        return s
+    except Exception:
+        logger.exception("normalize_path: failed to coerce input to str")
+        raise
 
 def _collect_paths_any(shape: Any, out: Set[str]) -> None:
-        """
-        Recursively collect path strings from any JSON shape:
-        - str directly
-        - dict with 'paths' (list) or 'path' (str)
-        - list/tuple containing str/dict/list/tuple (nested-friendly)
-        - arbitrary dict: traverse values
-        """
-        if shape is None:
-            return
+    """
+    Recursively collect path strings from any JSON shape.
+    Emits DEBUG for each branch type encountered.
+    """
+    logger = logging.getLogger(__name__)
 
-        if isinstance(shape, str):
-            out.add(_normalize_path_str(shape))
-            return
+    if shape is None:
+        logger.debug("_collect_paths_any: None")
+        return
 
-        if isinstance(shape, dict):
-            if "paths" in shape:
-                _collect_paths_any(shape.get("paths"), out)
+    if isinstance(shape, str):
+        p = _normalize_path_str(shape)
+        out.add(p)
+        logger.debug("_collect_paths_any: str -> %r", p)
+        return
+
+    if isinstance(shape, dict):
+        if "paths" in shape:
+            logger.debug("_collect_paths_any: dict with 'paths' -> recurse")
+            _collect_paths_any(shape.get("paths"), out)
+            return
+        if "path" in shape:
+            v = shape.get("path")
+            logger.debug("_collect_paths_any: dict with 'path' -> %s", type(v).__name__)
+            if isinstance(v, str):
+                out.add(_normalize_path_str(v))
                 return
-            if "path" in shape:
-                v = shape.get("path")
-                if isinstance(v, str):
-                    out.add(_normalize_path_str(v))
-                    return
-            for v in shape.values():
-                _collect_paths_any(v, out)
-            return
+        logger.debug("_collect_paths_any: dict (scan values); keys=%s", list(shape.keys())[:10])
+        for v in shape.values():
+            _collect_paths_any(v, out)
+        return
 
-        if isinstance(shape, (list, tuple)):
-            for v in shape:
-                _collect_paths_any(v, out)
-            return
+    if isinstance(shape, (list, tuple)):
+        logger.debug("_collect_paths_any: %s of len=%d", type(shape).__name__, len(shape))
+        for v in shape:
+            _collect_paths_any(v, out)
+        return
+
+    logger.debug("_collect_paths_any: ignore type=%s", type(shape).__name__)
 
 def _extract_paths(avail: JSON) -> Set[str]:
+    logger = logging.getLogger(__name__)
+    logger.debug("_extract_paths: avail type=%s preview=%s", type(avail).__name__, _short(avail))
     paths: Set[str] = set()
     _collect_paths_any(avail, paths)
+    logger.debug("_extract_paths: collected paths=%d sample=%s",
+                 len(paths), list(sorted(paths))[:5])
     return paths
 
 class ReposImporter(BaseImporter):
@@ -112,12 +152,17 @@ class ReposImporter(BaseImporter):
         node: NodeRef
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Fetch existing repos from Director, tolerating list/dict payloads and
-        common key shapes. Returns a mapping: repo_name -> repo_object.
+        Fetch existing repos from Director, tolerating list/dict payloads.
+        Logs the payload shape to help diagnose structure mismatches.
         """
+        logger = getattr(self, "logger", logging.getLogger(__name__))
         payload: JSON = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
 
-        # Normalize to a list of dicts named `items`
+        logger.debug(
+            "fetch_existing: payload type=%s preview=%s",
+            type(payload).__name__, _short(payload)
+        )
+
         items: List[Dict[str, Any]] = []
 
         if isinstance(payload, list):
@@ -134,7 +179,11 @@ class ReposImporter(BaseImporter):
                 or get_ci(payload, "items")
                 or get_ci(payload, "data")
                 or get_ci(payload, "results")
-                or payload  # fallback: treat whole dict as a single object
+                or payload
+            )
+            logger.debug(
+                "fetch_existing: candidates type=%s preview=%s",
+                type(candidates).__name__, _short(candidates)
             )
 
             if isinstance(candidates, list):
@@ -146,6 +195,10 @@ class ReposImporter(BaseImporter):
                     or get_ci(candidates, "results")
                     or get_ci(candidates, "data")
                 )
+                logger.debug(
+                    "fetch_existing: nested type=%s preview=%s",
+                    type(nested).__name__, _short(nested)
+                )
                 if isinstance(nested, list):
                     items = [x for x in nested if isinstance(x, dict)]
                 else:
@@ -153,27 +206,34 @@ class ReposImporter(BaseImporter):
             else:
                 items = []
         else:
+            logger.error(
+                "fetch_existing: unexpected payload type=%s preview=%s",
+                type(payload).__name__, _short(payload)
+            )
             raise TypeError(f"Unexpected payload type: {type(payload).__name__}")
 
-        # Build name -> object map (support name/label/RepoName)
         result: Dict[str, Dict[str, Any]] = {}
         for it in items:
             if not isinstance(it, dict):
+                logger.warning("fetch_existing: skipping non-dict item type=%s", type(it).__name__)
                 continue
             name = it.get("name") or it.get("label") or it.get("RepoName")
             if isinstance(name, str):
                 key = name.strip()
                 if key:
-                    if key in result and hasattr(self, "logger"):
-                        self.logger.warning(
-                            "Duplicate repo name encountered: %s (overwriting)", key
-                        )
+                    if key in result:
+                        logger.warning("fetch_existing: duplicate repo name: %s (overwriting)", key)
                     result[key] = it
+            else:
+                logger.warning(
+                    "fetch_existing: item without string name: keys=%s",
+                    list(it.keys())[:10]
+                )
 
+        logger.debug("fetch_existing: collected repos=%d", len(result))
         return result
 
     # ---------------- verification ----------------
-  
     def _verify_paths(
         self,
         client: DirectorClient,
@@ -183,18 +243,37 @@ class ReposImporter(BaseImporter):
     ) -> None:
         """
         Validate that all desired storage paths exist on the node.
-        Tolerates all RepoPaths JSON shapes (dict/list/tuple; nested).
+        Tolerant to dict/list/tuple shapes returned by Repos/RepoPaths.
         """
-        avail = client.list_subresource(
-            pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
-        ) or {}
-        available_paths = _extract_paths(avail)
+        logger = getattr(self, "logger", logging.getLogger(__name__))
+        try:
+            avail = client.list_subresource(
+                pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS
+            ) or {}
+            logger.debug(
+                "_verify_paths: RepoPaths type=%s preview=%s",
+                type(avail).__name__, _short(avail)
+            )
 
-        desired = {_normalize_path_str(p) for p in storage_paths}
-        missing = sorted(p for p in desired if p not in available_paths)
+            available_paths = _extract_paths(avail)
+            desired = {_normalize_path_str(p) for p in storage_paths}
+            missing = sorted(p for p in desired if p not in available_paths)
 
-        if missing:
-            raise ValidationError(f"Missing storage paths: {', '.join(missing)}")
+            logger.debug(
+                "_verify_paths: available=%d desired=%d missing=%d",
+                len(available_paths), len(desired), len(missing)
+            )
+            if missing:
+                logger.error("_verify_paths: missing=%s", missing)
+                raise ValidationError(f"Missing storage paths: {', '.join(missing)}")
+
+        except Exception:
+            # This will include function/line thanks to the formatter and stack trace
+            logger.exception(
+                "_verify_paths: unhandled exception (pool=%s node=%s)",
+                pool_uuid, getattr(node, "name", node.id)
+            )
+            raise
 
     # ---------------- payloads & apply ----------------
 

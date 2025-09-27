@@ -24,6 +24,16 @@ import pandas as pd
 
 # ---------------------------- helpers (generic) ----------------------------
 
+def _to_int(value: Any) -> int:
+    s = _to_str(value).strip()
+    if s == "":
+        return 0
+    try:
+        return int(s)
+    except ValueError:
+        return int(float(s))  # handles "365.0"
+
+
 def _to_str(value: Any) -> str:
     """Normalize any scalar value to a clean string.
 
@@ -188,14 +198,14 @@ class ReposProfile:
         data: Dict[str, Any] = {
             "name": _to_str(desired.get("name")),
             "hiddenrepopath": [
-                {"path": _to_str(x.get("path")), "retention": _to_str(x.get("retention"))}
+                {"path": _to_str(x.get("path")), "retention": _to_int(x.get("retention"))}
                 for x in (desired.get("hiddenrepopath") or [])
             ],
         }
         # Optional HA
         if desired.get("repoha"):
             data["repoha"] = [
-                {"ha_li": _to_str(x.get("ha_li")), "ha_day": _to_str(x.get("ha_day"))}
+                {"ha_li": _to_str(x.get("ha_li")), "ha_day": _to_int(x.get("ha_day"))}
                 for x in (desired.get("repoha") or [])
             ]
         # Filter by whitelist fields
@@ -206,13 +216,13 @@ class ReposProfile:
         data: Dict[str, Any] = {
             "id": _to_str(existing_id),
             "hiddenrepopath": [
-                {"path": _to_str(x.get("path")), "retention": _to_str(x.get("retention"))}
+                {"path": _to_str(x.get("path")), "retention": _to_int(x.get("retention"))}
                 for x in (desired.get("hiddenrepopath") or [])
             ],
         }
         if desired.get("repoha"):
             data["repoha"] = [
-                {"ha_li": _to_str(x.get("ha_li")), "ha_day": _to_str(x.get("ha_day"))}
+                {"ha_li": _to_str(x.get("ha_li")), "ha_day": _to_int(x.get("ha_day"))}
                 for x in (desired.get("repoha") or [])
             ]
         return {k: v for k, v in data.items() if k in self.api_put_fields}

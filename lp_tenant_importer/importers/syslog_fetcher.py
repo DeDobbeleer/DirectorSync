@@ -59,46 +59,43 @@ def build_syslog_collector_payloads(df: pd.DataFrame, client: DirectorClient, po
         payload["data"]["proxy_condition"] = proxy_condition
 
         if proxy_condition in ["use_as_proxy", None]:
-            if pd.isna(row['processpolicy']):
-                logger.warning(f"Missing processpolicy for {device_name} with proxy_condition {proxy_condition}")
-                continue
-            payload["data"]["processpolicy"] = row['processpolicy']
-            if pd.isna(row['proxy_ip']):
-                if proxy_condition == "None":
-                    payload["data"]["proxy_ip"] = []
-                else:
-                    continue
-            else:
-                logger.warning(f"Unexpected proxy_ip for {device_name} with proxy_condition {proxy_condition}")
-                continue
+            payload["data"]["processpolicy"] = None
         elif proxy_condition == "uses_proxy":
-            if pd.isna(row['processpolicy']) or not proxy_ip:
+            if row['processpolicy'] and  proxy_ip:
+                payload["data"]["processpolicy"] = row['processpolicy']
+                payload["data"]["proxy_ip"] = proxy_ip
+            else:    
                 logger.warning(f"Missing processpolicy or proxy_ip for {device_name} with proxy_condition uses_proxy")
                 continue
-            payload["data"]["processpolicy"] = row['processpolicy']
-            payload["data"]["proxy_ip"] = proxy_ip
+        elif not ( proxy_condition == "use_as_proxy" and proxy_condition == "uses_proxy" ):
+            if row['processpolicy'] and  proxy_ip:
+                payload["data"]["processpolicy"] = row['processpolicy']
+            else:    
+                logger.warning(f"Missing processpolicy for direct syslog : {device_name}")
+                continue   
 
-        # Mandatory fields for use_as_proxy and None, optional for uses_proxy
-        if proxy_condition in ["use_as_proxy", None]:
-            if pd.isna(row['charset']) or pd.isna(row['parser']):
-                logger.warning(f"Missing charset or parser for {device_name} with proxy_condition {proxy_condition}")
+        # Mandatory fields charset, parser
+        if pd.isna(row['charset']) or pd.isna(row['parser']):
+                logger.warning(f"Missing charset or parser for {device_name}")
                 continue
-            payload["data"]["charset"] = row['charset']
-            payload["data"]["parser"] = row['parser']
-        elif proxy_condition == "uses_proxy" and (pd.notna(row['charset']) or pd.notna(row['parser'])):
-            payload["data"]["charset"] = row['charset'] if pd.notna(row['charset']) else "utf_8"
-            payload["data"]["parser"] = row['parser'] if pd.notna(row['parser']) else "SyslogParser"
+        
+        payload["data"]["charset"] = row['charset']
+        payload["data"]["parser"] = row['parser']
+        
 
         # Add device_id from API
         api_device_id = device_map.get(device_name)
         if not api_device_id:
             logger.warning(f"No matching device_id found for {device_name} in API, skipping payload")
             continue
+        
         payload["data"]["device_id"] = api_device_id
 
-        # Optional fields
         if hostname:
             payload["data"]["hostname"] = hostname
+        else:
+            logger.warning(f"Missing hostname for this syslog device: {device_name} {device_name}")
+            continue
 
         logger.debug(f"Built payload for {device_name}: {payload}")
         payloads[key] = payload
@@ -136,16 +133,9 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
         logger.error(f"Failed to fetch devices for node {node_name}: {str(e)}")
         return results
 
-    # Extract all ips from the DataFrame for internal cross-check
-    all_ips = set()
-    for _, row in df.iterrows():
-        ips = row.get('ips', '').split('|') if pd.notna(row.get('ips')) else []
-        all_ips.update(ip.strip() for ip in ips if ip.strip())
-    logger.debug(f"Extracted all IPs from XLSX for cross-check: {all_ips}")
-
     for device_id, payload in payloads.items():
-        device_name = f"Device_{device_id}"  # Placeholder, adjust if device_name is in payload
-        proxy_condition = payload["data"]["proxy_condition"]
+        device_name = payload.get('data').get('device_name')
+        proxy_condition = payload.get("data").get("proxy_condition")
         result = {"action": "NONE"}
 
         # Validate mandatory fields
@@ -173,13 +163,6 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
                 logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
                 results[device_id][node_name] = result
                 continue
-            # Internal cross-check of proxy_ip against all ips in XLSX
-            # proxy_ips = set(proxy_ip)
-            # if not proxy_ips.issubset(all_ips):
-            #     result = {"action": "SKIP", "error": f"Invalid proxy_ip {proxy_ips - all_ips}"}
-            #     logger.warning(f"Skipping {device_name} on {node_name}: {result['error']}")
-            #     results[device_id][node_name] = result
-            #     continue
         elif proxy_condition is None:
             if any(pd.isna(payload["data"].get(field)) or (field == "processpolicy" and not payload["data"].get(field)) for field in ["processpolicy", "charset", "parser"]):
                 result = {"action": "SKIP", "error": "Missing processpolicy, charset, or parser"}

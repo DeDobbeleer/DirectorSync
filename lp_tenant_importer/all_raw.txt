@@ -1,0 +1,59 @@
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/.gitignore
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/.gitignore
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/all_test_repos.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/api-documentation.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/config_loader.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/ Plan - Engineering - Specs Doc copy.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/ Plan - Engineering - Specs Doc.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Context NP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Context RP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Contexte Genéral.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Engineering PP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Engineering PP.orig.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context PP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context PP.orig.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-device.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-grok 01.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-grok.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-syslog-collector.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context_DG.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context_to_split.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/http.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/http_temp.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/nodes.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/alerts.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/device_groups.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/devices.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/enrichment_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/normalization_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/processing_policies.bak.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/processing_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/repos.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/routing_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/syslog_fetcher copy.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/syslog_fetcher.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/logging_utils.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/main.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/requirements.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/.env.example
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/.~lock.core_config.xlsx#
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/core_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/esait_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/esrin_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/example.core.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/moi_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/popy_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/sccoe_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tenants.full.example.yml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tenants.sample.yaml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/test_config.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tia_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_all.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_config.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_http.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/Noop.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/Update.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/create.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/log1.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/text
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/usefullCmds.txt

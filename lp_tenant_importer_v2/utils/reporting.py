@@ -1,5 +1,8 @@
 """
-Reporting helpers to print table or JSON.
+Reporting helpers (table or JSON) for importer results.
+
+`print_rows` auto-selects relevant columns and produces a compact table that
+fits CLI usage. JSON output is also supported for machine consumption.
 """
 from __future__ import annotations
 
@@ -8,6 +11,12 @@ from typing import Any, Dict, List
 
 
 def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
+    """Render importer result rows as a table or JSON.
+
+    Args:
+        rows: List of dict rows with common fields (e.g., siem, node, name, action).
+        fmt: Either ``"table"`` (default) or ``"json"``.
+    """
     def _present(v) -> bool:
         return not (v is None or v == "" or v == [])
 

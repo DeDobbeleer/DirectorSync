@@ -1,5 +1,14 @@
 """
-Configuration loader: .env + tenants.yml (global targets only).
+Configuration loader for DirectorSync v2.
+
+This module resolves environment configuration and parses the tenants YAML.
+The **public contract** is intentionally identical to v1 for end-users,
+but internally we enforce *global-only* `defaults.target[...]`.
+
+Key rules:
+  * `.env` provides LP_DIRECTOR_URL, LP_DIRECTOR_API_TOKEN, LP_TENANTS_FILE
+  * `tenants.yml` must have top-level `tenants` and `defaults`
+  * We **ignore** tenant-level `defaults.target` with a WARNING
 """
 from __future__ import annotations
 
@@ -18,26 +27,41 @@ log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class NodeRef:
+    """A minimal reference to a SIEM node (id + name)."""
     id: str
     name: str
 
 
 @dataclass
 class TenantConfig:
+    """Resolved tenant configuration object.
+
+    Attributes:
+        name: Tenant name.
+        pool_uuid: Pool UUID where tenant resources live.
+        siems: Mapping of roles to node lists: ``backends``, ``search_heads``, ``all_in_one``.
+        defaults: Global defaults block (must include ``target``).
+    """
     name: str
     pool_uuid: str
-    siems: Dict[str, List[NodeRef]]  # keys: backends, search_heads, all_in_one
-    defaults: Dict[str, Any]  # expected to contain "target" (global)
+    siems: Dict[str, List[NodeRef]]
+    defaults: Dict[str, Any]
 
 
 @dataclass
 class Config:
+    """Runtime configuration resolved from `.env` and `tenants.yml`."""
     director_url: str
     api_token: str
     tenants_file: Path
 
     @classmethod
     def from_env(cls) -> "Config":
+        """Load `.env` and build a :class:`Config` instance.
+
+        Raises:
+            ValueError: If required environment variables are missing.
+        """
         env_path = find_dotenv(usecwd=True) or ""
         load_dotenv(env_path, override=True)
         director_url = os.getenv("LP_DIRECTOR_URL")
@@ -50,6 +74,11 @@ class Config:
         return cls(director_url=director_url, api_token=api_token, tenants_file=Path(tenants_file))
 
     def load_tenants(self) -> Dict[str, Any]:
+        """Read and parse the tenants YAML into a raw dict.
+
+        Raises:
+            ValueError: If mandatory top-level keys are missing.
+        """
         with open(self.tenants_file, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if "tenants" not in data or "defaults" not in data:
@@ -57,6 +86,11 @@ class Config:
         return data
 
     def get_tenant(self, tenant_name: str) -> TenantConfig:
+        """Resolve a :class:`TenantConfig` by tenant name.
+
+        Notes:
+            If a tenant has `defaults.target`, it is ignored and a WARNING is logged.
+        """
         data = self.load_tenants()
         t_block = data["tenants"].get(tenant_name)
         if not t_block:
@@ -99,9 +133,17 @@ class Config:
         )
 
     def get_targets(self, tenant: TenantConfig, element: str) -> List[NodeRef]:
-        """
-        Resolve target roles for a given element from global defaults ONLY.
-        Raises if element is absent. Returns a de-duplicated list of nodes.
+        """Resolve target nodes for a given element from **global** defaults only.
+
+        Args:
+            tenant: Resolved tenant configuration.
+            element: Element key, e.g. ``"repos"`` or ``"processing_policies"``.
+
+        Returns:
+            De-duplicated list of :class:`NodeRef` representing the target nodes.
+
+        Raises:
+            ValueError: If the element is not configured under ``defaults.target``.
         """
         targets_cfg = (tenant.defaults.get("target") or {}).get(element)
         if not targets_cfg:

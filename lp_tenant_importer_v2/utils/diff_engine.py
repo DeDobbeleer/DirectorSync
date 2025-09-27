@@ -1,10 +1,14 @@
 """
-Diff engine producing NOOP/CREATE/UPDATE/SKIP operations.
+Diff engine for DirectorSync v2.
+
+Provides a minimal decision model to determine whether a resource should
+be created, updated, skipped, or left as-is (NOOP) based on a subset
+comparison between **desired** and **existing** representations.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal
 
 
 Op = Literal["NOOP", "CREATE", "UPDATE", "SKIP"]
@@ -12,6 +16,14 @@ Op = Literal["NOOP", "CREATE", "UPDATE", "SKIP"]
 
 @dataclass(frozen=True)
 class Decision:
+    """Represents a diff outcome for a single desired item.
+
+    Attributes:
+        op: One of ``"NOOP"``, ``"CREATE"``, ``"UPDATE"``, or ``"SKIP"``.
+        reason: Human-friendly explanation of the decision.
+        desired: Canonical desired representation (subset used for comparison).
+        existing: Canonical existing representation (subset used for comparison).
+    """
     op: Op
     reason: str
     desired: Dict[str, Any] | None = None
@@ -19,8 +31,14 @@ class Decision:
 
 
 def decide(desired: Dict[str, Any], existing: Dict[str, Any] | None, *, compare_keys: List[str]) -> Decision:
-    """
-    Decide the operation based on desired vs existing (subset comparison).
+    """Compute a :class:`Decision` from desired vs existing states.
+
+    The comparison is limited to ``compare_keys`` so importers can ignore
+    volatile or server-managed fields.
+
+    Returns:
+        A :class:`Decision` with ``op`` set to ``"CREATE"``, ``"UPDATE"``, or ``"NOOP"``.
+        (``"SKIP"`` is reserved for importers to set explicitly when validation fails.)
     """
     if existing is None:
         return Decision(op="CREATE", reason="Not found", desired=desired)

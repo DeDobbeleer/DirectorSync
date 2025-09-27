@@ -4,7 +4,6 @@ CLI — Strictly identical commands/flags to v1 for end-users.
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
 from typing import Dict, List, Tuple
@@ -24,10 +23,6 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, Dict[str, List[Nod
     client = DirectorClient(cfg.director_url, os.getenv("LP_DIRECTOR_API_TOKEN", ""), verify=not args.no_verify)
     tenant = cfg.get_tenant(args.tenant)
     pool_uuid = tenant.pool_uuid
-
-    # Resolve targets from global defaults ONLY
-    def _targets(element: str) -> List[NodeRef]:
-        return cfg.get_targets(tenant, element)
 
     nodes = {
         "backends": tenant.siems["backends"],

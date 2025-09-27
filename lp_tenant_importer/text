@@ -13,5 +13,5 @@ curl -X POST https://10.160.144.185/configapi/a9fa7661c4f84b278b136e94a86b4ea2/5
 
 
 # Tout le repo, toutes les extensions, branche par défaut
-python utils/github_rawlink_gen.py --repo-url https://github.com/DeDobbeleer/DirectorSync --out all_raw.txt
-python utils/github_rawlink_gen.py 
+# python utils/github_rawlink_gen.py --repo-url https://github.com/DeDobbeleer/DirectorSync --out all_raw.txt
+# python utils/github_rawlink_gen.py 

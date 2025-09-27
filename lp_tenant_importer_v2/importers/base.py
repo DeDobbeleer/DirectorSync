@@ -125,7 +125,15 @@ class BaseImporter:
                 existing_obj = existing_map.get(key)
                 existing_canon = self.canon_existing(existing_obj) if existing_obj else None
 
-                decision = decide(desired_canon, existing_canon, compare_keys=list(self.compare_keys))
+                decision_cmp = decide(desired_canon, existing_canon, compare_keys=list(self.compare_keys))
+                decision = Decision(
+                    op=decision_cmp.op,
+                    reason=decision_cmp.reason,
+                    desired=desired,          # ← raw (payload shape), not canonical
+                    existing=existing_canon,  # (unused by apply, keep as-is)
+                )
+
+                
 
                 row = {
                     "siem": node.id,

@@ -161,40 +161,63 @@ class DirectorClient:
         """Build the *monitorapi* path for a job id under a pool/node."""
         return f"monitorapi/{pool_uuid}/{node_id}/orders/{job_id}"
 
-    def _extract_job_id(self, response: Dict[str, Any]) -> Optional[str]:
-        """Extract a job id from a response dict.
-
-        Supports both ``{"job_id": "..."}`` and
-        ``{"message": "/monitorapi/.../orders/{id}"}`` payload shapes.
+# --- Helpers: extract monitor path and job id from response ---
+    def _extract_monitor_path(self, response: Dict[str, Any]) -> Optional[str]:
+        """
+        Legacy Director: HTTP 200 + {'message': 'monitorapi/...'}
+        Return the relative monitor path if present, else None.
         """
         if not isinstance(response, dict):
             return None
-        job_id = response.get("job_id")
-        if job_id:
-            return str(job_id)
-        message = response.get("message")
-        if isinstance(message, str) and "/orders/" in message:
-            return message.rsplit("/", 1)[-1]
+        msg = response.get("message")
+        if isinstance(msg, str) and msg.lstrip().startswith(("monitorapi/", "/monitorapi/")):
+            return msg.lstrip("/")  # keep it relative to the API base
         return None
 
+    def _extract_job_id(self, response: Dict[str, Any]) -> Optional[str]:
+        """
+        Modern Director: HTTP 200 + JSON containing an 'orders' job id or similar.
+        Adjust this if your server returns a different key.
+        """
+        if not isinstance(response, dict):
+            return None
+        job = response.get("job") or response.get("orderId") or response.get("id")
+        if isinstance(job, str) and job:
+            return job
+        # sometimes nested
+        data = response.get("data")
+        if isinstance(data, dict):
+            job = data.get("job") or data.get("orderId") or data.get("id")
+            if isinstance(job, str) and job:
+                return job
+        return None
+
+# --- Monitor by job id: modern flow, but also accept response.success ---
     def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> bool:
         """
-        Poll the monitor API until completion or timeout.
-        Returns True on success-like status, False otherwise.
+        Poll 'monitorapi/{pool}/{node}/orders/{job_id}' until completion.
+        Success criteria:
+        - modern: top-level status in {'completed','success','ok'}
+        - legacy: response.success == True / False
         """
         deadline = time.time() + self.options.monitor_timeout_sec
-        seen_status: str | None = None
-        stagnant = 0
+        seen_status, stagnant = None, 0
 
         while time.time() < deadline:
             data = self.get_json(self.monitorapi(pool_uuid, node_id, job_id)) or {}
+
+            # Legacy support (if server responds with 'response.success')
+            resp = data.get("response")
+            if isinstance(resp, dict):
+                success = resp.get("success")
+                errors = resp.get("errors", [])
+                if success is True:
+                    return True
+                if success is False or errors:
+                    return False
+
+            # Modern contract: top-level 'status'
             status = str(data.get("status", "")).lower()
-
-            log.debug(
-                "monitor_job: job_id=%s status=%s data=%s",
-                job_id, status, json.dumps(data)[:300]
-            )
-
             if status in {"completed", "success", "ok"}:
                 return True
             if status in {"failed", "error"}:
@@ -202,7 +225,6 @@ class DirectorClient:
 
             stagnant = stagnant + 1 if status == seen_status else 0
             seen_status = status
-
             if stagnant >= self.options.monitor_stagnant_max:
                 log.error("monitor_job: stagnant status=%s for %d polls (giving up)", status, stagnant)
                 return False
@@ -210,6 +232,50 @@ class DirectorClient:
             time.sleep(self.options.monitor_poll_interval_sec)
 
         log.error("Monitor timeout for job_id=%s", job_id)
+        return False
+
+# --- Monitor by URL: legacy flow reading response.success ---
+    def monitor_job_url(self, monitor_path: str) -> bool:
+        """
+        Poll a legacy monitor endpoint like 'monitorapi/...'.
+        Success criteria:
+        - data.response.success == True → success
+        - data.response.success == False OR data.response.errors → failed
+        - fallback on top-level 'status' if present
+        """
+        path = monitor_path.lstrip("/")
+        deadline = time.time() + self.options.monitor_timeout_sec
+        seen_status, stagnant = None, 0
+
+        while time.time() < deadline:
+            data = self.get_json(path) or {}
+
+            # Legacy contract: { "response": { "success": bool, "errors": [...] } }
+            resp = data.get("response")
+            if isinstance(resp, dict):
+                success = resp.get("success")
+                errors = resp.get("errors", [])
+                if success is True:
+                    return True
+                if success is False or errors:
+                    return False
+
+            # Fallback: top-level status
+            status = str(data.get("status", "")).lower()
+            if status in {"completed", "success", "ok"}:
+                return True
+            if status in {"failed", "error"}:
+                return False
+
+            stagnant = stagnant + 1 if status == seen_status else 0
+            seen_status = status
+            if stagnant >= self.options.monitor_stagnant_max:
+                log.error("monitor_job_url: stagnant status=%s for %d polls (giving up)", status, stagnant)
+                return False
+
+            time.sleep(self.options.monitor_poll_interval_sec)
+
+        log.error("Monitor timeout for %s", path)
         return False
 
     # ---------------- generic resource helpers ----------------
@@ -221,39 +287,57 @@ class DirectorClient:
         """List a sub-resource (e.g., ``Repos/RepoPaths``)."""
         return self.get_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{subpath.lstrip('/')}"))
 
-    def create_resource(self, pool_uuid: str, node_id: str, resource: str, payload: Dict[str, Any], *, monitor: bool = True) -> Dict[str, Any]:
-        """Create a resource and optionally monitor the resulting job.
-
-        Returns:
-            A dict with shape ``{"status": "Success"|"Failed", "result": ...}``.
-        """
+# --- Create / Update / Delete: prefer monitor URL, else job id, else synchronous ---
+    def create_resource(self, pool_uuid: str, node_id: str, resource: str, payload: Dict[str, Any], monitor: bool = True) -> Dict[str, Any]:
         res = self.post_json(self.configapi(pool_uuid, node_id, resource), {"data": payload})
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
+
+        mon_path = self._extract_monitor_path(res)
+        if mon_path:
+            ok = self.monitor_job_url(mon_path)
+            return {"status": "Success" if ok else "Failed", "result": res}
+
         job = self._extract_job_id(res)
         if job:
             ok = self.monitor_job(pool_uuid, node_id, job)
             return {"status": "Success" if ok else "Failed", "result": res}
+
+        # No monitor info → treat as synchronous success.
         return {"status": "Success", "result": res}
 
-    def update_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, payload: Dict[str, Any], *, monitor: bool = True) -> Dict[str, Any]:
-        """Update a resource by id and optionally monitor the resulting job."""
-        res = self.put_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{resource_id}"), {"data": payload})
+
+    def update_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, payload: Dict[str, Any], monitor: bool = True) -> Dict[str, Any]:
+        res = self.put_json(self.configapi_id(pool_uuid, node_id, resource, resource_id), {"data": payload})
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
+
+        mon_path = self._extract_monitor_path(res)
+        if mon_path:
+            ok = self.monitor_job_url(mon_path)
+            return {"status": "Success" if ok else "Failed", "result": res}
+
         job = self._extract_job_id(res)
         if job:
             ok = self.monitor_job(pool_uuid, node_id, job)
             return {"status": "Success" if ok else "Failed", "result": res}
+
         return {"status": "Success", "result": res}
 
-    def delete_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, *, monitor: bool = True) -> Dict[str, Any]:
-        """Delete a resource by id and optionally monitor the resulting job."""
-        res = self.delete_json(self.configapi(pool_uuid, node_id, f"{resource.rstrip('/')}/{resource_id}"))
+
+    def delete_resource(self, pool_uuid: str, node_id: str, resource: str, resource_id: str, monitor: bool = True) -> Dict[str, Any]:
+        res = self.delete_json(self.configapi_id(pool_uuid, node_id, resource, resource_id))
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res}
+
+        mon_path = self._extract_monitor_path(res)
+        if mon_path:
+            ok = self.monitor_job_url(mon_path)
+            return {"status": "Success" if ok else "Failed", "result": res}
+
         job = self._extract_job_id(res)
         if job:
             ok = self.monitor_job(pool_uuid, node_id, job)
             return {"status": "Success" if ok else "Failed", "result": res}
+
         return {"status": "Success", "result": res}

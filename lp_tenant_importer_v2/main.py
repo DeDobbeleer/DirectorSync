@@ -1,5 +1,5 @@
 """
-CLI — Strictly identical commands/flags to v1 for end-users.
+CLI — Strictly identical commands/flags to v1 for end-users (no force-create).
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, Dict[str, List[Nod
 
 
 def cmd_import_repos(args):
-    client, pool_uuid, tenant_name, nodes_map, xlsx_path, cfg = _prepare_context(args)
+    client, pool_uuid, tenant_name, _nodes_map, xlsx_path, cfg = _prepare_context(args)
     nodes = cfg.get_targets(cfg.get_tenant(tenant_name), "repos")
     importer = ReposImporter()
     result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
@@ -66,7 +66,6 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode, no changes made")
     parser.add_argument("--no-verify", action="store_true", help="Disable SSL verification")
     parser.add_argument("--format", choices=["table", "json"], default="table", help="Output format")
-    parser.add_argument("--force-create", action="store_true", help="(Repos only) Force creation even if storage paths missing (handled upstream)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sp = subparsers.add_parser("import-repos", help="Import repositories")

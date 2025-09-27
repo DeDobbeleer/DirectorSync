@@ -1,11 +1,17 @@
 """
-Repositories importer (reference implementation) — using generic DirectorClient helpers.
+Repos importer (profile-driven).
 
-This importer reads the "Repo" sheet, validates required columns, compares
-desired repositories with existing ones on each target node, and issues
-create/update operations as needed. It also verifies available repository
-paths (`RepoPaths`) before applying any change.
+Behavior:
+- Parses the "Repo" sheet (aliases supported) with multi-value cells (| or ,).
+- All parsed values are normalized to strings.
+- Builds payloads using only documented API fields (Director 2.7).
+- Canonicalizes GET responses for order-insensitive equality (NOOP vs UPDATE).
+- Verifies RepoPaths before applying; if missing, returns 'Skipped' status.
+
+Note:
+- No '--force-create': the Director API enforces path integrity.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List
@@ -15,100 +21,83 @@ import pandas as pd
 from ..core.config import NodeRef
 from ..core.director_client import DirectorClient
 from ..utils.validators import ValidationError
+from ..utils.resource_profiles import REPOS_PROFILE
 from .base import BaseImporter
 
 
 class ReposImporter(BaseImporter):
-    """Importer for repositories (storage + retention policies).
-
-    Sheets:
-        * ``Repo`` — columns: ``name``, ``retention_days``, ``storage_paths``
-
-    Compare Keys:
-        ``name``, ``retention_days``, ``storage_paths``
-    """
     resource_name = "repos"
-    sheet_names = ("Repo",)
-    required_columns = ("name", "retention_days", "storage_paths")
-    compare_keys = ("name", "retention_days", "storage_paths")
+    sheet_names = (REPOS_PROFILE.sheet,)
+    required_columns = (REPOS_PROFILE.col_storage_paths, REPOS_PROFILE.col_retention_days)
+    compare_keys = ("hiddenrepopath", "repoha")
 
-    RESOURCE = "Repos"
-    SUB_REPO_PATHS = "RepoPaths"
+    RESOURCE = REPOS_PROFILE.api_resource
+    SUB_REPO_PATHS = REPOS_PROFILE.sub_repo_paths
 
     def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
-        """Yield normalized desired repository rows from the Excel sheet."""
-        df: pd.DataFrame = sheets["Repo"]
+        df: pd.DataFrame = sheets[REPOS_PROFILE.sheet]
+        # Ensure 'name' or alias exists in the sheet header set (runtime check)
+        cols = set(df.columns.str.lower())
+        if (REPOS_PROFILE.col_name not in cols) and not any(a in cols for a in REPOS_PROFILE.col_name_aliases):
+            raise ValidationError(f"Missing required column: '{REPOS_PROFILE.col_name}' (or one of aliases {REPOS_PROFILE.col_name_aliases})")
+
         for _, row in df.iterrows():
-            storage_paths = [p.strip() for p in str(row.get("storage_paths", "")).split(",") if p and str(p).strip()]
-            yield {
-                "name": str(row.get("name")).strip(),
-                "retention_days": int(row.get("retention_days")) if pd.notna(row.get("retention_days")) else 0,
-                "storage_paths": storage_paths,
-            }
+            try:
+                desired = REPOS_PROFILE.parse_row(row)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            yield desired
 
     def key_fn(self, desired_row: Dict[str, Any]) -> str:
-        """Repository unique key: its name."""
         return desired_row["name"]
 
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Comparable subset for a desired repository."""
-        return {
-            "name": desired_row["name"],
-            "retention_days": desired_row["retention_days"],
-            "storage_paths": list(desired_row["storage_paths"]),
-        }
+        return REPOS_PROFILE.canon_for_compare(desired_row)
 
     def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
-        """Comparable subset for an existing repository (None if missing)."""
         if not existing_obj:
             return None
-        return {
-            "name": existing_obj.get("name"),
-            "retention_days": existing_obj.get("retention_days"),
-            "storage_paths": existing_obj.get("storage_paths", []),
-        }
+        return REPOS_PROFILE.canon_for_compare(existing_obj)
 
     def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
-        """Return ``name -> existing_repo`` mapping for a node."""
         data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or {}
-        items = data.get("repos") or data.get("data") or data  # accept multiple shapes
+        items = data.get("repos") or data.get("data") or data
         result: Dict[str, Dict[str, Any]] = {}
         if isinstance(items, list):
             for it in items:
-                name = str(it.get("name", "")).strip()
+                name = str(it.get("name") or "").strip()
                 if name:
                     result[name] = it
         return result
 
+    # ---------------- verification ----------------
+
+    def _verify_paths(self, client: DirectorClient, pool_uuid: str, node: NodeRef, desired_paths: List[str]) -> List[str]:
+        raw = client.list_subresource(pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS) or {}
+        valid = REPOS_PROFILE.extract_repo_paths(raw)
+        valid_set = set(valid)
+        missing = [p for p in desired_paths if p not in valid_set]
+        return missing
+
+    # ---------------- payloads & apply ----------------
+
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Build create payload for a repository."""
-        return {
-            "name": desired_row["name"],
-            "retention_days": desired_row["retention_days"],
-            "storage_paths": desired_row["storage_paths"],
-        }
+        return REPOS_PROFILE.build_post_payload(desired_row)
 
     def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """Build update payload for a repository."""
-        payload = self.build_payload_create(desired_row)
-        payload["id"] = existing_obj.get("id")
-        return payload
-
-    def _verify_paths(self, client: DirectorClient, pool_uuid: str, node: NodeRef, storage_paths: List[str]) -> None:
-        """Validate that all ``storage_paths`` exist on the target node."""
-        avail = client.list_subresource(pool_uuid, node.id, self.RESOURCE, self.SUB_REPO_PATHS) or {}
-        paths = set(avail.get("paths") or avail.get("data") or [])
-        missing = [p for p in storage_paths if p not in paths]
-        if missing:
-            raise ValidationError(f"Missing storage paths: {', '.join(missing)}")
+        return REPOS_PROFILE.build_put_payload(existing_obj.get("id", ""), desired_row)
 
     def apply(self, client: DirectorClient, pool_uuid: str, node: NodeRef, decision, existing_id: str | None) -> Dict[str, Any]:
-        """Execute create/update after verifying repository paths."""
         desired = decision.desired or {}
-        self._verify_paths(client, pool_uuid, node, desired.get("storage_paths", []))
+        desired_paths = [p["path"] for p in (desired.get("hiddenrepopath") or [])]
+        missing = self._verify_paths(client, pool_uuid, node, desired_paths)
+        if missing:
+            # Skip (do not attempt to create/update invalid repo paths)
+            return {"status": "Skipped", "result": {"missing_paths": missing}}
 
         if decision.op == "CREATE":
-            return client.create_resource(pool_uuid, node.id, self.RESOURCE, self.build_payload_create(desired))
+            payload = self.build_payload_create(desired)
+            return client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
         elif decision.op == "UPDATE" and existing_id:
             payload = self.build_payload_update(desired, {"id": existing_id})
             return client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)

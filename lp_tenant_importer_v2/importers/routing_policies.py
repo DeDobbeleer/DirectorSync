@@ -85,6 +85,20 @@ class RoutingPoliciesImporter(BaseImporter):
         self._unsupported_nodes = set()
 
     # ---- XLSX parsing -------------------------------------------------------
+    @staticmethod
+    def _norm_repo_name(x: Any) -> str:
+        """
+        Normalize repository names coming from Excel.
+        Returns "" for empty/NaN/None/"null"/"nan"/"-" to avoid polluting required sets.
+        """
+        if x is None:
+            return ""
+        s = str(x).strip()
+        if not s:
+            return ""
+        if s.lower() in {"nan", "none", "null", "-"}:
+            return ""
+        return s
 
     def _pick_sheet(self, sheets: Dict[str, pd.DataFrame]) -> str:
         for name in self.SHEETS:
@@ -115,71 +129,53 @@ class RoutingPoliciesImporter(BaseImporter):
         return str(x or "").strip()
 
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
-        """
-        Group rows by cleaned_policy_name and yield one desired object per policy.
-
-        We derive the API "type" field from the presence of "value":
-          - if value is empty   -> KeyPresent
-          - if value is present -> KeyPresentValueMatches
-
-        We never put a "repo" on a drop=True criterion.
-        """
         sheet_name = self._pick_sheet(sheets)
         df = sheets[sheet_name].copy()
 
-        # Validate required columns (case-sensitive to keep it strict)
         missing = [c for c in self.REQUIRED_COLUMNS if c not in df.columns]
         if missing:
             raise ValidationError(
                 f"Missing required columns on sheet '{sheet_name}': {missing}"
             )
 
-        # Group policies
         for policy_name, grp in df.groupby("cleaned_policy_name", dropna=False):
             name = self._norm_str(policy_name)
             if not name:
-                # Skip rows without a policy id; provide a hint if needed.
                 first_idx = int(grp.index.min())
                 raise ValidationError(
-                    f"Sheet '{sheet_name}' row {first_idx + 2}: empty "
-                    f"'cleaned_policy_name'"
+                    f"Sheet '{sheet_name}' row {first_idx + 2}: empty 'cleaned_policy_name'"
                 )
 
-            # Aggregate header fields (take from the first row)
             first = grp.iloc[0]
             active = self._to_bool(first.get("active"))
-            catch_all = self._norm_str(first.get("catch_all"))
+            # IMPORTANT: normalize catch_all as a repo name
+            catch_all = self._norm_repo_name(first.get("catch_all"))
 
-            # Build criteria
             criteria: List[Dict[str, Any]] = []
             ignored_reasons: List[str] = []
 
             for idx, row in grp.iterrows():
                 key = self._norm_str(row.get("key"))
                 value = self._norm_str(row.get("value"))
-                repo = self._norm_str(row.get("repo"))
+                # IMPORTANT: normalize repo as a repo name
+                repo = self._norm_repo_name(row.get("repo"))
                 drop = self._to_bool(row.get("drop"))
 
-                # Skip fully empty lines (no key/value/repo/drop)
                 if not any([key, value, repo, drop]):
                     continue
 
-                # A valid criterion must have a key
                 if not key:
                     ignored_reasons.append(f"row {idx + 2}: missing key")
                     continue
 
-                # Derive type from presence of value (API expects one of two)
                 ctype = "KeyPresentValueMatches" if value else "KeyPresent"
 
                 if drop:
-                    # Drop rule: must NOT send a repo
                     crit = {"type": ctype, "key": key, "drop": True}
                     if value:
                         crit["value"] = value
                     criteria.append(crit)
                 else:
-                    # Store rule: repo is required
                     if not repo:
                         ignored_reasons.append(
                             f"row {idx + 2}: missing repo when drop=False"
@@ -193,9 +189,9 @@ class RoutingPoliciesImporter(BaseImporter):
             desired = {
                 "policy_name": name,
                 "active": bool(active),
-                "catch_all": catch_all,
+                "catch_all": catch_all,  # already normalized
                 "routing_criteria": criteria,
-                "_ignored": ignored_reasons,  # only for logging
+                "_ignored": ignored_reasons,
             }
             yield desired
 
@@ -325,8 +321,11 @@ class RoutingPoliciesImporter(BaseImporter):
     # ---- Repo dependencies (pre-validation) ---------------------------------
 
     def _list_repos(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Set[str]:
-        """Return set of repo names available on the node (cached per node)."""
         if node.id in self._repos_cache:
+            log.debug(
+                "list_repos: cache hit (%d repos) [node=%s|%s]",
+                len(self._repos_cache[node.id]), node.name, node.id
+            )
             return self._repos_cache[node.id]
 
         node_tag = f"{node.name}|{node.id}"
@@ -336,7 +335,6 @@ class RoutingPoliciesImporter(BaseImporter):
             log.exception("list_repos: failed to list repos [node=%s]", node_tag)
             raise
 
-        # Tolerate list/dict shapes as in Repos importer
         if isinstance(raw, list):
             items = raw
         elif isinstance(raw, dict):
@@ -347,24 +345,21 @@ class RoutingPoliciesImporter(BaseImporter):
         names: Set[str] = set()
         for it in items or []:
             if isinstance(it, dict):
-                n = self._norm_str(it.get("name"))
+                n = self._norm_repo_name(it.get("name"))
                 if n:
                     names.add(n)
 
         self._repos_cache[node.id] = names
-        log.debug("list_repos: %d repos cached [node=%s]", len(names), node_tag)
+        log.debug(
+            "list_repos: cache miss -> cached %d repos [node=%s]", len(names), node_tag
+        )
         return names
 
     @staticmethod
     def _collect_required_repos(desired_row: Dict[str, Any]) -> Set[str]:
-        """
-        Build the set of repositories referenced by the policy:
-          - catch_all if non-empty
-          - every criterion with drop=False (repo required)
-        """
         needed: Set[str] = set()
 
-        catch_all = RoutingPoliciesImporter._norm_str(desired_row.get("catch_all"))
+        catch_all = RoutingPoliciesImporter._norm_repo_name(desired_row.get("catch_all"))
         if catch_all:
             needed.add(catch_all)
 
@@ -372,13 +367,13 @@ class RoutingPoliciesImporter(BaseImporter):
             if not isinstance(it, dict):
                 continue
             if bool(it.get("drop")):
-                continue  # drop rules don't require a repo
-            repo = RoutingPoliciesImporter._norm_str(it.get("repo"))
+                continue
+            repo = RoutingPoliciesImporter._norm_repo_name(it.get("repo"))
             if repo:
                 needed.add(repo)
 
         return needed
-
+    
     # ---- Payload builders ----------------------------------------------------
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

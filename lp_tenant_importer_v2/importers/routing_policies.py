@@ -114,15 +114,21 @@ class RoutingPoliciesImporter(BaseImporter):
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to read {xlsx_path}: {exc}") from exc
 
+       
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:
-        """Check sheet presence and required columns."""
-        require_sheets(sheets, self.SHEET_NAMES)
+        """Check sheet presence and required columns (accepts RoutingPolicy or RP)."""
+        # Pick the first available sheet name from the allowed list.
         sheet_name = next((s for s in self.SHEET_NAMES if s in sheets), None)
         if not sheet_name:
-            # Defensive, should be caught by require_sheets already.
-            raise ValidationError(f"None of {self.SHEET_NAMES} sheets found in workbook")
-
-        require_columns(sheets[sheet_name], self.REQUIRED_COLUMNS)
+            found = ", ".join(sorted(sheets.keys())) or "none"
+            expected = ", ".join(self.SHEET_NAMES)
+            raise ValidationError(
+                f"Missing sheet: expected one of [{expected}]; found: {found}"
+            )
+        # Keep the choice for subsequent steps (iter_desired, etc.)
+        self._selected_sheet = sheet_name  # type: ignore[attr-defined]
+        log.info("routing_policies: using sheet '%s'", sheet_name)
+        require_columns(sheets[sheet_name], self.REQUIRED_COLUMNS)    
 
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
@@ -157,9 +163,12 @@ class RoutingPoliciesImporter(BaseImporter):
 
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
         """Yield one desired policy object per `cleaned_policy_name`."""
-        sheet_name = next((s for s in self.SHEET_NAMES if s in sheets), None)
+        # Reuse the sheet chosen during validate(); fallback just in case.
+        sheet_name = getattr(self, "_selected_sheet", None) or \
+                     next((s for s in self.SHEET_NAMES if s in sheets), None)
         if not sheet_name:
-            raise ValidationError(f"Sheet not found. Expected one of: {', '.join(self.SHEET_NAMES)}")
+            expected = ", ".join(self.SHEET_NAMES)
+            raise ValidationError(f"Sheet not found. Expected one of: {expected}")
 
         df = sheets[sheet_name].copy()
         if df.empty:

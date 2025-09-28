@@ -343,7 +343,7 @@ class RoutingPoliciesImporter(BaseImporter):
                 "apply: skipping policy=%s due to missing repos=%s [node=%s]",
                 pol_name, miss_sorted, node_t
             )
-            return {"status": "Skipped", "result": {"missing_repos": miss_sorted}}
+            return {"status": "Skipped", "result": {"missing_repos": miss_sorted}, "error": miss_sorted}
 
         try:
             if decision.op == "CREATE":

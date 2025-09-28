@@ -24,3 +24,33 @@ def require_columns(df: pd.DataFrame, required: Iterable[str]) -> None:
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValidationError(f"Missing required columns: {', '.join(missing)}")
+
+def require_columns(
+    df: pd.DataFrame,
+    required: Iterable[str],
+    context: str | None = None,
+) -> None:
+    """Ensure that all required columns are present in a DataFrame.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        The DataFrame to validate.
+    required : Iterable[str]
+        Column names that must be present in ``df``.
+    context : str, optional
+        Extra information to prepend to the error message (e.g., the sheet
+        name). If provided, it will be formatted as "{context}: ...".
+
+    Raises
+    ------
+    ValidationError
+        If one or more required columns are missing.
+    """
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        prefix = f"{context}: " if context else ""
+        raise ValidationError(
+            f"{prefix}Missing required columns: {', '.join(missing)}"
+        )
+

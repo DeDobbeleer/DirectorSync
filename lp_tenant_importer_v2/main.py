@@ -1,4 +1,4 @@
-# lp_tenant_importer_v2/main.py (refactor — generic importer wiring)
+# lp_tenant_importer_v2/main.py
 """CLI — generic wiring for all importers via a central registry.
 
 End-user UX remains identical. Each importer declares itself in
@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 
 import requests
 
@@ -63,6 +63,36 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     return client, pool_uuid, tenant.name, args.xlsx, cfg
 
 
+def _enrich_rows_for_output(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalize a few fields for nicer table output:
+      - If 'error' is a list (e.g., missing repos), stringify as 'missing repos: a, b'.
+      - Ensure monitor_ok / monitor_branch are printable (fallback to '—' if None/empty).
+    """
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        rr = dict(r)  # shallow copy
+
+        err = rr.get("error")
+        if isinstance(err, list):
+            rr["error"] = f"missing repos: {', '.join(err)}" if err else "—"
+        elif err in (None, ""):
+            # try to synthesize from nested result if present (defensive)
+            res = rr.get("result_detail") or rr.get("details") or {}
+            if isinstance(res, dict) and "missing_repos" in res:
+                m = res.get("missing_repos") or []
+                rr["error"] = f"missing repos: {', '.join(m)}" if m else "—"
+
+        mon = rr.get("monitor_ok")
+        rr["monitor_ok"] = "—" if mon is None or mon == "" else str(mon)
+
+        br = rr.get("monitor_branch")
+        rr["monitor_branch"] = br or "—"
+
+        out.append(rr)
+    return out
+
+
 # ----------------------- Generic command handler ----------------------------
 
 def cmd_import_generic(args):
@@ -92,7 +122,10 @@ def cmd_import_generic(args):
         importer = importer_cls()
         result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
 
-        print_rows(result.rows, args.format)
+        # Enrich rows for nicer table output (skip reason, monitor)
+        rows = _enrich_rows_for_output(result.rows)
+        print_rows(rows, args.format)
+
         if result.any_error:
             raise RuntimeError("One or more operations failed; see rows above.")
 

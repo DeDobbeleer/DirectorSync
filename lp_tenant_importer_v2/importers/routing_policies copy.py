@@ -1,8 +1,10 @@
 # lp_tenant_importer_v2/importers/routing_policies.py
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Tuple
-
+from typing import Any, Dict, Iterable, List, Tuple, Set, Mapping, Optional
+import math
+import unicodedata
+import re
 import pandas as pd
 
 from ..core.config import NodeRef
@@ -60,6 +62,13 @@ class RoutingPoliciesImporter(BaseImporter):
     )
     # Fields used by the diff engine to decide NOOP/UPDATE
     COMPARE_KEYS: Tuple[str, ...] = ("catch_all", "routing_criteria")
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # cache of repos per node id
+        self._repos_cache: Dict[str, Set[str]] = {}
+        # global repo name mapping loaded from the Repos sheet (source -> destination)
+        self._repo_map: Dict[str, str] = {}
 
     # ------------- helpers -------------
 
@@ -73,6 +82,25 @@ class RoutingPoliciesImporter(BaseImporter):
     @staticmethod
     def _norm(x: Any) -> str:
         return str(x or "").strip()
+    
+    @staticmethod
+    def _norm_key(x: Any) -> Optional[str]:
+        """
+        Normalize a value to a comparable key.
+        - Returns None for None/NaN/empty/"nan"/"null"/"none"/"-"
+        - Lowercases, trims, de-accents, collapses spaces.
+        """
+        if x is None:
+            return None
+        if isinstance(x, float) and math.isnan(x):
+            return None
+        s = str(x).strip()
+        if s == "" or s.lower() in {"nan", "none", "null", "-"}:
+            return None
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = re.sub(r"\s+", " ", s).strip().casefold()
+        return s or None
 
     @classmethod
     def _canon_rules(cls, rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -105,30 +133,86 @@ class RoutingPoliciesImporter(BaseImporter):
 
         return sorted(canon, key=sort_key)
 
-    # ------------- BaseImporter overrides -------------
+    @staticmethod
+    def _build_name_map(df: "pd.DataFrame",
+                        candidate_pairs: List[Tuple[str, str]]) -> Dict[str, str]:
+        """
+        Build a {normalized_source -> cleaned_destination} map from a DataFrame,
+        trying multiple (source_col, dest_col) pairs in order.
+        """
+        for src_col, dst_col in candidate_pairs:
+            if src_col in df.columns and dst_col in df.columns:
+                tmp = df[[src_col, dst_col]].copy()
+                tmp["__k"] = tmp[src_col].map(RoutingPoliciesImporter._norm_key)
+                tmp = tmp.dropna(subset=["__k", dst_col])
+                mapping = dict(
+                    tmp.drop_duplicates("__k", keep="last").set_index("__k")[dst_col]
+                )
+                if mapping:
+                    return mapping
+        return {}
 
+    def _resolve_repo(self, raw_name: Any) -> str:
+        """
+        Resolve a repo name from Excel using self._repo_map.
+        If not in the mapping, return a stripped string fallback (or "").
+        """
+        k = self._norm_key(raw_name)
+        if k is None:
+            return ""
+        mapped = self._repo_map.get(k)
+        if mapped:
+            return str(mapped).strip()
+        # fallback: keep original as-is but stripped
+        return str(raw_name).strip()
+
+
+    # ------------- BaseImporter overrides -------------
+    
     def load_xlsx(self, xlsx_path: str) -> Dict[str, pd.DataFrame]:
         """Read all sheets; keep API consistent with BaseImporter contract."""
         try:
             return pd.read_excel(xlsx_path, sheet_name=None, engine="openpyxl")
         except Exception as exc:  # pragma: no cover
             raise RuntimeError(f"Failed to read {xlsx_path}: {exc}") from exc
+ 
+    def _load_repo_map_from_sheets(self, sheets: Dict[str, "pd.DataFrame"]) -> None:
+        """
+        Build self._repo_map from the 'Repos' sheet.
+        Default pair: ('original_policy_name', 'cleaned_policy_name') as requested.
+        You can add more pairs if your sheet evolves.
+        """
+        repo_sheet = None
+        for name in sheets.keys():
+            if str(name).strip().lower() == "repos":
+                repo_sheet = name
+                break
 
-       
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:
-        """Check sheet presence and required columns (accepts RoutingPolicy or RP)."""
-        # Pick the first available sheet name from the allowed list.
-        sheet_name = next((s for s in self.SHEET_NAMES if s in sheets), None)
-        if not sheet_name:
-            found = ", ".join(sorted(sheets.keys())) or "none"
-            expected = ", ".join(self.SHEET_NAMES)
-            raise ValidationError(
-                f"Missing sheet: expected one of [{expected}]; found: {found}"
-            )
-        # Keep the choice for subsequent steps (iter_desired, etc.)
-        self._selected_sheet = sheet_name  # type: ignore[attr-defined]
+        if not repo_sheet:
+            log.debug("routing_policies: no 'Repos' sheet found; repo mapping disabled")
+            self._repo_map = {}
+            return
+
+        df = sheets[repo_sheet]
+        pairs = [
+            ("original_policy_name", "cleaned_policy_name"),
+            # You can add future pairs here if needed:
+            # ("original_repo_name", "cleaned_repo_name"),
+            # ("source_name", "dest_name"),
+        ]
+        self._repo_map = self._build_name_map(df, pairs)
+        log.debug("routing_policies: repo map loaded (%d entries)", len(self._repo_map))
+ 
+    def validate(self, sheets: Dict[str, "pd.DataFrame"]) -> None:
+        """
+        Overridden to also load the repo name mapping from the 'Repos' sheet.
+        """
+        # Existing validation on sheet presence (RoutingPolicy / RP / etc.)
+        sheet_name = self._pick_sheet(sheets)
         log.info("routing_policies: using sheet '%s'", sheet_name)
-        require_columns(sheets[sheet_name], self.REQUIRED_COLUMNS)    
+
+        # Load repo name mapping for destination resolution
+        self._load_repo_map_from_sheets(sheets)
 
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
@@ -161,75 +245,131 @@ class RoutingPoliciesImporter(BaseImporter):
         log.info("fetch_existing: found %d policies [node=%s|%s]", len(result), node.name, node.id)
         return result
 
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
-        """Yield one desired policy object per `cleaned_policy_name`."""
-        # Reuse the sheet chosen during validate(); fallback just in case.
-        sheet_name = getattr(self, "_selected_sheet", None) or \
-                     next((s for s in self.SHEET_NAMES if s in sheets), None)
-        if not sheet_name:
-            expected = ", ".join(self.SHEET_NAMES)
-            raise ValidationError(f"Sheet not found. Expected one of: {expected}")
-
+    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+        """
+        Yield desired RP objects from the selected sheet, with repo names
+        resolved via the XLSX mapping before any existence check or payload build.
+        """
+        sheet_name = self._pick_sheet(sheets)
         df = sheets[sheet_name].copy()
-        if df.empty:
-            return
 
-        # Group all rows that belong to the same policy
-        if "cleaned_policy_name" not in df.columns:
-            raise ValidationError(f"Missing 'cleaned_policy_name' on sheet '{sheet_name}'")
+        missing = [c for c in self.REQUIRED_COLUMNS if c not in df.columns]
+        if missing:
+            raise ValidationError(
+                f"Missing required columns on sheet '{sheet_name}': {missing}"
+            )
 
         for policy_name, grp in df.groupby("cleaned_policy_name", dropna=False):
-            name = self._norm(policy_name)
+            name = self._norm_str(policy_name)
             if not name:
-                # Add row number hint for the first faulty row
                 first_idx = int(grp.index.min())
                 raise ValidationError(
                     f"Sheet '{sheet_name}' row {first_idx + 2}: empty 'cleaned_policy_name'"
                 )
 
-            # catch_all can be repeated; normalize to any truthy value among rows
-            catch_all = any(self._to_bool(x) for x in grp["catch_all"].tolist())
+            first = grp.iloc[0]
+            active = self._to_bool(first.get("active"))
 
-            rules: List[Dict[str, Any]] = []
+            # Resolve catch_all via map
+            catch_all_resolved = self._resolve_repo(first.get("catch_all"))
+
+            criteria: List[Dict[str, Any]] = []
+            ignored_reasons: List[str] = []
+
             for idx, row in grp.iterrows():
-                try:
-                    rule_type = self._norm(row.get("rule_type"))
-                    key = self._norm(row.get("key"))
-                    value = self._norm(row.get("value"))
-                    repo = self._norm(row.get("repo"))
-                    drop = self._norm(row.get("drop")) or "store"
+                key = self._norm_str(row.get("key"))
+                value = self._norm_str(row.get("value"))
+                drop = self._to_bool(row.get("drop"))
 
-                    # Skip fully empty rule line (policy may rely only on catch_all)
-                    if not any([rule_type, key, value, repo, drop]):
+                # Resolve repo via map (may be "")
+                repo_resolved = self._resolve_repo(row.get("repo"))
+
+                if not any([key, value, repo_resolved, drop]):
+                    continue
+
+                if not key:
+                    ignored_reasons.append(f"row {idx + 2}: missing key")
+                    continue
+
+                ctype = "KeyPresentValueMatches" if value else "KeyPresent"
+
+                if drop:
+                    crit = {"type": ctype, "key": key, "drop": True}
+                    if value:
+                        crit["value"] = value
+                    criteria.append(crit)
+                else:
+                    if not repo_resolved:
+                        ignored_reasons.append(
+                            f"row {idx + 2}: missing repo when drop=False"
+                        )
                         continue
+                    crit = {"type": ctype, "key": key, "drop": False, "repo": repo_resolved}
+                    if value:
+                        crit["value"] = value
+                    criteria.append(crit)
 
-                    # If a rule is provided, repo should be present
-                    if not repo:
-                        raise ValidationError("missing 'repo' for a rule")
-
-                    rules.append(
-                        {
-                            "type": rule_type,
-                            "key": key,
-                            "value": value,
-                            "repo": repo,
-                            "drop": drop,
-                        }
-                    )
-                except ValidationError as ve:
-                    raise ValidationError(
-                        f"Sheet '{sheet_name}' policy '{name}' row {idx + 2}: {ve}"
-                    ) from ve
-                except Exception as exc:  # pragma: no cover
-                    raise ValidationError(
-                        f"Sheet '{sheet_name}' policy '{name}' row {idx + 2}: {exc}"
-                    ) from exc
-
-            yield {
+            desired = {
                 "policy_name": name,
-                "catch_all": bool(catch_all),
-                "routing_criteria": rules,
+                "active": bool(active),
+                "catch_all": catch_all_resolved,  # already resolved
+                "routing_criteria": criteria,      # repos already resolved
+                "_ignored": ignored_reasons,
             }
+            yield desired
+
+    @staticmethod
+    def _collect_required_repos(desired_row: Dict[str, Any]) -> Set[str]:
+        needed: Set[str] = set()
+        ca = desired_row.get("catch_all") or ""
+        if ca:
+            needed.add(str(ca))
+
+        for it in desired_row.get("routing_criteria") or []:
+            if not isinstance(it, dict):
+                continue
+            if bool(it.get("drop")):
+                continue
+            repo = it.get("repo") or ""
+            if repo:
+                needed.add(str(repo))
+
+        return needed
+
+    def _list_repos(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Set[str]:
+        if node.id in self._repos_cache:
+            log.debug(
+                "list_repos: cache hit (%d repos) [node=%s|%s]",
+                len(self._repos_cache[node.id]), node.name, node.id
+            )
+            return self._repos_cache[node.id]
+
+        node_tag = f"{node.name}|{node.id}"
+        try:
+            raw = client.list_resource(pool_uuid, node.id, "Repos") or {}
+        except Exception:
+            log.exception("list_repos: failed to list repos [node=%s]", node_tag)
+            raise
+
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = raw.get("repos") or raw.get("data") or raw.get("items") or []
+        else:
+            items = []
+
+        names: Set[str] = set()
+        for it in items or []:
+            if isinstance(it, dict):
+                n = self._norm_str(it.get("name"))
+                if n:
+                    names.add(n)
+
+        self._repos_cache[node.id] = names
+        log.debug(
+            "list_repos: cache miss -> cached %d repos [node=%s]", len(names), node_tag
+        )
+        return names
 
     # ---- diff / canonicalization ----
 

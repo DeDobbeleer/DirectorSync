@@ -147,9 +147,13 @@ class BaseImporter:
                     rows.append(row)
                     continue
 
+
                 try:
-                    res = self.apply(client, pool_uuid, node, decision, existing_obj.get("id") if existing_obj else None)
-                    row.update({"status": res.get("status"), "monitor_ok": res.get("status") == "Success"})
+                    res = self.apply(
+                        client, pool_uuid, node, decision, existing_obj.get("id") if existing_obj else None
+                    )
+                    # Use the actual monitor flag from DirectorClient, do NOT recompute it
+                    row.update({"status": res.get("status"), "monitor_ok": res.get("monitor_ok")})
                 except Exception as exc:
                     row.update({"status": "Failed", "error": str(exc)})
                     any_error = True

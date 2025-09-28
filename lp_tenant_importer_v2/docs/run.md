@@ -17,12 +17,16 @@ python -m lp_tenant_importer_v2.main \
 
 ## Option B — Rester dans `lp_tenant_importer_v2/` mais ajouter le parent au PYTHONPATH
 
+- import-repos
+- import-routing-policies
+
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
 export PYTHONPATH=..
 cd ~/dev/DirectorSync
 source lp_tenant_importer_v2/.venv/bin/activate
-git pull origin mai
+git pull origin main
+cd lp_tenant_importer_v2
 python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \

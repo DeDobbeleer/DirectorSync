@@ -47,7 +47,7 @@ class RoutingPoliciesImporter(BaseImporter):
     """
 
     # ---- wiring ----
-    RESOURCE: str = "RoutingPolicy"  # configapi resource segment
+    RESOURCE: str = "RoutingPolicies"  # configapi resource segment
     SHEET_NAMES: Tuple[str, ...] = ("RoutingPolicy", "RP")
     REQUIRED_COLUMNS: Tuple[str, ...] = (
         "cleaned_policy_name",

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-from .importers.base import BaseImporter, Decision  # même base que Repos
+from .base import BaseImporter, Decision  # même base que Repos
 from ..core.director_client import DirectorClient
 from ..utils.validators import require_columns
 from ..utils.reporting import print_rows  # utilisé par la base

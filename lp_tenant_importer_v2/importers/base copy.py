@@ -1,4 +1,6 @@
-""" BaseImporter — orchestrates load → validate → fetch → diff → plan → apply → report.
+"""
+BaseImporter — orchestrates load → validate → fetch → diff → plan → apply → report.
+
 Concrete importers only implement resource-specific hooks for validation,
 equality, and payload building. Everything else is handled here.
 """
@@ -33,13 +35,11 @@ class BaseImporter:
         required_columns: Required columns present in every sheet referenced.
         compare_keys: Keys used for subset comparison in the diff step.
     """
-
     resource_name: str = "resource"
     sheet_names: Tuple[str, ...] = ()
     required_columns: Tuple[str, ...] = ()
     compare_keys: Tuple[str, ...] = ()
 
-    # ----- IO helpers -----------------------------------------------------
     def load_xlsx(self, xlsx_path: str) -> Dict[str, pd.DataFrame]:
         """Load an Excel workbook into a dict of DataFrames keyed by sheet name.
 
@@ -47,11 +47,9 @@ class BaseImporter:
             RuntimeError: If the file cannot be read.
         """
         from pathlib import Path
-
         p = Path(xlsx_path)
         if not p.is_file():
             raise FileNotFoundError(f"{xlsx_path}")
-
         try:
             xl = pd.read_excel(xlsx_path, sheet_name=None, engine="openpyxl")
         except Exception as exc:
@@ -64,7 +62,7 @@ class BaseImporter:
         for sheet in self.sheet_names:
             require_columns(sheets[sheet], self.required_columns)
 
-    # ----- hooks to implement --------------------------------------------
+    # ----- hooks to implement -----
     def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
         """Return a mapping ``name -> existing_obj`` for the node."""
         raise NotImplementedError
@@ -93,26 +91,12 @@ class BaseImporter:
         """Build the API update payload for a desired row given the existing object."""
         raise NotImplementedError
 
-    def apply(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-        decision: Decision,
-        existing_id: str | None,
-    ) -> Dict[str, Any]:
+    def apply(self, client: DirectorClient, pool_uuid: str, node: NodeRef, decision: Decision, existing_id: str | None) -> Dict[str, Any]:
         """Execute the decided operation (CREATE/UPDATE/NOOP/SKIP) on the API."""
         raise NotImplementedError
 
-    # ----- pipeline -------------------------------------------------------
-    def run_for_nodes(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        nodes: List[NodeRef],
-        xlsx_path: str,
-        dry_run: bool,
-    ) -> ImportResult:
+    # ----- pipeline -----
+    def run_for_nodes(self, client: DirectorClient, pool_uuid: str, nodes: List[NodeRef], xlsx_path: str, dry_run: bool) -> ImportResult:
         """Run the importer for a set of nodes.
 
         Steps:
@@ -131,14 +115,7 @@ class BaseImporter:
             try:
                 existing_map = self.fetch_existing(client, pool_uuid, node)
             except Exception as exc:
-                rows.append({
-                    "siem": node.id,
-                    "node": node.name,
-                    "result": "error",
-                    "action": "fetch",
-                    "status": "Failed",
-                    "error": str(exc),
-                })
+                rows.append({"siem": node.id, "node": node.name, "result": "error", "action": "fetch", "error": str(exc)})
                 any_error = True
                 continue
 
@@ -152,43 +129,31 @@ class BaseImporter:
                 decision = Decision(
                     op=decision_cmp.op,
                     reason=decision_cmp.reason,
-                    desired=desired,       # raw desired (payload shape)
-                    existing=existing_canon,
+                    desired=desired,          # ← raw (payload shape), not canonical
+                    existing=existing_canon,  # (unused by apply, keep as-is)
                 )
+
+                
 
                 row = {
                     "siem": node.id,
                     "node": node.name,
                     "name": key,
-                    "result": decision.op.lower(),  # create/update/noop
-                    "action": decision.reason,      # e.g. "Not found", "Identical subset", "Field differs: X"
+                    "result": decision.op.lower(),
+                    "action": decision.reason,
                 }
 
-                # In dry-run, we don't touch the API — just report the plan
                 if dry_run or decision.op in ("NOOP", "SKIP"):
                     rows.append(row)
                     continue
 
+
                 try:
                     res = self.apply(
-                        client,
-                        pool_uuid,
-                        node,
-                        decision,
-                        existing_obj.get("id") if existing_obj else None,
+                        client, pool_uuid, node, decision, existing_obj.get("id") if existing_obj else None
                     )
-                    # propagate all useful fields for reporting
-                    row.update({
-                        "status":        res.get("status"),
-                        "monitor_ok":    res.get("monitor_ok"),
-                        "monitor_branch": res.get("monitor_branch"),
-                    })
-                    # optional but helpful for enriched UIs / debugging
-                    if "error" in res and res.get("error"):
-                        row["error"] = res.get("error")
-                    if res:
-                        row["result_detail"] = res
-
+                    # Use the actual monitor flag from DirectorClient, do NOT recompute it
+                    row.update({"status": res.get("status"), "monitor_ok": res.get("monitor_ok")})
                 except Exception as exc:
                     row.update({"status": "Failed", "error": str(exc)})
                     any_error = True

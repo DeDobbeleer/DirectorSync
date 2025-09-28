@@ -9,8 +9,8 @@ import pandas as pd
 from .base import BaseImporter, Decision  # même base que Repos
 from ..core.director_client import DirectorClient
 from ..utils.validators import require_columns
-from ..utils.reporting import print_rows  # utilisé par la base
-from ..utils.diff_engine import DiffEngine
+# from ..utils.reporting import print_rows  # utilisé par la base
+# from ..utils.diff_engine import DiffEngine
 
 log = logging.getLogger(__name__)
 

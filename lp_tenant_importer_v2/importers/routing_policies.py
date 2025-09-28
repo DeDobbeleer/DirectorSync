@@ -12,7 +12,6 @@ from ..utils.validators import require_columns
 
 log = logging.getLogger(__name__)
 
-
 # ------------------------- Low-level helpers ------------------------- #
 _EMPTY_SENTINELS = {"", "nan", "none", "null", "-"}
 
@@ -43,40 +42,34 @@ def _node_tag(node: NodeRef) -> str:
 # ------------------------ Importer definition ------------------------ #
 class RoutingPoliciesImporter(BaseImporter):
     """
-    Routing Policies importer (V2) implementing the finalized business rules:
+    Routing Policies importer (V2) implémentant le spec final :
 
-    - Sheet: accept the first existing sheet among 'RoutingPolicy' or 'RP'.
-    - Required columns (case-insensitive): cleaned_policy_name, catch_all,
-      rule_type, key, value, repo, drop. 'active' column is ignored.
-    - Repo mapping (optional 'Repo' sheet): original_repo_name -> cleaned_repo_name.
-      Mapping is applied IF AND ONLY IF the source value is non-empty.
+    - Feuille : première existante parmi 'RoutingPolicy' ou 'RP'.
+    - Colonnes requises (case-insensitive) : cleaned_policy_name, catch_all,
+      rule_type, key, value, repo, drop. La colonne 'active' du XLSX est ignorée.
+    - Feuille 'Repo' optionnelle : original_repo_name -> cleaned_repo_name,
+      mapping appliqué UNIQUEMENT si la valeur d’entrée n’est pas vide.
 
-    Line typing:
-      * Type 1 ("catch-all only"): ALL rule columns are empty
-        (rule_type, key, value, repo, drop) -> no rule created for that line.
-      * Type 2 ("catch-all + rules"): If ANY of (rule_type, key, value, drop) is present,
-        the line defines a rule. A rule is valid IFF rule_type, key, value, drop are all
-        non-empty. 'repo' is optional for a rule.
+    Typage des lignes :
+      * Type 1 ("catch-all only") : TOUTES les colonnes de règle vides
+        (rule_type, key, value, repo, drop) -> aucune règle créée pour la ligne.
+      * Type 2 ("catch-all + règles") : si AU MOINS un de (rule_type, key, value, drop)
+        est présent, la ligne définit une règle. Elle est valide SSI rule_type, key,
+        value, drop sont tous non vides. 'repo' est optionnel.
+        - 'drop' est REQUIS mais sans sémantique côté import : on le transmet tel quel.
 
-        - 'drop' is REQUIRED but has NO semantics in payload nor SKIP decision.
-        - Build rule as:
-            { "type": <rule_type>, "key": <key>, "value": <value>[, "repo": <repo>] }
-          Include 'repo' only when non-empty (after mapping).
-
-    Payload:
+    Payload API (création/mise à jour) :
       {
         "policy_name": <name>,
-        "active": true,                     # 'active' column is ignored
-        "policy": {
-          "catch_all": <mapped_or_empty>,
-          "rules": [ ... in the Excel order ... ]
-        }
+        "active": true,                 # 'active' du fichier est ignoré
+        "catch_all": <mapped_or_empty>,
+        "routing_criteria": [ ... dans l'ordre Excel ... ]
       }
 
-    SKIP decision (per policy):
-      repos_to_check = [catch_all if non-empty] + [each non-empty rule.repo]
-      missing = repos_to_check - repos_available_on_node
-      if missing: SKIPPED with details in logs and result structure.
+    Décision SKIP (par policy) :
+      repos_to_check = [catch_all si non vide] + [chaque rule.repo non vide]
+      missing = repos_to_check - repos_disponibles_sur_le_noeud
+      si missing != ∅ : SKIPPED (warning + détail).
     """
 
     # ---- BaseImporter contract ----
@@ -89,10 +82,10 @@ class RoutingPoliciesImporter(BaseImporter):
         "key",
         "value",
         "repo",
-        "drop",  # REQUIRED presence for defined rules; no semantics
+        "drop",  # requis pour valider une règle ; pas de sémantique côté import
     )
-    # Compare on stable keys; 'active' ignored by spec.
-    compare_keys = ("name", "catch_all", "rules")
+    # On diff sur ces clés canoniques (voir canon_*).
+    compare_keys = ("name", "catch_all", "routing_criteria")
 
     # Director API resource name
     RESOURCE = "RoutingPolicies"
@@ -102,8 +95,7 @@ class RoutingPoliciesImporter(BaseImporter):
         self._active_sheet: Optional[str] = None
         self._repo_map: Dict[str, str] = {}
         self._repos_cache: Dict[str, set] = {}  # node.id -> set(repo names)
-        # Track first catch_all per policy to warn on changes
-        self._first_catch_all: Dict[str, str] = {}
+        self._first_catch_all: Dict[str, str] = {}  # pour warn si changement intra-policy
 
     # ------------------------------ Validate ------------------------------ #
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
@@ -111,30 +103,27 @@ class RoutingPoliciesImporter(BaseImporter):
         self._active_sheet = sheet
         df = sheets[sheet]
 
-        # Required columns (context added for clearer error messages)
+        # Required columns (avec context si disponible)
         try:
             require_columns(df, self.required_columns, context=f"sheet '{sheet}'")
         except TypeError:
-            # Backward compatibility if local validators doesn't support 'context'
             require_columns(df, self.required_columns)
 
-        # Build repo mapping if present
+        # Repo mapping si présent
         self._repo_map = self._build_repo_name_map(sheets)
         if self._repo_map:
             log.info("repo-map: loaded %d entries from sheet 'Repo'", len(self._repo_map))
 
         log.info("routing_policies: using sheet '%s'", sheet)
-        log.debug(
-            "routing_policies: columns=%s rows=%d",
-            list(df.columns),
-            len(df.index),
-        )
+        log.debug("routing_policies: columns=%s rows=%d", list(df.columns), len(df.index))
 
     # --------------------------- Parse desired ---------------------------- #
     def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
         """
         Yield desired policies as dicts:
           { "name": str, "catch_all": str, "rules": List[Dict[str,Any]] }
+        (NB: on garde 'rules' en interne ; la conversion API -> 'routing_criteria'
+         est faite dans build_payload_* et canon_desired)
         """
         sheet = self._active_sheet or self._select_sheet(sheets)
         df: pd.DataFrame = sheets[sheet]
@@ -143,17 +132,15 @@ class RoutingPoliciesImporter(BaseImporter):
         def col(name: str) -> str:
             return cols.get(name.lower(), name)
 
-        # Group by policy, preserving Excel order for rules
         policies: Dict[str, Dict[str, Any]] = {}
         invalid_rows: List[Tuple[str, int, str]] = []
 
         for idx, row in df.iterrows():
             policy_name = _norm_str(row.get(col("cleaned_policy_name")))
             if not policy_name:
-                # Unknown policy name -> silently skip the row
                 continue
 
-            # Initialize policy record if needed
+            # Init policy (première occurrence)
             if policy_name not in policies:
                 catch_all_raw = _norm_str(row.get(col("catch_all")))
                 catch_all_mapped = self._map_repo_if_non_empty(catch_all_raw)
@@ -164,7 +151,7 @@ class RoutingPoliciesImporter(BaseImporter):
                 }
                 self._first_catch_all[policy_name] = catch_all_mapped
             else:
-                # Warn on catch_all changes (first wins)
+                # Warn si catch_all change (on garde le premier)
                 prev = self._first_catch_all.get(policy_name, "")
                 now = self._map_repo_if_non_empty(_norm_str(row.get(col("catch_all"))))
                 if now and now != prev:
@@ -173,7 +160,7 @@ class RoutingPoliciesImporter(BaseImporter):
                         policy_name, prev, now
                     )
 
-            # Determine line type
+            # Lecture des champs de règle
             rule_type = _norm_str(row.get(col("rule_type")))
             key = _norm_str(row.get(col("key")))
             value = _norm_str(row.get(col("value")))
@@ -181,42 +168,40 @@ class RoutingPoliciesImporter(BaseImporter):
             repo_mapped = self._map_repo_if_non_empty(repo_raw)
             drop_val = _norm_str(row.get(col("drop")))
 
-            is_no_rule_line = (
-                rule_type == "" and key == "" and value == "" and repo_raw == "" and drop_val == ""
-            )
+            # Type 1 : ligne sans règle
+            is_no_rule_line = (rule_type == "" and key == "" and value == "" and repo_raw == "" and drop_val == "")
             if is_no_rule_line:
-                # Type 1: catch-all only line -> no rule created.
                 continue
 
-            # Type 2: at least one of the core rule fields present
+            # Type 2 : ligne "définie"
             core_present = any(x != "" for x in (rule_type, key, value, drop_val))
             if not core_present:
-                # Should not happen due to is_no_rule_line above, but keep defensive:
                 continue
 
-            # Validate that all 4 core fields are present (repo optional)
+            # Validation : 4 champs requis (repo optionnel)
             if not all(x != "" for x in (rule_type, key, value, drop_val)):
                 invalid_rows.append(
                     (policy_name, idx + 2, "require rule_type, key, value, drop (repo optional)")
                 )
                 continue
 
-            # Build the rule (NO semantics for 'drop'; required only)
+            # Construction de la règle (on CONSERVE 'drop' tel quel)
             rule: Dict[str, Any] = {
                 "type": rule_type,
                 "key": key,
                 "value": value,
+                "drop": drop_val,  # obligatoire mais sans sémantique côté import
             }
             if repo_mapped:
                 rule["repo"] = repo_mapped
 
             policies[policy_name]["rules"].append(rule)
 
-        # Emit warnings for invalid lines
+        # Warnings lignes invalides
         for pol, rowno, reason in invalid_rows:
             log.warning("invalid rule at row %d for policy=%s: %s", rowno, pol, reason)
 
-        # Yield in name-sorted order for determinism (rules keep Excel order)
+        # Rendement déterministe (règles gardent l'ordre Excel)
         for name in sorted(policies.keys()):
             desired = policies[name]
             log.debug(
@@ -230,24 +215,36 @@ class RoutingPoliciesImporter(BaseImporter):
 
     # ------------------------ Canonical for diff ------------------------ #
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Canonical shape used by the diff engine."""
+        """Canonical shape used by the diff engine (alignée sur l’API V1)."""
         return {
             "name": desired_row.get("name", ""),
             "catch_all": desired_row.get("catch_all") or "",
-            "rules": [self._canon_rule(r) for r in (desired_row.get("rules") or [])],
+            "routing_criteria": [self._canon_rule(r) for r in (desired_row.get("rules") or [])],
         }
 
     def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Canonicalize an existing object from Director API."""
         if not existing_obj:
             return None
-        pol = existing_obj.get("policy") or {}
-        rules = pol.get("rules") or existing_obj.get("rules") or []
-        catch = pol.get("catch_all") or existing_obj.get("catch_all") or ""
+
+        # L’API peut répondre avec des champs à la racine ou sous 'policy'
+        catch = (
+            existing_obj.get("catch_all")
+            or (existing_obj.get("policy") or {}).get("catch_all")
+            or ""
+        )
+        criteria = (
+            existing_obj.get("routing_criteria")
+            or (existing_obj.get("policy") or {}).get("routing_criteria")
+            or existing_obj.get("rules")
+            or (existing_obj.get("policy") or {}).get("rules")
+            or []
+        )
+
         return {
             "name": _norm_str(existing_obj.get("name") or existing_obj.get("policy_name")),
             "catch_all": _norm_str(catch),
-            "rules": [self._canon_rule_from_api(rr) for rr in rules],
+            "routing_criteria": [self._canon_rule_from_api(rr) for rr in criteria],
         }
 
     # ------------------------- Director API I/O ------------------------- #
@@ -295,22 +292,29 @@ class RoutingPoliciesImporter(BaseImporter):
 
     # --------------------------- Build payloads ------------------------- #
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        """Payload API V1-compat: catch_all & routing_criteria à la racine."""
+        payload = {
             "policy_name": desired_row["name"],
-            "active": True,  # 'active' column from XLSX is intentionally ignored
-            "policy": {
-                "catch_all": desired_row.get("catch_all") or "",
-                "rules": [self._rule_to_api(r) for r in (desired_row.get("rules") or [])],
-            },
+            "active": True,  # 'active' du XLSX est ignoré fonctionnellement
+            "catch_all": desired_row.get("catch_all") or "",
+            "routing_criteria": [self._rule_to_api(r) for r in (desired_row.get("rules") or [])],
         }
+        log.debug("apply: payload.create=%s", payload)
+        return payload
 
     def build_payload_update(
         self,
         desired_row: Dict[str, Any],
         existing_obj: Dict[str, Any],
     ) -> Dict[str, Any]:
-        # Same shape as create; API identifies target by URL id
-        return self.build_payload_create(desired_row)
+        payload = {
+            "policy_name": desired_row["name"],
+            "active": True,
+            "catch_all": desired_row.get("catch_all") or "",
+            "routing_criteria": [self._rule_to_api(r) for r in (desired_row.get("rules") or [])],
+        }
+        log.debug("apply: payload.update=%s", payload)
+        return payload
 
     # ----------------------------- Apply ops ---------------------------- #
     def apply(
@@ -331,8 +335,7 @@ class RoutingPoliciesImporter(BaseImporter):
 
         log.info("apply: op=%s policy=%s [node=%s]", getattr(decision, "op", "?"), pol_name, node_t)
 
-        # Compute required repos for SKIP decision:
-        #   catch_all (if non-empty) + each non-empty rule.repo (no 'drop' semantics).
+        # Repos à vérifier : catch_all + repos explicites des règles
         missing = self._missing_repos(node.id, self._repos_to_check(desired))
         if missing:
             miss_sorted = sorted(missing)
@@ -345,13 +348,11 @@ class RoutingPoliciesImporter(BaseImporter):
         try:
             if decision.op == "CREATE":
                 payload = self.build_payload_create(desired)
-                log.debug("apply: payload.create=%s", payload)
                 res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
                 return self._monitor_result(client, node, res, "create")
 
             if decision.op == "UPDATE" and existing_id:
                 payload = self.build_payload_update(desired, {"id": existing_id})
-                log.debug("apply: payload.update=%s", payload)
                 res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
                 return self._monitor_result(client, node, res, "update")
 
@@ -366,20 +367,13 @@ class RoutingPoliciesImporter(BaseImporter):
     def _select_sheet(self, sheets: Dict[str, pd.DataFrame]) -> str:
         for name in self.sheet_names:
             if name in sheets:
-                # If both exist, choose the first and warn once.
                 if all(n in sheets for n in self.sheet_names) and name != self.sheet_names[0]:
-                    log.warning(
-                        "Both 'RoutingPolicy' and 'RP' sheets were found; using '%s'.",
-                        name
-                    )
+                    log.warning("Both 'RoutingPolicy' and 'RP' sheets were found; using '%s'.", name)
                 return name
         raise ValueError("Missing required sheets: RP or RoutingPolicy")
 
     def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
-        """
-        Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet.
-        Case-insensitive column lookup.
-        """
+        """Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet."""
         if "Repo" not in sheets:
             return {}
         df = sheets["Repo"]
@@ -398,18 +392,14 @@ class RoutingPoliciesImporter(BaseImporter):
         return mapping
 
     def _map_repo_if_non_empty(self, repo_name: str) -> str:
-        """
-        Apply repo mapping only when the input name is non-empty; otherwise return ''.
-        """
+        """Apply repo mapping only when the input name is non-empty; otherwise return ''."""
         nm = _norm_str(repo_name)
         if not nm:
             return ""
         return self._repo_map.get(nm, nm)
 
     def _list_repos(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> set:
-        """
-        Return the set of repo names available on a node (for SKIP decision).
-        """
+        """Return the set of repo names available on a node (for SKIP decision)."""
         names: set = set()
         try:
             data = client.list_resource(pool_uuid, node.id, "Repos") or {}
@@ -424,14 +414,12 @@ class RoutingPoliciesImporter(BaseImporter):
 
     @staticmethod
     def _canon_rule(r: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Canonicalize a desired rule.
-        'drop' has no semantics and is not part of the rule object.
-        """
+        """Canonicalize a desired rule (incluant 'drop' tel quel)."""
         out = {
             "type": _norm_str(r.get("type")),
             "key": _norm_str(r.get("key")),
             "value": _norm_str(r.get("value")),
+            "drop": _norm_str(r.get("drop")),
         }
         repo = _norm_str(r.get("repo"))
         if repo:
@@ -440,13 +428,12 @@ class RoutingPoliciesImporter(BaseImporter):
 
     @staticmethod
     def _canon_rule_from_api(rr: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Canonicalize an existing rule from the API.
-        """
+        """Canonicalize an existing rule from the API."""
         out = {
             "type": _norm_str(rr.get("type")),
             "key": _norm_str(rr.get("key")),
             "value": _norm_str(rr.get("value")),
+            "drop": _norm_str(rr.get("drop")),
         }
         repo = _norm_str(rr.get("repo"))
         if repo:
@@ -457,14 +444,16 @@ class RoutingPoliciesImporter(BaseImporter):
     def _rule_to_api(r: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert a desired rule to the API shape.
-        As per spec, 'drop' has no semantics here; rules always carry type/key/value,
-        and include 'repo' only when present.
+        'drop' est requis mais sans sémantique côté import ; 'repo' optionnel.
         """
         out = {
             "type": _norm_str(r.get("type")) or "KeyPresent",
             "key": _norm_str(r.get("key")),
-            "value": _norm_str(r.get("value")),
+            "drop": _norm_str(r.get("drop")),   # valeur telle que dans l’Excel
         }
+        val = _norm_str(r.get("value"))
+        if val:
+            out["value"] = val
         repo = _norm_str(r.get("repo"))
         if repo:
             out["repo"] = repo
@@ -472,8 +461,7 @@ class RoutingPoliciesImporter(BaseImporter):
 
     def _repos_to_check(self, desired: Dict[str, Any]) -> List[str]:
         """
-        Compute the ordered list of repos to verify on the node for SKIP decision:
-          catch_all (if non-empty) + all non-empty rule.repo values.
+        Repos à vérifier : catch_all (si non vide) + tous les rule.repo non vides.
         """
         repos: List[str] = []
         catch = _norm_str(desired.get("catch_all"))
@@ -484,7 +472,7 @@ class RoutingPoliciesImporter(BaseImporter):
             if repo:
                 repos.append(repo)
 
-        # Preserve order but make unique
+        # Ordre préservé + dédup
         out, seen = [], set()
         for r in repos:
             if r not in seen:
@@ -499,14 +487,12 @@ class RoutingPoliciesImporter(BaseImporter):
 
     @staticmethod
     def _monitor_result(
-        client: DirectorClient,  # noqa: ARG002 (kept for parity with Repos importer)
+        client: DirectorClient,  # noqa: ARG002 (parité avec Repos importer)
         node: NodeRef,           # noqa: ARG002
         res: Dict[str, Any],
         action: str,             # noqa: ARG002
     ) -> Dict[str, Any]:
-        """
-        Normalize async monitor result (kept minimal and consistent).
-        """
+        """Normalize async monitor result (kept minimal and consistent)."""
         status = "Success"
         mon_ok = None
         branch = None

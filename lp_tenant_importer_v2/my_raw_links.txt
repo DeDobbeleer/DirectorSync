@@ -49,3 +49,16 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/resolvers.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/resource_profiles.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/validators.py
+
+
+
+#Migration raw
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/main.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/repos.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/routing_policies.py
+
+
+#Text1
+j'ai deja migré Repos et on est occupé pour routing_policies
+pour l'intégration de outing_policies et les autres élément il me semble que dans main.py
+le bloc UX sera toujours le même avec quelques paramêtre, peux tu m'aider à simple ce code pour que l'intégration des modules soit plus simple

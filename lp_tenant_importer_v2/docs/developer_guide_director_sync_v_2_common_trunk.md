@@ -359,6 +359,235 @@ verify:
    * `apply(...)` → call `DirectorClient.create_resource`/`update_resource`
 3. **Tests** for NOOP/CREATE/UPDATE, validation failures, and API error propagation.
 
+Parfait. Voici une **mise à jour du document développeur** pour couvrir **Routing Policies** — en **anglais**, dans le même style que la section Repos. Tu peux coller ces blocs dans ton fichier `developer_guide_director_sync_v_2_common_trunk.md` (les numéros de sections supposent l’ajout après la section “Repos”). 
+
+---
+
+## 7. Module Reference — Routing Policies
+
+The **Routing Policies** importer follows the same profile-driven workflow as Repos. It reads the `RoutingPolicy` sheet from the workbook, groups rows per policy, validates referenced repositories, and applies changes via Director’s `configapi` (with `monitorapi` polling when asynchronous).
+
+### 7.1 Profile — Defaults (embedded)
+
+```yaml
+resource: "RoutingPolicy"
+
+api:
+  resource: "RoutingPolicies"
+  methods:
+    get:
+      list_key_candidates: ["data", "routing_policies", "items"]
+    post:
+      whitelist: ["policy_name", "routing_criteria", "catch_all", "active"]
+    put:
+      whitelist: ["id", "routing_criteria", "catch_all", "active"]
+
+xlsx:
+  sheet: "RoutingPolicy"
+  columns:
+    cleaned_policy_name:
+      required: true
+      aliases: ["policy_name", "original_policy_name"]
+      normalize: { strip: true }
+    active:
+      required: false
+      default: "true"
+      normalize: { strip: true, to_lower: true }  # "true"/"false"
+    catch_all:
+      required: false
+      default: ""
+      normalize: { strip: true }                  # repo *name* in XLSX
+    rule_type:
+      required: false
+      split_on: ["|", ","]
+      normalize: { trim_each: true }
+    key:
+      required: false
+      split_on: ["|", ","]
+      normalize: { trim_each: true }
+    value:
+      required: false
+      split_on: ["|", ","]
+      normalize: { trim_each: true }
+    repo:
+      required: false
+      split_on: ["|", ","]
+      normalize: { trim_each: true }              # repo *name* in XLSX
+    drop:
+      required: false
+      split_on: ["|", ","]
+      normalize: { trim_each: true }              # e.g., "store"
+
+mapping:
+  # Build API payloads only with documented fields
+  api_fields:
+    post: ["policy_name", "routing_criteria", "catch_all", "active"]
+    put:  ["id", "routing_criteria", "catch_all", "active"]
+
+  builders:
+    policy_name:
+      from: "cleaned_policy_name"
+      op: "copy"
+
+    # Resolve catch_all repo *name* to repo *id* (per-node cache)
+    catch_all:
+      from: "catch_all"
+      op: "lookup"
+      lookup:
+        resource: "Repos"
+        source_key: "name"
+        target_key: "id"
+        cache: "per-node"
+        required: false
+
+    # Zip criteria columns into list-of-dicts and resolve repo names → ids
+    routing_criteria:
+      from: ["rule_type", "key", "value", "repo", "drop"]
+      op: "zip_list_of_dict"
+      keys: ["type", "key", "value", "repo", "drop"]
+      post:
+        - op: "lookup_on_key"
+          key: "repo"
+          lookup:
+            resource: "Repos"
+            source_key: "name"
+            target_key: "id"
+            cache: "per-node"
+            required: true
+
+compare:
+  eq_fields: ["catch_all", "active"]
+  list_dict_unordered:
+    routing_criteria:
+      key_fields: ["type", "key", "value", "repo"]
+      value_fields: ["drop"]
+
+verify:
+  referenced_repos:
+    enabled: true
+    # Leveraged implicitly by lookups; if any repo name can’t be resolved
+    # the row is SKIPPED with a clear error message.
+```
+
+**Notes**
+
+* A policy is formed by **grouping rows** with the same `cleaned_policy_name`. The group may have zero or many criteria; an empty criteria list is valid.
+* **Repo references** (both in `catch_all` and in each criterion) are specified by **name** in Excel and resolved to **IDs** via per-node lookups before POST/PUT.
+* `active` is treated as a string in parsing and coerced to a boolean-compatible string or API-preferred shape by the builder (profile option keeps strings uniform unless the API requires actual booleans).
+
+### 7.2 XLSX → API mapping
+
+| XLSX column / group key                          | Transform                      | API field / shape                   |                                                                   |
+| ------------------------------------------------ | ------------------------------ | ----------------------------------- | ----------------------------------------------------------------- |
+| `cleaned_policy_name`                            | `strip()`                      | `data.policy_name` (string)         |                                                                   |
+| `active`                                         | `strip().lower()` → `"true"    | "false"`                            | `data.active` (bool/string accepted by API)                       |
+| `catch_all` (repo name)                          | `strip()` → **lookup repo id** | `data.catch_all` (repo id or empty) |                                                                   |
+| `rule_type`,`key`,`value`,`repo`,`drop` (zipped) | split on `                     | `/`,` → trim → **lookup repo id**   | `data.routing_criteria[*]` with keys `{type,key,value,repo,drop}` |
+
+### 7.3 Equality (NOOP vs UPDATE)
+
+* Scalar: `catch_all`, `active`.
+* List-of-dicts: `routing_criteria` compared **order-insensitively**, matching items by `{type, key, value, repo}` and checking `drop`.
+  → Any difference triggers **UPDATE**; exact match leads to **NOOP**.
+
+### 7.4 Pre-flight verification
+
+* **Referenced repositories exist**: name→id lookups are **required** for criteria repos; if any fails, the policy is **SKIPPED** with a helpful error in the result table.
+* Optional: ensure `rule_type`, `drop` values are within known enums for your deployment; violations become validation errors.
+
+### 7.5 Payload examples (CREATE)
+
+**Minimal (no criteria, only catch_all):**
+
+```json
+{
+  "data": {
+    "policy_name": "RP_Default",
+    "active": true,
+    "catch_all": "68d249955cb7b6fa6ec694cb",
+    "routing_criteria": []
+  }
+}
+```
+
+**With multiple criteria:**
+
+```json
+{
+  "data": {
+    "policy_name": "RP_System",
+    "active": true,
+    "catch_all": "68d249955cb7b6fa6ec694cb",
+    "routing_criteria": [
+      { "type": "KeyPresent", "key": "deviceVendor", "value": "",         "repo": "68d249955cb7b6fa6ec694cb", "drop": "store" },
+      { "type": "KeyPresentValueMatches", "key": "severity", "value": "5", "repo": "1a2b3c4d5e6f7g8h9i0j1k2l",    "drop": "store" }
+    ]
+  }
+}
+```
+
+> If the POST/PUT response contains a `monitorapi/.../orders/{id}` URL, the importer will poll it until `success=true/false`. The final row `status` is **derived from `monitor_ok`** (✓/✗), ensuring no “false Success”.
+
+### 7.6 Error handling
+
+* Missing sheet/columns → validation error listing missing names.
+* Unresolvable repository names (catch_all or criteria) → **SKIP** with a clear message.
+* HTTP 4xx/5xx → surfaced with code + short message; payload snippets redacted.
+* Monitor failure (`success=false`) → row `status=Failed`, `monitor_ok=✗`, and a concise error string in the `error` column.
+
+---
+
+## 8. CLI Usage (unchanged from v1)
+
+Examples:
+
+```bash
+# Repos (as before)
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ./tenants.yml \
+  --xlsx ./samples/core_config.xlsx \
+  import-repos --format table
+```
+
+```bash
+# Routing Policies
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ./tenants.yml \
+  --xlsx ./samples/core_config.xlsx \
+  import-routing-policies --format table
+```
+
+Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`. As with Repos, the final `status` column honors `monitor_ok` when present.
+
+---
+
+## Appendix D — Routing Policies Profile (Override Example)
+
+> Example YAML overriding a subset of defaults (e.g., custom sheet name or enum constraints). Unspecified keys inherit the built-ins.
+
+```yaml
+# file: resources/routing_policies.yml
+resource: "RoutingPolicy"
+
+xlsx:
+  sheet: "RP"                 # use a different sheet name
+  columns:
+    drop:
+      split_on: ["|"]
+      normalize: { trim_each: true }
+      validate:
+        one_of: ["store", "drop"]
+
+compare:
+  # Only compare criteria (ignore 'active' if controlled elsewhere)
+  eq_fields: ["catch_all"]
+  list_dict_unordered:
+    routing_criteria:
+      key_fields: ["type", "key", "value", "repo"]
+      value_fields: ["drop"]
+
 ---
 
 ## 8. CLI Usage (unchanged from v1)

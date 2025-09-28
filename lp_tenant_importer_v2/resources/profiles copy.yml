@@ -82,82 +82,105 @@ profiles:
       stringify_payload_values: true
       warn_on_unknown_columns: true
 
-######### RoutingPolicies #####################################################
-RoutingPolicy:
-  resource: "RoutingPolicies"
+######### RoutingPolicy ##############################################################
+  RoutingPolicy:
+    resource: "RoutingPolicy"
 
-  api:
-    resource: "RoutingPolicies"
-    methods:
-      get:
-        list_key_candidates: ["data", "routing_policies", "items"]
-      post:
-        whitelist: ["policy_name", "routing_criteria", "catch_all", "active"]
-      put:
-        whitelist: ["id", "routing_criteria", "catch_all", "active"]
+    api:
+      resource: "RoutingPolicy"
+      methods:
+        get:
+          list_key_candidates: ["data", "routing_policies"]
+        post:
+          whitelist: ["policy_name", "rules", "catch_all", "active"]
+        put:
+          whitelist: ["id", "rules", "catch_all", "active"]
 
-  xlsx:
-    sheet: "RoutingPolicy"
-    columns:
-      cleaned_policy_name: { required: true,  normalize: { strip: true } }
-      active:              { required: false, default: "true" }
-      catch_all:           { required: true,  normalize: { strip: true } }
-      rule_type:           { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
-      key:                 { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
-      value:               { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
-      repo:                { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
-      drop:                { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
+    xlsx:
+      sheet: "RoutingPolicy"
+      columns:
+        policy_name:   { required: true,  normalize: { strip: true } }
+        active:        { required: false, default: "true" }
+        catch_all:     { required: false, default: "false" }
+        rule_type:     { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        key:           { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        value:         { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        repo_name:     { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        drop:          { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
 
-  mapping:
-    api_fields:
-      post: ["policy_name", "routing_criteria", "catch_all", "active"]
-      put:  ["id", "routing_criteria", "catch_all", "active"]
+    mapping:
+      api_fields:
+        post: ["policy_name", "rules", "catch_all", "active"]
+        put:  ["id", "rules", "catch_all", "active"]
+      fields:
+        policy_name: { from: "policy_name", op: "copy" }
+        catch_all:   { from: "catch_all",   op: "copy" }
+        active:      { from: "active",      op: "copy" }
+        rules:
+          from: ["rule_type", "key", "value", "repo_name", "drop"]
+          op: "zip_list_of_dict"
+          keys: ["rule_type", "key", "value", "repo_id", "drop"]
+          lookup:
+            resource: "Repos"      # repo_name -> repo_id
+            source_key: "repo_name"
+            target_key: "id"
+            cache: "per-node"
+            required: true
 
-    fields:
-      policy_name:
-        from: "cleaned_policy_name"
-        op: "copy"
+    compare:
+      eq_fields: ["catch_all", "active"]
+      list_dict_unordered:
+        rules: { key_fields: ["rule_type", "key", "value", "repo_id"], value_fields: ["drop"] }
+      ignore_fields: []
 
-      active:
-        from: "active"
-        op: "copy"
+    verify:
+      - name: "repos_exist"
+        using_subresource: ""
+        expect: "repo_ids"
+        on_missing: "skip"
 
-      # Convert catch_all repo name -> repo id (consistent with criteria)
-      catch_all:
-        from: "catch_all"
-        op: "lookup"
-        lookup:
-          resource: "Repos"
-          source_key: "name"
-          target_key: "id"
-          cache: "per-node"
-          required: true
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true
 
-      # Build routing_criteria from multi-line columns and lookup each repo
-      routing_criteria:
-        from: ["rule_type", "key", "value", "repo", "drop"]
-        op: "zip_list_of_dict"
-        keys: ["type", "key", "value", "repo", "drop"]
-        lookup:
-          resource: "Repos"          # repo name -> id
-          source_key: "repo"         # column in XLSX
-          target_key: "id"
-          into_key:  "repo"          # replace 'repo' with id
-          cache: "per-node"
-          required: false            # allow empty criteria rows
+  NormalizationPolicy:
+    resource: "NormalizationPolicy"
 
-  compare:
-    eq_fields: ["active", "catch_all"]
-    list_dict_unordered:
-      routing_criteria:
-        key_fields:   ["type", "key", "value", "repo"]
-        value_fields: ["drop"]
-    ignore_fields: []
+    api:
+      resource: "NormalizationPolicy"
+      methods:
+        get:
+          list_key_candidates: ["data", "normalization_policies"]
+        post:
+          whitelist: ["policy_name", "normalization_packages", "compiled_normalizer"]
+        put:
+          whitelist: ["id", "normalization_packages", "compiled_normalizer"]
 
-  verify: []
-  options:
-    stringify_payload_values: true
-    warn_on_unknown_columns: true
+    xlsx:
+      sheet: "NormalizationPolicy"
+      columns:
+        policy_name:            { required: true,  normalize: { strip: true } }
+        normalization_packages: { required: true,  split_on: ["|", ","], normalize: { trim_each: true } }
+        compiled_normalizer:    { required: false, split_on: ["|", ","], normalize: { trim_each: true } }
+
+    mapping:
+      api_fields:
+        post: ["policy_name", "normalization_packages", "compiled_normalizer"]
+        put:  ["id", "normalization_packages", "compiled_normalizer"]
+      fields:
+        policy_name:            { from: "policy_name",            op: "copy" }
+        normalization_packages: { from: "normalization_packages", op: "copy" }
+        compiled_normalizer:    { from: "compiled_normalizer",    op: "copy" }
+
+    compare:
+      eq_fields: ["normalization_packages", "compiled_normalizer"]
+      ignore_fields: []
+
+    verify: []
+
+    options:
+      stringify_payload_values: true
+      warn_on_unknown_columns: true
 
 
 ######### ProcessingPolicy ############################################################

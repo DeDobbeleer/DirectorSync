@@ -31,10 +31,12 @@ class EnrichmentPoliciesImporter(BaseImporter):
 
     Enforcements / assumptions (aligned with your platform):
       - Each *specification* MUST contain `source` and at least one `criteria` object.
-      - Your API requires *at least one rule* per specification → we *skip* when a spec has no rules.
+      - Your platform enforces *at least one rule* per specification → if ANY spec has empty rules
+        we SKIP the whole policy (Excel must be fixed).
       - We aggregate rows by **source** (V1 behavior): one `specifications[]` entry per distinct source.
       - Diff is done on a canonical subset (order-insensitive for rules/criteria).
-      - Enrichment sources inventory uses ONLY `GET /configapi/{pool}/{node}/EnrichmentSource` and matches on `source_name` exactly.
+      - Enrichment sources inventory uses ONLY `GET /configapi/{pool}/{node}/EnrichmentSource` and
+        matches on `source_name` exactly (case-sensitive).
 
     XLSX sheets required: EnrichmentPolicy, EnrichmentRules, EnrichmentCriteria.
     """
@@ -120,7 +122,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
                 )
             crit_by_key.setdefault(k, []).append(cc)
 
-        # Aggregate by policy_name → one desired row per policy
+        # Aggregate by policy_name → one desired row per policy (1 spec per SOURCE)
         desired_by_policy: Dict[str, Dict[str, Any]] = {}
         for policy_name, grp in ep.groupby(ep["policy_name"].map(lambda v: str(v).strip())):
             # 1) group rows for this policy by SOURCE (not spec_index)
@@ -151,7 +153,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
                         c = json.dumps(canon_fn(it), sort_keys=True)
                         if c not in seen:
                             seen.add(c)
-                            out.append(it)
+                            out.append(canon_fn(it))  # store canonical form directly
                     return out
 
                 rules_uniq = _uniq(coll["rules"], self._canon_rule)
@@ -162,8 +164,6 @@ class EnrichmentPoliciesImporter(BaseImporter):
                         f"EnrichmentPolicy: criteria required for policy='{policy_name}' source='{src}'"
                     )
 
-                # NOTE: your platform enforces at least one rule → do NOT drop empty here;
-                # we let apply() decide to SKIP the whole policy if any spec has no rules.
                 specs.append({
                     "source": src,
                     "rules": rules_uniq,
@@ -264,6 +264,22 @@ class EnrichmentPoliciesImporter(BaseImporter):
         return (len(missing) == 0), missing
 
     # ---------------------------------------------------------------------
+    # Payload builders
+    # ---------------------------------------------------------------------
+    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {
+            "name": desired_row["name"],
+            "specifications": desired_row["specifications"],
+        }
+        if desired_row.get("description"):
+            payload["description"] = desired_row["description"]
+        return payload
+
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+        # PUT accepts the same body shape as POST
+        return self.build_payload_create(desired_row)
+
+    # ---------------------------------------------------------------------
     # Apply
     # ---------------------------------------------------------------------
     def apply(
@@ -276,14 +292,14 @@ class EnrichmentPoliciesImporter(BaseImporter):
     ) -> Dict[str, Any]:
         desired = decision.desired or {}
 
-        # Pre-flight source validation (strict) — if a source is missing on the node, we SKIP, no override
+        # Preflight 1: strict source validation — if a source is missing on the node, we SKIP
         ok, missing = self._ensure_sources(client, pool_uuid, node, desired)
         if not ok:
             msg = f"Missing enrichment sources: {', '.join(missing)}"
             log.error("%s — pool=%s node=%s policy=%s", msg, pool_uuid, node.name, desired.get("name"))
             return {"status": "Skipped", "error": msg}
 
-        # Additional strict check: every spec must have ≥1 rule (platform behavior)
+        # Preflight 2: every spec must have ≥1 rule (platform behavior → SKIP whole policy otherwise)
         empty_rule_sources = [s.get("source") for s in (desired.get("specifications") or []) if not (s.get("rules") or [])]
         if empty_rule_sources:
             msg = (
@@ -293,35 +309,53 @@ class EnrichmentPoliciesImporter(BaseImporter):
             return {"status": "Skipped", "error": msg}
 
         resource = "EnrichmentPolicy"
-        if decision.op == "CREATE":
-            payload = self.build_payload_create(desired)
-            path = client.configapi(pool_uuid, node.id, resource)
-            resp = client.post_json(path, {"data": payload})
-        elif decision.op == "UPDATE":
-            payload = self.build_payload_update(desired, decision.existing or {})
-            if not existing_id:
-                # Try to recover the id (race/first-run) — else fallback to create
-                listing = client.get_json(client.configapi(pool_uuid, node.id, resource)) or []
-                if isinstance(listing, dict) and "data" in listing:
-                    listing = listing.get("data") or []
-                if isinstance(listing, list):
-                    for it in listing:
-                        if str(it.get("name") or "").strip() == desired.get("name"):
-                            existing_id = it.get("id")
-                            break
-            if not existing_id:
+
+        # Helper to interpret API responses when no monitor is provided
+        def _result_from_response(resp: Dict[str, Any] | None) -> Tuple[bool, Dict[str, Any]]:
+            if not isinstance(resp, dict):
+                return False, {"message": "empty or non-dict response"}
+            status = str(resp.get("status") or "").strip().lower()
+            message = resp.get("message") or resp.get("error")
+            if status in {"ok", "success", "completed"}:
+                return True, {"status": status}
+            # Some endpoints return non-empty data but without explicit status
+            if not status and not message:
+                return True, {"status": "unknown"}
+            return False, {"status": status or "error", "message": message or json.dumps(resp)[:500]}
+
+        try:
+            if decision.op == "CREATE":
+                payload = self.build_payload_create(desired)
                 path = client.configapi(pool_uuid, node.id, resource)
                 resp = client.post_json(path, {"data": payload})
+            elif decision.op == "UPDATE":
+                payload = self.build_payload_update(desired, decision.existing or {})
+                if not existing_id:
+                    # Try to recover the id (race/first-run) — else fallback to create
+                    listing = client.get_json(client.configapi(pool_uuid, node.id, resource)) or []
+                    if isinstance(listing, dict) and "data" in listing:
+                        listing = listing.get("data") or []
+                    if isinstance(listing, list):
+                        for it in listing:
+                            if str(it.get("name") or "").strip() == desired.get("name"):
+                                existing_id = it.get("id")
+                                break
+                if not existing_id:
+                    path = client.configapi(pool_uuid, node.id, resource)
+                    resp = client.post_json(path, {"data": payload})
+                else:
+                    path = client.configapi(pool_uuid, node.id, f"{resource}/{existing_id}")
+                    resp = client.put_json(path, {"data": payload})
             else:
-                path = client.configapi(pool_uuid, node.id, f"{resource}/{existing_id}")
-                resp = client.put_json(path, {"data": payload})
-        else:
-            # NOOP/SKIP should not call apply
-            return {"status": "Success", "monitor_ok": True}
+                # NOOP/SKIP should not call apply
+                return {"status": "Success", "monitor_ok": True}
+        except Exception as exc:
+            log.error("HTTP error on %s %s: %s", decision.op, resource, exc)
+            return {"status": "Failed", "error": str(exc)}
 
-        # Monitoring: prefer job id, then monitor URL, else infer success from status
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        monitor_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
+        # Monitoring: prefer job id, then monitor URL, else infer success from status/message
+        job_id = getattr(client, "_extract_job_id", lambda r: None)(resp)
+        monitor_path = getattr(client, "_extract_monitor_path", lambda r: None)(resp)
         mon_ok = True
         last: Dict[str, Any] = {}
         branch = "none"
@@ -332,8 +366,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
             branch = "url"
             mon_ok, last = client.monitor_job_url(monitor_path)
         else:
-            status = str((resp or {}).get("status") or "").lower()
-            mon_ok = status in {"ok", "success", "completed", ""}
+            mon_ok, last = _result_from_response(resp)
 
         result: Dict[str, Any] = {"status": "Success" if mon_ok else "Failed", "monitor_ok": mon_ok, "monitor_branch": branch}
         if not mon_ok:

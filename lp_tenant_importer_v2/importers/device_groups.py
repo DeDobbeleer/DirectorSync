@@ -195,23 +195,28 @@ class DeviceGroupsImporter(BaseImporter):
     ) -> Dict[str, Any]:
         resource = "DeviceGroups"
 
+        # --- CREATE ---
         if decision.op == "CREATE":
             path = client.configapi(pool_uuid, node.id, resource)
             payload = self.build_payload_create(decision.desired or {})
-            log.debug("DeviceGroups.CREATE %s -> %s", payload.get("name"), path)
-            res = client.post_json(path, payload) or {}
+            # IMPORTANT: wrap under "data"
+            res = client.post_json(path, {"data": payload}) or {}
             out = self._monitor_if_any(client, pool_uuid, node, res)
             return out
 
+        # --- UPDATE ---
         if decision.op == "UPDATE":
             if not existing_id:
                 raise RuntimeError("UPDATE requested but no existing_id provided")
             path = client.configapi(pool_uuid, node.id, f"{resource}/{existing_id}")
             payload = self.build_payload_update(decision.desired or {}, decision.existing or {})
-            log.debug("DeviceGroups.UPDATE %s -> %s", decision.desired.get("name"), path)
-            res = client.put_json(path, payload) or {}
+            # IMPORTANT: include id + wrap under "data"
+            body = {"data": {"id": existing_id, **payload}}
+            res = client.put_json(path, body) or {}
             out = self._monitor_if_any(client, pool_uuid, node, res)
             return out
+
+
 
         # BaseImporter won't call apply() for NOOP/SKIP in non-dry runs,
         # but we keep a defensive fallback.

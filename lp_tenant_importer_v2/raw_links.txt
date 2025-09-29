@@ -43,6 +43,7 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/main.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/requirements.txt
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/.env.example
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/.~lock.core_config.xlsx#
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/core_config-EP-Corr.xlsx
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/core_config.xlsx
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/esait_config.xlsx
@@ -71,7 +72,6 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/director_client.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/logging_utils.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/Anlalyse-NP-migration-v1-to-v2.md
-https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/DirectorSync_v2_Framework_Deep_Dive copy.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/DirectorSync_v2_Framework_Deep_Dive.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/auto-py-exe.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/developer_guide_director_sync_v_2_common_trunk.md
@@ -81,6 +81,7 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/__init__.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/device_groups.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/enrichment_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/normalization_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/processing_policies.py

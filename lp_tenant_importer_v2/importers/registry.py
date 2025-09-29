@@ -98,6 +98,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="DeviceGroupsImporter",
         element_key="device_groups",
     ),
+    # Devices
+    "devices": ImporterSpec(
+        key="devices",
+        cli="import-devices",
+        help="Import devices",
+        module="lp_tenant_importer_v2.importers.devices",
+        class_name="DevicesImporter",
+        element_key="devices",
+    ),
 
 }
 

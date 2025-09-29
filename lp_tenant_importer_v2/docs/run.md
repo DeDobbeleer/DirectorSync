@@ -23,7 +23,7 @@ python -m lp_tenant_importer_v2.main \
 - import-enrichment-policies
 - import-processing-policies
 - import-device-groups
-- 
+- import-devices
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
 export PYTHONPATH=..
@@ -37,7 +37,7 @@ python -m lp_tenant_importer_v2.main \
   --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
-  import-device-groups
+  import-devices
 ```
 
 ### Vérif rapide

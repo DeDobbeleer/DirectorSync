@@ -1,6 +1,3 @@
-# `lp_tenant_importer_v2/importers/syslog_collectors.py`
-
-```python
 from __future__ import annotations
 
 """
@@ -18,8 +15,8 @@ Stable comparison subset (order-insensitive for lists):
 Notes
 -----
 • We resolve device_id by device_name via the per-node "Devices" list.
-• We fetch existing Syslog Collectors by walking Devices → plugins (filter app == "SyslogCollector")
-  and remap device_id → device_name so the diff/report use human-friendly keys.
+• We fetch existing Syslog Collectors and remap device_id → device_name so the
+  diff/report use human-friendly keys.
 • Monitoring is delegated to DirectorClient (URL/job-id branches).
 """
 
@@ -42,7 +39,6 @@ def _to_str(v: Any) -> str:
     if v is None:
         return ""
     try:
-        # pd.isna handles NaN/NaT etc
         if pd.isna(v):  # type: ignore[attr-defined]
             return ""
     except Exception:  # pragma: no cover — defensive
@@ -237,37 +233,18 @@ class SyslogCollectorsImporter(BaseImporter):
         if not existing_obj:
             return None
         # Extract possibly nested fields; normalize lists and strings
-        # Hosts can appear as 'hostname', 'hostnames', 'ip', or 'ips'
-        hosts = (
-            self._g(existing_obj, "hostname")
-            or self._g(existing_obj, "hostnames")
-            or self._g(existing_obj, "ip")
-            or self._g(existing_obj, "ips")
-            or []
-        )
-        if not isinstance(hosts, list):
-            hosts = [hosts] if _to_str(hosts) else []
-
-        # Proxy IPs may be 'proxy_ip', 'proxy_ips'
-        proxy_ip = self._g(existing_obj, "proxy_ip") or self._g(existing_obj, "proxy_ips") or []
+        proxy_ip = self._g(existing_obj, "proxy_ip") or []
         if not isinstance(proxy_ip, list):
             proxy_ip = [proxy_ip] if _to_str(proxy_ip) else []
-
-        # Proxy condition may be a string, or booleans like uses_proxy/use_as_proxy
-        pc = self._g(existing_obj, "proxy_condition")
-        if not pc:
-            if existing_obj.get("use_as_proxy") is True:
-                pc = "use_as_proxy"
-            elif existing_obj.get("uses_proxy") is True or (proxy_ip and not pc):
-                pc = "uses_proxy"
-            else:
-                pc = None
+        hostname = self._g(existing_obj, "hostname") or []
+        if not isinstance(hostname, list):
+            hostname = [hostname] if _to_str(hostname) else []
 
         return {
-            "proxy_condition": _to_str(pc) or None,
-            "processpolicy": _to_str(self._g(existing_obj, "processpolicy") or self._g(existing_obj, "process_policy") or self._g(existing_obj, "processingpolicy")),
+            "proxy_condition": _to_str(self._g(existing_obj, "proxy_condition")) or None,
+            "processpolicy": _to_str(self._g(existing_obj, "processpolicy")),
             "proxy_ip": sorted([_to_str(x) for x in proxy_ip]),
-            "hostname": sorted([_to_str(x) for x in hosts]),
+            "hostname": sorted([_to_str(x) for x in hostname]),
             "charset": _to_str(self._g(existing_obj, "charset")),
             "parser": _to_str(self._g(existing_obj, "parser")),
         }
@@ -310,60 +287,31 @@ class SyslogCollectorsImporter(BaseImporter):
         log.debug("Device cache built: %d devices [node=%s]", len(id_to_name), node.name)
 
     def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
-        """Discover existing Syslog Collectors by walking **Devices -> plugins**.
-
-        Some Director builds don't expose a list endpoint for `SyslogCollector`.
-        The supported and documented way to *read* collectors is:
-          1) GET Devices (name↔id map)
-          2) For each device: GET Devices/{id}/plugins
-          3) Filter items where app == "SyslogCollector"
-
-        Returns a dict keyed by **device_name** with objects containing at least
-        an `id` (uuid) when available so the pipeline can perform UPDATEs.
-        """
         self._ensure_device_maps(client, pool_uuid, node)
+        data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
 
-        out: Dict[str, Dict[str, Any]] = {}
+        if isinstance(data, list):
+            items = [x for x in data if isinstance(x, dict)]
+        elif isinstance(data, dict):
+            items_any = (
+                data.get("items") or data.get("data") or data.get("collectors") or data.get("results") or []
+            )
+            items = [x for x in items_any if isinstance(x, dict)]
+        else:  # pragma: no cover — defensive
+            items = []
+
         id_to_name = self._dev_id_to_name.get(node.id, {})
+        out: Dict[str, Dict[str, Any]] = {}
 
-        # Build the device list from the map we already have
-        for dev_id, dev_name in id_to_name.items():
-            try:
-                path = DirectorClient.configapi(pool_uuid, node.id, f"Devices/{dev_id}/plugins")
-                data = client.get_json(path) or []
-            except Exception:
-                log.exception("Failed to list plugins for device=%s [node=%s]", dev_name, node.name)
+        for it in items:
+            # Name reports the device_name for user-friendliness
+            dev_id = _to_str(it.get("device_id")) or _to_str(self._g(it, "device_id"))
+            dev_name = id_to_name.get(dev_id) or _to_str(it.get("device_name"))
+            key = dev_name or dev_id or ""
+            if not key:
                 continue
+            out[key] = dict(it)
 
-            # Normalize payload into a list of dicts
-            items: List[Dict[str, Any]]
-            if isinstance(data, list):
-                items = [x for x in data if isinstance(x, dict)]
-            elif isinstance(data, dict):
-                maybe = data.get("plugins") or data.get("items") or data.get("data") or []
-                items = [x for x in (maybe or []) if isinstance(x, dict)]
-            else:  # pragma: no cover
-                items = []
-
-            for it in items:
-                app = _to_str(it.get("app")).lower()
-                if app != "syslogcollector":
-                    continue
-
-                # Try to expose a stable id for UPDATE
-                pid = _to_str(it.get("uuid")) or _to_str(it.get("id"))
-
-                # Pass through the plugin fields; canon_existing() will normalize
-                obj = dict(it)
-                if pid:
-                    obj["id"] = pid
-                obj["device_id"] = dev_id
-                obj["device_name"] = dev_name
-
-                # Some builds expose hosts under different keys; keep raw and let canon map
-                out[dev_name] = obj
-
-        log.debug("Discovered %d syslog collectors via Devices->plugins [node=%s]", len(out), node.name)
         return out
 
     # --------------------------- payload builders ----------------------------
@@ -479,110 +427,3 @@ class SyslogCollectorsImporter(BaseImporter):
         except Exception:  # pragma: no cover — defensive
             log.exception("API error for syslog_collector device=%s [node=%s]", dev_name, node.name)
             raise
-```
-
----
-
-# Add to `lp_tenant_importer_v2/importers/registry.py`
-
-```python
-# +++ append inside _IMPORTERS dict +++
-"syslog_collectors": ImporterSpec(
-    key="syslog_collectors",
-    cli="import-syslog-collectors",
-    help="Import syslog collectors",
-    module="lp_tenant_importer_v2.importers.syslog_collectors",
-    class_name="SyslogCollectorsImporter",
-    element_key="syslog_collectors",
-),
-```
-
-> **Tenants YAML**: ensure you add a global target in `defaults.target` (example):
->
-> ```yaml
-> defaults:
->   target:
->     syslog_collectors: [backends, all_in_one]
-> ```
-
----
-
-# `docs/sc_v2_syslog_collectors_importer_code_docs.md`
-
-```markdown
-# Syslog Collectors Importer (DirectorSync v2)
-
-**Purpose**: Create/update Syslog Collector definitions from Excel, idempotently, with clear reporting. Compatible with Director API 2.7+ via the generic `DirectorClient` (configapi + monitorapi).
-
-## Spreadsheet Contract
-- **Sheet**: `DeviceFetcher`
-- **Row filter**: `app == "SyslogCollector"` (case-insensitive)
-- **Columns**
-  - `device_name` *(required)* — will be resolved to `device_id` per node
-  - `hostname` *(required, multi)* — `"host1|host2"` or comma-separated
-  - `parser` *(required)*
-  - `charset` *(required)*
-  - `proxy_condition` *(optional)* — one of: `use_as_proxy`, `uses_proxy`, *(empty = direct)*
-  - `processpolicy` *(conditional)* — required for `uses_proxy` or direct
-  - `proxy_ip` *(conditional, multi)* — required for `uses_proxy`
-
-## Algorithm (Idempotent)
-1. **Load → Validate**: check sheet/columns; ensure at least one `SyslogCollector` row.
-2. **Desired**: parse rows into canonical dicts, normalize lists & strings.
-3. **Fetch existing (per node)**:
-   - Build `device_name ↔ device_id` maps from `Devices`.
-   - For each device: **GET `Devices/{id}/plugins`**, **filter** items where `app == "SyslogCollector"`.
-   - Keep plugin `uuid`/`id` (when present) so UPDATE is possible.
-4. **Diff / Plan**: compare subset (order-insensitive for lists):
-   `proxy_condition, processpolicy, proxy_ip[], hostname[], charset, parser`.
-5. **Apply**:
-   - **CREATE** → `POST configapi/{pool}/{node}/SyslogCollector` with payload
-   - **UPDATE** → `PUT  configapi/{pool}/{node}/SyslogCollector/{id}` (id from plugin `uuid`/`id`)
-   - Monitor via URL/job-id when hints are present; otherwise treat as sync.
-6. **Report**: same table schema as other importers (`siem | node | name | result | action | status | monitor_ok | monitor_branch | error`).
-
-## Payload Schema
-```json
-{
-  "device_id": "<uuid>",
-  "hostname": ["host1", "host2"],
-  "charset": "UTF-8",
-  "parser": "<parser_name>",
-  "proxy_condition": "use_as_proxy" | "uses_proxy" | null,
-  "processpolicy": null | "<policy_name>",
-  "proxy_ip": ["10.0.0.10", "10.0.0.11"]
-}
-```
-
-## Validation Rules
-- **use_as_proxy**: must NOT provide `processpolicy` or `proxy_ip`; requires `charset`, `parser`.
-- **uses_proxy**: requires `processpolicy` **and** non-empty `proxy_ip`; also `charset`, `parser`.
-- **direct (None)**: requires `processpolicy`, `charset`, `parser`; must NOT provide `proxy_ip`.
-- Unknown `device_name` on a node → **ValidationError** (actionable; check Devices first).
-
-## CLI Examples
-```bash
-# Dry-run
-python -m lp_tenant_importer_v2.main \
-  --tenant core \
-  --tenants-file ./tenants.yml \
-  --xlsx ./samples/core_config.xlsx \
-  --no-verify \
-  --dry-run \
-  import-syslog-collectors
-
-# Apply
-python -m lp_tenant_importer_v2.main \
-  --tenant core \
-  --tenants-file ./tenants.yml \
-  --xlsx ./samples/core_config.xlsx \
-  --no-verify \
-  import-syslog-collectors
-```
-
-## Notes & Extensibility
-- The Director resource segment is defined as `SyslogCollector`. If your Director build uses a different segment, update `RESOURCE` in the importer.
-- If your XLSX includes a `device_id` column in the future, the importer can be trivially extended to prefer it over `device_name`.
-- Error handling is strict at payload build time (surface actionable messages early) and defensive at API time (exceptions bubbled to the top with context).
-```
-

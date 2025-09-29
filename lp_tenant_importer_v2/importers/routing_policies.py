@@ -1,509 +1,478 @@
-# lp_tenant_importer_v2/importers/routing_policies.py
 from __future__ import annotations
 
+"""
+Syslog Collectors importer (DirectorSync v2)
+
+Idempotent algorithm using the common v2 pipeline:
+  load → validate → fetch → diff → plan → apply → report
+
+Spreadsheet contract (sheet "DeviceFetcher"): rows where app == "SyslogCollector".
+Required fields depend on proxy_condition (see validate()).
+
+Stable comparison subset (order-insensitive for lists):
+  proxy_condition, processpolicy, proxy_ip[], hostname[], charset, parser
+
+Notes
+-----
+• We resolve device_id by device_name via the per-node "Devices" list.
+• We fetch existing Syslog Collectors by walking Devices → plugins (filter app == "SyslogCollector")
+  and remap device_id → device_name so the diff/report use human-friendly keys.
+• Monitoring is delegated to DirectorClient (URL/job-id branches).
+"""
+
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 import pandas as pd
 
 from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
-from ..utils.validators import require_columns
+from ..utils.validators import ValidationError
 
 log = logging.getLogger(__name__)
 
-# ------------------------- Low-level helpers ------------------------- #
-_EMPTY_SENTINELS = {"", "nan", "none", "null", "-"}
 
+# ------------------------------- helpers ------------------------------------
 
-def _is_blank(x: Any) -> bool:
-    """Return True if value is considered empty per project conventions."""
-    if x is None:
-        return True
-    if isinstance(x, float) and pd.isna(x):
-        return True
-    s = str(x).strip()
-    return s == "" or s.lower() in _EMPTY_SENTINELS
-
-
-def _norm_str(x: Any) -> str:
-    """Trim string and normalize empties to empty string."""
-    if _is_blank(x):
+def _to_str(v: Any) -> str:
+    """Return a clean string without NaNs/None and with surrounding whitespace stripped."""
+    if v is None:
         return ""
-    return str(x).strip()
+    try:
+        # pd.isna handles NaN/NaT etc
+        if pd.isna(v):  # type: ignore[attr-defined]
+            return ""
+    except Exception:  # pragma: no cover — defensive
+        pass
+    return str(v).strip()
 
 
-def _node_tag(node: NodeRef) -> str:
-    name = getattr(node, "name", None) or getattr(node, "id", "")
-    nid = getattr(node, "id", "")
-    return f"{name}|{nid}"
+def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",")) -> List[str]:
+    """Split multi-valued cells on '|' or ',' and return trimmed parts (empty if none)."""
+    raw = _to_str(cell)
+    if not raw:
+        return []
+    canon = raw
+    for s in seps[1:]:
+        canon = canon.replace(s, seps[0])
+    return [p.strip() for p in canon.split(seps[0]) if p.strip()]
 
 
-# ------------------------ Importer definition ------------------------ #
-class RoutingPoliciesImporter(BaseImporter):
+_ALLOWED_PROXY = {"use_as_proxy", "uses_proxy"}
+
+
+def _norm_proxy_condition(v: Any) -> str | None:
+    s = _to_str(v)
+    if not s:
+        return None
+    low = s.lower()
+    if low in _ALLOWED_PROXY:
+        return low
+    if low in {"none", "no", "direct"}:
+        return None
+    # keep original for clearer error messages
+    return s
+
+
+# ----------------------------- importer --------------------------------------
+
+class SyslogCollectorsImporter(BaseImporter):
+    """Importer for **SyslogCollector** resources.
+
+    Sheet: "DeviceFetcher" (filtered to rows where app == "SyslogCollector").
+
+    Required columns (case/alias tolerant):
+      • device_name
+      • hostname (multi: "a|b|c" or comma-separated)
+      • charset
+      • parser
+      • app (must be "SyslogCollector")
+
+    Conditionally required:
+      • processpolicy (required when proxy_condition ∈ {uses_proxy, None})
+      • proxy_ip (required when proxy_condition == uses_proxy; multi like hostname)
+
+    We compare a stable subset and rely on :class:`BaseImporter` for the pipeline.
     """
-    Routing Policies importer (V2) implementing the final spec:
 
-    - Sheet: first existing among 'RoutingPolicy' or 'RP'.
-    - Required columns (case-insensitive): cleaned_policy_name, catch_all,
-      rule_type, key, value, repo, drop. 'active' column in XLSX is ignored.
-    - Optional 'Repo' sheet: original_repo_name -> cleaned_repo_name,
-      mapping applied ONLY when the input value is non-empty.
+    resource_name: str = "syslog_collectors"
+    sheet_names = ("DeviceFetcher",)
+    required_columns = tuple()  # custom validation below
 
-    Line typing:
-      * Type 1 ("catch-all only"): ALL rule columns empty
-        (rule_type, key, value, repo, drop) -> no rule created for that row.
-      * Type 2 ("catch-all + rules"): if ANY of (rule_type, key, value, drop)
-        is present, row defines a rule. Valid IFF rule_type, key, value, drop
-        are all non-empty. 'repo' is optional.
-        - 'drop' is REQUIRED but has NO semantics in importer logic; it is
-          passed through to the API as-is.
-
-    API payload (create/update):
-      {
-        "policy_name": <name>,
-        "active": true,                 # XLSX 'active' is ignored
-        "catch_all": <mapped_or_empty>,
-        "routing_criteria": [ ... in Excel order ... ]
-      }
-
-    SKIP decision (per policy):
-      repos_to_check = [catch_all if non-empty] + [each rule.repo if non-empty]
-      missing = repos_to_check - repos_available_on_node
-      if missing != ∅ : SKIPPED (warning + explicit 'error' message).
-    """
-
-    # ---- BaseImporter contract ----
-    resource_name = "routing_policies"
-    sheet_names = ("RoutingPolicy", "RP")
-    required_columns = (
-        "cleaned_policy_name",
-        "catch_all",
-        "rule_type",
-        "key",
-        "value",
-        "repo",
-        "drop",  # required to validate a rule; no semantics in importer
+    # Stable subset for diffing (order-insensitive fields must be normalized):
+    compare_keys = (
+        "proxy_condition",
+        "processpolicy",
+        "proxy_ip",
+        "hostname",
+        "charset",
+        "parser",
     )
-    # Diff keys (canonical form aligns with API fields)
-    compare_keys = ("name", "catch_all", "routing_criteria")
 
-    # Director API resource name
-    RESOURCE = "RoutingPolicies"
+    # Director API resource segment (adjust if your Director version differs)
+    RESOURCE = "SyslogCollector"
+    DEVICES_RESOURCE = "Devices"
+
+    # per-node caches: device name↔id
+    _dev_name_to_id: Dict[str, Dict[str, str]]  # node_id -> {name -> id}
+    _dev_id_to_name: Dict[str, Dict[str, str]]  # node_id -> {id -> name}
 
     def __init__(self) -> None:
-        super().__init__()
-        self._active_sheet: Optional[str] = None
-        self._repo_map: Dict[str, str] = {}
-        self._repos_cache: Dict[str, set] = {}  # node.id -> set(repo names)
-        self._first_catch_all: Dict[str, str] = {}  # warn if intra-policy change
+        self._dev_name_to_id = {}
+        self._dev_id_to_name = {}
 
-    # ------------------------------ Validate ------------------------------ #
+    # ---------------------------- validation ---------------------------------
+
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
-        sheet = self._select_sheet(sheets)
-        self._active_sheet = sheet
-        df = sheets[sheet]
+        if "DeviceFetcher" not in sheets:
+            raise ValidationError("Missing required sheet: DeviceFetcher")
+        df = sheets["DeviceFetcher"].copy()
+        cols = {str(c).strip().lower(): str(c) for c in df.columns}
 
-        # Required columns (with optional context)
-        try:
-            require_columns(df, self.required_columns, context=f"sheet '{sheet}'")
-        except TypeError:
-            require_columns(df, self.required_columns)
-
-        # Repo mapping if present
-        self._repo_map = self._build_repo_name_map(sheets)
-        if self._repo_map:
-            log.info("repo-map: loaded %d entries from sheet 'Repo'", len(self._repo_map))
-
-        log.info("routing_policies: using sheet '%s'", sheet)
-        log.debug("routing_policies: columns=%s rows=%d", list(df.columns), len(df.index))
-
-    # --------------------------- Parse desired ---------------------------- #
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
-        """
-        Yield desired policies as dicts:
-          { "name": str, "catch_all": str, "rules": List[Dict[str,Any]] }
-        (NB: we keep 'rules' internally; API conversion to 'routing_criteria'
-         happens in build_payload_* and canon_desired)
-        """
-        sheet = self._active_sheet or self._select_sheet(sheets)
-        df: pd.DataFrame = sheets[sheet]
-        cols = {c.lower(): c for c in df.columns}
-
-        def col(name: str) -> str:
-            return cols.get(name.lower(), name)
-
-        policies: Dict[str, Dict[str, Any]] = {}
-        invalid_rows: List[Tuple[str, int, str]] = []
-
-        for idx, row in df.iterrows():
-            policy_name = _norm_str(row.get(col("cleaned_policy_name")))
-            if not policy_name:
-                continue
-
-            # Init policy (first occurrence)
-            if policy_name not in policies:
-                catch_all_raw = _norm_str(row.get(col("catch_all")))
-                catch_all_mapped = self._map_repo_if_non_empty(catch_all_raw)
-                policies[policy_name] = {
-                    "name": policy_name,
-                    "catch_all": catch_all_mapped,
-                    "rules": [],
-                }
-                self._first_catch_all[policy_name] = catch_all_mapped
-            else:
-                # Warn if catch_all changes (first wins)
-                prev = self._first_catch_all.get(policy_name, "")
-                now = self._map_repo_if_non_empty(_norm_str(row.get(col("catch_all"))))
-                if now and now != prev:
-                    log.warning(
-                        "catch_all changed for policy=%s; first wins (prev=%s, new=%s)",
-                        policy_name, prev, now
-                    )
-
-            # Read rule fields
-            rule_type = _norm_str(row.get(col("rule_type")))
-            key = _norm_str(row.get(col("key")))
-            value = _norm_str(row.get(col("value")))
-            repo_raw = _norm_str(row.get(col("repo")))
-            repo_mapped = self._map_repo_if_non_empty(repo_raw)
-            drop_val = _norm_str(row.get(col("drop")))
-
-            # Type 1: no rule line
-            is_no_rule_line = (
-                rule_type == "" and key == "" and value == "" and repo_raw == "" and drop_val == ""
-            )
-            if is_no_rule_line:
-                continue
-
-            # Type 2: defined line
-            core_present = any(x != "" for x in (rule_type, key, value, drop_val))
-            if not core_present:
-                continue
-
-            # Validation: 4 required fields (repo optional)
-            if not all(x != "" for x in (rule_type, key, value, drop_val)):
-                invalid_rows.append(
-                    (policy_name, idx + 2, "require rule_type, key, value, drop (repo optional)")
-                )
-                continue
-
-            # Build rule (preserve 'drop' as-is, no semantics here)
-            rule: Dict[str, Any] = {
-                "type": rule_type,
-                "key": key,
-                "value": value,
-                "drop": drop_val,
-            }
-            if repo_mapped:
-                rule["repo"] = repo_mapped
-
-            policies[policy_name]["rules"].append(rule)
-
-        # Warnings for invalid lines
-        for pol, rowno, reason in invalid_rows:
-            log.warning("invalid rule at row %d for policy=%s: %s", rowno, pol, reason)
-
-        # Deterministic yield (rules keep Excel order)
-        for name in sorted(policies.keys()):
-            desired = policies[name]
-            log.debug(
-                "parsed policy=%s catch_all=%s rules=%d",
-                name, desired.get("catch_all", ""), len(desired.get("rules") or [])
-            )
-            yield desired
-
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
-        return desired_row["name"]
-
-    # ------------------------ Canonical for diff ------------------------ #
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Canonical shape used by the diff engine (aligned with API fields)."""
-        return {
-            "name": desired_row.get("name", ""),
-            "catch_all": desired_row.get("catch_all") or "",
-            "routing_criteria": [self._canon_rule(r) for r in (desired_row.get("rules") or [])],
-        }
-
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Canonicalize an existing object from Director API."""
-        if not existing_obj:
+        def col(*names: str) -> str | None:
+            for n in names:
+                k = n.strip().lower()
+                if k in cols:
+                    return cols[k]
             return None
 
-        # API may respond with fields at root or under 'policy'
-        catch = (
-            existing_obj.get("catch_all")
-            or (existing_obj.get("policy") or {}).get("catch_all")
-            or ""
-        )
-        criteria = (
-            existing_obj.get("routing_criteria")
-            or (existing_obj.get("policy") or {}).get("routing_criteria")
-            or existing_obj.get("rules")
-            or (existing_obj.get("policy") or {}).get("rules")
+        required = {
+            "device_name": col("device_name", "name"),
+            "hostname": col("hostname", "hostnames"),
+            "charset": col("charset"),
+            "parser": col("parser"),
+            "app": col("app"),
+        }
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise ValidationError(
+                "DeviceFetcher: missing required column(s): " + ", ".join(missing)
+            )
+
+        # Soft validation: ensure at least one row targets SyslogCollector
+        app_col = required["app"]
+        mask = df[app_col].astype(str).str.strip().str.lower() == "syslogcollector"
+        if not mask.any():
+            raise ValidationError(
+                "DeviceFetcher: no rows with app == 'SyslogCollector'"
+            )
+
+    # ------------------------- XLSX → desired rows ---------------------------
+
+    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+        df: pd.DataFrame = sheets["DeviceFetcher"].copy()
+        cols = {str(c).strip().lower(): str(c) for c in df.columns}
+
+        def col(*names: str) -> str | None:
+            for n in names:
+                k = n.strip().lower()
+                if k in cols:
+                    return cols[k]
+            return None
+
+        c_name = col("device_name", "name")
+        c_app = col("app")
+        c_hostname = col("hostname", "hostnames")
+        c_parser = col("parser")
+        c_charset = col("charset")
+        c_pp = col("processpolicy", "process_policy")
+        c_pc = col("proxy_condition")
+        c_pip = col("proxy_ip", "proxy ips", "proxy-ips")
+
+        if not all([c_name, c_app, c_hostname, c_parser, c_charset]):
+            raise ValidationError(
+                "DeviceFetcher: missing one of required columns (device_name, hostname, charset, parser, app)"
+            )
+
+        for _, row in df.iterrows():
+            # filter
+            if _to_str(row[c_app]).lower() != "syslogcollector":
+                continue
+
+            device_name = _to_str(row[c_name])
+            if not device_name:
+                continue
+
+            desired: Dict[str, Any] = {
+                "device_name": device_name,
+                "hostname": _split_multi(row[c_hostname]),
+                "parser": _to_str(row[c_parser]),
+                "charset": _to_str(row[c_charset]),
+                "processpolicy": _to_str(row[c_pp]) if c_pp else "",
+                "proxy_condition": _norm_proxy_condition(row[c_pc]) if c_pc else None,
+                "proxy_ip": _split_multi(row[c_pip]) if c_pip else [],
+            }
+
+            yield desired
+
+    # ------------------------ canonicalization (diff) ------------------------
+
+    @staticmethod
+    def key_fn(desired_row: Dict[str, Any]) -> str:
+        return _to_str(desired_row.get("device_name"))
+
+    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "proxy_condition": desired_row.get("proxy_condition"),
+            "processpolicy": _to_str(desired_row.get("processpolicy")),
+            "proxy_ip": sorted([_to_str(x) for x in desired_row.get("proxy_ip", [])]),
+            "hostname": sorted([_to_str(x) for x in desired_row.get("hostname", [])]),
+            "charset": _to_str(desired_row.get("charset")),
+            "parser": _to_str(desired_row.get("parser")),
+        }
+
+    @staticmethod
+    def _g(obj: Dict[str, Any] | None, key: str) -> Any:
+        if not obj:
+            return None
+        if key in obj:
+            return obj.get(key)
+        data = obj.get("data") if isinstance(obj, dict) else None
+        return (data or {}).get(key)
+
+    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not existing_obj:
+            return None
+        # Extract possibly nested fields; normalize lists and strings
+        # Hosts can appear as 'hostname', 'hostnames', 'ip', or 'ips'
+        hosts = (
+            self._g(existing_obj, "hostname")
+            or self._g(existing_obj, "hostnames")
+            or self._g(existing_obj, "ip")
+            or self._g(existing_obj, "ips")
             or []
         )
+        if not isinstance(hosts, list):
+            hosts = [hosts] if _to_str(hosts) else []
+
+        # Proxy IPs may be 'proxy_ip', 'proxy_ips'
+        proxy_ip = self._g(existing_obj, "proxy_ip") or self._g(existing_obj, "proxy_ips") or []
+        if not isinstance(proxy_ip, list):
+            proxy_ip = [proxy_ip] if _to_str(proxy_ip) else []
+
+        # Proxy condition may be a string, or booleans like uses_proxy/use_as_proxy
+        pc = self._g(existing_obj, "proxy_condition")
+        if not pc:
+            if existing_obj.get("use_as_proxy") is True:
+                pc = "use_as_proxy"
+            elif existing_obj.get("uses_proxy") is True or (proxy_ip and not pc):
+                pc = "uses_proxy"
+            else:
+                pc = None
 
         return {
-            "name": _norm_str(existing_obj.get("name") or existing_obj.get("policy_name")),
-            "catch_all": _norm_str(catch),
-            "routing_criteria": [self._canon_rule_from_api(rr) for rr in criteria],
+            "proxy_condition": _to_str(pc) or None,
+            "processpolicy": _to_str(self._g(existing_obj, "processpolicy") or self._g(existing_obj, "process_policy") or self._g(existing_obj, "processingpolicy")),
+            "proxy_ip": sorted([_to_str(x) for x in proxy_ip]),
+            "hostname": sorted([_to_str(x) for x in hosts]),
+            "charset": _to_str(self._g(existing_obj, "charset")),
+            "parser": _to_str(self._g(existing_obj, "parser")),
         }
 
-    # ------------------------- Director API I/O ------------------------- #
-    def fetch_existing(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Return {policy_name -> existing_obj} for the node.
-        Also fill the repos cache for SKIP decisions.
-        """
-        node_t = _node_tag(node)
-        log.info("fetch_existing: start [node=%s]", node_t)
+    # ----------------------------- read existing -----------------------------
 
-        # Preload repo names present on this node (for SKIP decision)
-        self._repos_cache[node.id] = self._list_repos(client, pool_uuid, node)
-        log.debug("list_repos: %d repos present [node=%s]", len(self._repos_cache[node.id]), node_t)
+    def _ensure_device_maps(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
+        """Populate per-node device name↔id caches."""
+        if node.id in self._dev_name_to_id and node.id in self._dev_id_to_name:
+            return
 
-        data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
-        if isinstance(data, dict):
-            items_any = (
-                data.get("data")
-                or data.get("items")
-                or data.get("results")
-                or data.get("policies")
-                or []
-            )
-            items = [x for x in items_any if isinstance(x, dict)]
-        elif isinstance(data, list):
-            items = [x for x in data if isinstance(x, dict)]
-        else:
-            items = []
+        raw = client.list_resource(pool_uuid, node.id, self.DEVICES_RESOURCE) or []
+
+        id_to_name: Dict[str, str] = {}
+        name_to_id: Dict[str, str] = {}
+
+        def _add(gid: str, gname: str) -> None:
+            if gid and gname:
+                id_to_name[gid] = gname
+                name_to_id[gname] = gid
+
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                gid = _to_str(item.get("id")) or _to_str(item.get("device_id"))
+                gname = _to_str(item.get("name")) or _to_str(item.get("device_name"))
+                _add(gid, gname)
+        elif isinstance(raw, dict):
+            items = raw.get("items") or raw.get("data") or raw.get("devices") or raw.get("results") or []
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                gid = _to_str(item.get("id")) or _to_str(item.get("device_id"))
+                gname = _to_str(item.get("name")) or _to_str(item.get("device_name"))
+                _add(gid, gname)
+
+        self._dev_id_to_name[node.id] = id_to_name
+        self._dev_name_to_id[node.id] = name_to_id
+        log.debug("Device cache built: %d devices [node=%s]", len(id_to_name), node.name)
+
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+        """Discover existing Syslog Collectors by walking **Devices -> plugins**.
+
+        Some Director builds don't expose a list endpoint for `SyslogCollector`.
+        The supported and documented way to *read* collectors is:
+          1) GET Devices (name↔id map)
+          2) For each device: GET Devices/{id}/plugins
+          3) Filter items where app == "SyslogCollector"
+
+        Returns a dict keyed by **device_name** with objects containing at least
+        an `id` (uuid) when available so the pipeline can perform UPDATEs.
+        """
+        self._ensure_device_maps(client, pool_uuid, node)
 
         out: Dict[str, Dict[str, Any]] = {}
-        for it in items:
-            name = _norm_str(it.get("name") or it.get("policy_name") or "")
-            if name:
-                out[name] = it
+        id_to_name = self._dev_id_to_name.get(node.id, {})
 
-        log.info("fetch_existing: found %d policies [node=%s]", len(out), node_t)
-        log.debug("fetch_existing: names=%s [node=%s]", sorted(out.keys()), node_t)
+        # Build the device list from the map we already have
+        for dev_id, dev_name in id_to_name.items():
+            try:
+                path = DirectorClient.configapi(pool_uuid, node.id, f"Devices/{dev_id}/plugins")
+                data = client.get_json(path) or []
+            except Exception:
+                log.exception("Failed to list plugins for device=%s [node=%s]", dev_name, node.name)
+                continue
+
+            # Normalize payload into a list of dicts
+            items: List[Dict[str, Any]]
+            if isinstance(data, list):
+                items = [x for x in data if isinstance(x, dict)]
+            elif isinstance(data, dict):
+                maybe = data.get("plugins") or data.get("items") or data.get("data") or []
+                items = [x for x in (maybe or []) if isinstance(x, dict)]
+            else:  # pragma: no cover
+                items = []
+
+            for it in items:
+                app = _to_str(it.get("app")).lower()
+                if app != "syslogcollector":
+                    continue
+
+                # Try to expose a stable id for UPDATE
+                pid = _to_str(it.get("uuid")) or _to_str(it.get("id"))
+
+                # Pass through the plugin fields; canon_existing() will normalize
+                obj = dict(it)
+                if pid:
+                    obj["id"] = pid
+                obj["device_id"] = dev_id
+                obj["device_name"] = dev_name
+
+                # Some builds expose hosts under different keys; keep raw and let canon map
+                out[dev_name] = obj
+
+        log.debug("Discovered %d syslog collectors via Devices->plugins [node=%s]", len(out), node.name)
         return out
 
-    # --------------------------- Build payloads ------------------------- #
+    # --------------------------- payload builders ----------------------------
+
+    def _device_id_for_name(self, node: NodeRef, name: str) -> str | None:
+        name_to_id = self._dev_name_to_id.get(node.id, {})
+        return name_to_id.get(name) or name_to_id.get(name.strip())
+
+    def _validate_proxy_combo(self, desired: Dict[str, Any]) -> tuple[bool, str | None]:
+        pc = desired.get("proxy_condition")
+        proc = _to_str(desired.get("processpolicy"))
+        pips: List[str] = desired.get("proxy_ip", []) or []
+        if pc == "use_as_proxy":
+            if proc or pips:
+                return False, "Unexpected processpolicy/proxy_ip for use_as_proxy"
+            if not desired.get("charset") or not desired.get("parser"):
+                return False, "Missing charset or parser"
+            return True, None
+        if pc == "uses_proxy":
+            if not proc or not pips:
+                return False, "Missing processpolicy or proxy_ip"
+            if not desired.get("charset") or not desired.get("parser"):
+                return False, "Missing charset or parser"
+            return True, None
+        # direct (None)
+        if not proc or not desired.get("charset") or not desired.get("parser"):
+            return False, "Missing processpolicy, charset, or parser"
+        if pips:
+            return False, "Unexpected proxy_ip for direct collector"
+        return True, None
+
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """API payload: catch_all & routing_criteria at root level (V1-compatible)."""
-        payload = {
-            "policy_name": desired_row["name"],
-            "active": True,  # XLSX 'active' intentionally ignored
-            "catch_all": desired_row.get("catch_all") or "",
-            "routing_criteria": [self._rule_to_api(r) for r in (desired_row.get("rules") or [])],
+        node = getattr(self, "_current_node", None)
+        if not node:
+            raise RuntimeError("Internal error: current node not set")
+
+        dev_name = _to_str(desired_row.get("device_name"))
+        dev_id = self._device_id_for_name(node, dev_name)
+        if not dev_id:
+            raise ValidationError(f"Unknown device_name on node '{node.name}': {dev_name}")
+
+        ok, err = self._validate_proxy_combo(desired_row)
+        if not ok:
+            raise ValidationError(f"{dev_name}: {err}")
+
+        payload: Dict[str, Any] = {
+            "device_id": dev_id,
+            "hostname": [x for x in desired_row.get("hostname", []) if _to_str(x)],
+            "charset": _to_str(desired_row.get("charset")),
+            "parser": _to_str(desired_row.get("parser")),
+            "proxy_condition": desired_row.get("proxy_condition"),
         }
-        log.debug("apply: payload.create=%s", payload)
+
+        pc = desired_row.get("proxy_condition")
+        proc = _to_str(desired_row.get("processpolicy"))
+        pips = [x for x in desired_row.get("proxy_ip", []) if _to_str(x)]
+
+        if pc == "use_as_proxy":
+            payload["processpolicy"] = None
+        elif pc == "uses_proxy":
+            payload["processpolicy"] = proc
+            payload["proxy_ip"] = pips
+        else:  # direct
+            payload["processpolicy"] = proc
+
         return payload
 
-    def build_payload_update(
-        self,
-        desired_row: Dict[str, Any],
-        existing_obj: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        payload = {
-            "policy_name": desired_row["name"],
-            "active": True,
-            "catch_all": desired_row.get("catch_all") or "",
-            "routing_criteria": [self._rule_to_api(r) for r in (desired_row.get("rules") or [])],
-        }
-        log.debug("apply: payload.update=%s", payload)
-        return payload
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+        p = self.build_payload_create(desired_row)
+        if existing_obj and existing_obj.get("id"):
+            p["id"] = _to_str(existing_obj["id"])
+        return p
 
-    # ----------------------------- Apply ops ---------------------------- #
+    # -------------------------------- apply ----------------------------------
+
     def apply(
         self,
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
         decision,
-        existing_id: Optional[str],
+        existing_id: str | None,
     ) -> Dict[str, Any]:
-        """
-        Apply the decision (CREATE/UPDATE/NOOP). Before writing, enforce SKIP
-        if required repos are missing on the node.
-        """
-        node_t = _node_tag(node)
-        desired: Dict[str, Any] = dict(decision.desired or {})
-        pol_name = desired.get("name") or "(unnamed)"
+        # Remember node for device name→id resolution during payload build
+        self._current_node = node  # type: ignore[attr-defined]
 
-        log.info("apply: op=%s policy=%s [node=%s]", getattr(decision, "op", "?"), pol_name, node_t)
-
-        # Repos to verify: catch_all + explicit rule repos
-        missing = self._missing_repos(node.id, self._repos_to_check(desired))
-        if missing:
-            miss_sorted = sorted(missing)
-            reason = f"missing repos: {', '.join(miss_sorted)}"
-            log.warning("apply: skipping policy=%s due to %s [node=%s]", pol_name, reason, node_t)
-            # return structured result + human-readable error for table
-            return {
-                "status": "Skipped",
-                "result": {"missing_repos": miss_sorted},
-                "error": reason,
-            }
+        desired = decision.desired or {}
+        dev_name = _to_str(desired.get("device_name")) or "(unnamed)"
 
         try:
             if decision.op == "CREATE":
                 payload = self.build_payload_create(desired)
-                res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
-                return self._monitor_result(client, node, res, "create")
+                log.info("CREATE syslog_collector device=%s [node=%s]", dev_name, node.name)
+                log.debug("CREATE payload=%s", payload)
+                return client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
 
             if decision.op == "UPDATE" and existing_id:
                 payload = self.build_payload_update(desired, {"id": existing_id})
-                res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
-                return self._monitor_result(client, node, res, "update")
+                log.info(
+                    "UPDATE syslog_collector device=%s id=%s [node=%s]",
+                    dev_name,
+                    existing_id,
+                    node.name,
+                )
+                log.debug("UPDATE payload=%s", payload)
+                return client.update_resource(
+                    pool_uuid, node.id, self.RESOURCE, existing_id, payload
+                )
 
-            log.info("apply: NOOP policy=%s [node=%s]", pol_name, node_t)
+            # NOOP / SKIP
+            log.info("NOOP syslog_collector device=%s [node=%s]", dev_name, node.name)
             return {"status": "Success"}
-
-        except Exception:  # pragma: no cover (defensive)
-            log.exception("apply: API call failed for policy=%s [node=%s]", pol_name, node_t)
+        except Exception:  # pragma: no cover — defensive
+            log.exception("API error for syslog_collector device=%s [node=%s]", dev_name, node.name)
             raise
-
-    # ----------------------------- Internals ---------------------------- #
-    def _select_sheet(self, sheets: Dict[str, pd.DataFrame]) -> str:
-        for name in self.sheet_names:
-            if name in sheets:
-                if all(n in sheets for n in self.sheet_names) and name != self.sheet_names[0]:
-                    log.warning("Both 'RoutingPolicy' and 'RP' sheets were found; using '%s'.", name)
-                return name
-        raise ValueError("Missing required sheets: RP or RoutingPolicy")
-
-    def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
-        """Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet."""
-        if "Repo" not in sheets:
-            return {}
-        df = sheets["Repo"]
-        cols = {c.lower(): c for c in df.columns}
-        src = cols.get("original_repo_name")
-        dst = cols.get("cleaned_repo_name")
-        if not src or not dst:
-            return {}
-
-        mapping: Dict[str, str] = {}
-        for _, row in df.iterrows():
-            k = _norm_str(row.get(src))
-            v = _norm_str(row.get(dst))
-            if k and v:
-                mapping[k] = v
-        return mapping
-
-    def _map_repo_if_non_empty(self, repo_name: str) -> str:
-        """Apply repo mapping only when the input name is non-empty; otherwise return ''."""
-        nm = _norm_str(repo_name)
-        if not nm:
-            return ""
-        return self._repo_map.get(nm, nm)
-
-    def _list_repos(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> set:
-        """Return the set of repo names available on a node (for SKIP decision)."""
-        names: set = set()
-        try:
-            data = client.list_resource(pool_uuid, node.id, "Repos") or {}
-            items = (data.get("data") if isinstance(data, dict) else data) or []
-            for it in items:
-                nm = _norm_str(it.get("name") or it.get("repo_name"))
-                if nm:
-                    names.add(nm)
-        except Exception as exc:  # pragma: no cover (defensive)
-            log.error("list_repos: failed [node=%s] err=%s", _node_tag(node), exc)
-        return names
-
-    @staticmethod
-    def _canon_rule(r: Dict[str, Any]) -> Dict[str, Any]:
-        """Canonicalize a desired rule (including 'drop' as-is)."""
-        out = {
-            "type": _norm_str(r.get("type")),
-            "key": _norm_str(r.get("key")),
-            "value": _norm_str(r.get("value")),
-            "drop": _norm_str(r.get("drop")),
-        }
-        repo = _norm_str(r.get("repo"))
-        if repo:
-            out["repo"] = repo
-        return out
-
-    @staticmethod
-    def _canon_rule_from_api(rr: Dict[str, Any]) -> Dict[str, Any]:
-        """Canonicalize an existing rule from the API."""
-        out = {
-            "type": _norm_str(rr.get("type")),
-            "key": _norm_str(rr.get("key")),
-            "value": _norm_str(rr.get("value")),
-            "drop": _norm_str(rr.get("drop")),
-        }
-        repo = _norm_str(rr.get("repo"))
-        if repo:
-            out["repo"] = repo
-        return out
-
-    @staticmethod
-    def _rule_to_api(r: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Convert a desired rule to the API shape.
-        'drop' is required (no importer semantics); 'repo' optional.
-        """
-        out = {
-            "type": _norm_str(r.get("type")) or "KeyPresent",
-            "key": _norm_str(r.get("key")),
-            "drop": _norm_str(r.get("drop")),   # literal value from Excel
-        }
-        val = _norm_str(r.get("value"))
-        if val:
-            out["value"] = val
-        repo = _norm_str(r.get("repo"))
-        if repo:
-            out["repo"] = repo
-        return out
-
-    def _repos_to_check(self, desired: Dict[str, Any]) -> List[str]:
-        """
-        Repos to verify: catch_all (if non-empty) + all non-empty rule.repo values.
-        """
-        repos: List[str] = []
-        catch = _norm_str(desired.get("catch_all"))
-        if catch:
-            repos.append(catch)
-        for rr in (desired.get("rules") or []):
-            repo = _norm_str(rr.get("repo"))
-            if repo:
-                repos.append(repo)
-
-        # Preserve order but unique
-        out, seen = [], set()
-        for r in repos:
-            if r not in seen:
-                seen.add(r)
-                out.append(r)
-        return out
-
-    def _missing_repos(self, node_id: str, required: Iterable[str]) -> set:
-        have = self._repos_cache.get(node_id) or set()
-        need = {r for r in required if r}
-        return need - have
-
-    @staticmethod
-    def _monitor_result(
-        client: DirectorClient,  # noqa: ARG002 (kept for parity with Repos importer)
-        node: NodeRef,           # noqa: ARG002
-        res: Dict[str, Any],
-        action: str,             # noqa: ARG002
-    ) -> Dict[str, Any]:
-        """Normalize async monitor result (kept minimal and consistent)."""
-        status = "Success"
-        mon_ok = None
-        branch = None
-        if isinstance(res, dict):
-            branch = res.get("monitor_branch")
-            mon_ok = res.get("monitor_ok")
-            status = res.get("status") or status
-        return {"status": status, "monitor_ok": mon_ok, "monitor_branch": branch}

@@ -43,7 +43,7 @@ class ImporterSpec:
 # --- Registry ---------------------------------------------------------------
 
 _IMPORTERS: Dict[str, ImporterSpec] = {
-    # Repositories (already migrated)
+    # Repositories
     "repos": ImporterSpec(
         key="repos",
         cli="import-repos",
@@ -52,7 +52,7 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="ReposImporter",
         element_key="repos",
     ),
-    # Routing Policies (new in v2)
+    # Routing Policies
     "routing_policies": ImporterSpec(
         key="routing_policies",
         cli="import-routing-policies",
@@ -61,7 +61,7 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="RoutingPoliciesImporter",
         element_key="routing_policies",
     ),
-    # Normalization Policies (this change)
+    # Normalization Policies
     "normalization_policies": ImporterSpec(
         key="normalization_policies",
         cli="import-normalization-policies",
@@ -70,6 +70,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="NormalizationPoliciesImporter",
         element_key="normalization_policies",
     ),    
+    # Enrichment Policies
+    "enrichment_policies": ImporterSpec(
+        key="enrichment_policies",
+        cli="import-enrichment-policies",
+        help="Import enrichment policies",
+        module="lp_tenant_importer_v2.importers.enrichment_policies",
+        class_name="EnrichmentPoliciesImporter",
+        element_key="enrichment_policies",
+),
 }
 
 

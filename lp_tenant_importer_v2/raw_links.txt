@@ -76,13 +76,14 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/auto-py-exe.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/developer_guide_director_sync_v_2_common_trunk.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/ep_v_2_enrichment_policies_importer_code_docs.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/pp_v2_processing_policies_importer_code_docs.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/run.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/__init__.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/enrichment_policies.py
-https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/normalization_policies copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/normalization_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/processing_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/registry.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/repos.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/routing_policies.py

@@ -19,7 +19,11 @@ python -m lp_tenant_importer_v2.main \
 
 - import-repos
 - import-routing-policies
+- import-normalization-policies
 - import-enrichment-policies
+- import-processing-policies
+- import-device-groups
+- 
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
 export PYTHONPATH=..
@@ -33,7 +37,7 @@ python -m lp_tenant_importer_v2.main \
   --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
-  import-enrichment-policies
+  import-device-groups
 ```
 
 ### Vérif rapide

@@ -79,7 +79,7 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="EnrichmentPoliciesImporter",
         element_key="enrichment_policies",
     ),
-    # Processing Policies (new in v2)
+    # Processing Policies
     "processing_policies": ImporterSpec(
         key="processing_policies",
         cli="import-processing-policies",
@@ -87,6 +87,16 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         module="lp_tenant_importer_v2.importers.processing_policies",
         class_name="ProcessingPoliciesImporter",
         element_key="processing_policies",
+    ),
+    
+    # DeviceGroups
+    "device_groups": ImporterSpec(
+        key="device_groups",
+        cli="import-device-groups",
+        help="Import device groups",
+        module="lp_tenant_importer_v2.importers.device_groups",
+        class_name="DeviceGroupsImporter",
+        element_key="device_groups",
     ),
 
 }

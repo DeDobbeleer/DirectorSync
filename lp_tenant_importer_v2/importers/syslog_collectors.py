@@ -414,7 +414,13 @@ class SyslogCollectorsImporter(BaseImporter):
         self._ensure_pp_maps(client, pool_uuid, node)
         self._ensure_device_maps(client, pool_uuid, node)
 
-        data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+        # Certaines versions ne supportent pas le GET sur SyslogCollector (405).
+        try:
+            data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+        except Exception:
+            log.exception("Failed listing %s on node=%s — treating as empty list", self.RESOURCE, node.name)
+            data = []
+
         if isinstance(data, list):
             items = [x for x in data if isinstance(x, dict)]
         elif isinstance(data, dict):
@@ -509,8 +515,9 @@ class SyslogCollectorsImporter(BaseImporter):
             "device_id": dev_id,
             "charset": _to_str(desired_row.get("charset")),
             "parser": _to_str(desired_row.get("parser")),
-            "proxy_condition": pc,
         }
+        if pc is not None:
+            payload["proxy_condition"] = pc
 
         # processpolicy résolution → ID DEST selon pc
         if pc in ("uses_proxy", None):  # uses_proxy ou direct

@@ -78,7 +78,17 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         module="lp_tenant_importer_v2.importers.enrichment_policies",
         class_name="EnrichmentPoliciesImporter",
         element_key="enrichment_policies",
-),
+    ),
+    # Processing Policies (new in v2)
+    "processing_policies": ImporterSpec(
+        key="processing_policies",
+        cli="import-processing-policies",
+        help="Import processing policies",
+        module="lp_tenant_importer_v2.importers.processing_policies",
+        class_name="ProcessingPoliciesImporter",
+        element_key="processing_policies",
+    ),
+
 }
 
 

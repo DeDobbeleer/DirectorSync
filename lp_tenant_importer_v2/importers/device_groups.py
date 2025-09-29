@@ -142,6 +142,7 @@ class DeviceGroupsImporter(BaseImporter):
         payload: Dict[str, Any] = {}
         if desired_row.get("description") is not None:
             payload["description"] = desired_row.get("description") or ""
+            payload["name"] = desired_row.get("name") or ""
         return payload
 
     # ------------------------------------------------------------------

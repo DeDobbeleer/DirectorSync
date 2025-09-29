@@ -250,57 +250,86 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     # ---------- Fetch caches + existing ----------
 
-    def fetch_existing(
-        self, client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Warm per-node caches and return map of existing policies by name.
-        We only use the List endpoint for NormalizationPolicy (as specified).
-        """
-        node_id = node.id
-        log.info(
-            "Fetching caches & existing NormalizationPolicy on node=%s (%s)",
-            node.name,
-            node_id,
+def fetch_existing(
+    self, client: DirectorClient, pool_uuid: str, node: NodeRef
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Warm per-node caches and return map of existing policies by name.
+    IMPORTANT: fetch detail per policy to get 'compiled_normalizer', which is not
+    reliably present in the list response. Otherwise we will always detect diffs.
+    """
+    node_id = node.id
+    log.info(
+        "Fetching caches & existing NormalizationPolicy on node=%s (%s)",
+        node.name,
+        node_id,
+    )
+
+    # 1) NormalizationPackage name<->id
+    pkgs = client.list_resource(pool_uuid, node_id, "NormalizationPackage") or []
+    name2id: Dict[str, str] = {}
+    id2name: Dict[str, str] = {}
+    for it in (pkgs if isinstance(pkgs, list) else []):
+        pid = it.get("id")
+        pname = str(it.get("name", "")).strip()
+        if pid and pname:
+            name2id[pname] = pid
+            id2name[pid] = pname
+    self._pkg_name_to_id[node_id] = name2id
+    self._pkg_id_to_name[node_id] = id2name
+    log.info("Cached %d NormalizationPackage(s) on %s", len(name2id), node.name)
+
+    # 2) Compiled normalizers inventory (for presence checks)
+    compiled = client.list_subresource(
+        pool_uuid, node_id, "NormalizationPackage", "CompiledNormalizers"
+    ) or []
+    compiled_set = {
+        str(it.get("name", "")).strip() for it in compiled if isinstance(it, dict)
+    }
+    self._compiled_set[node_id] = compiled_set
+    log.info("Cached %d compiled normalizer(s) on %s", len(compiled_set), node.name)
+
+    # 3) List existing policies, then fetch details per policy to get compiled_normalizer
+    items = client.list_resource(pool_uuid, node_id, self.RESOURCE) or []
+    out: Dict[str, Dict[str, Any]] = {}
+
+    # pick a getter that exists on DirectorClient
+    _get = getattr(client, "get_resource", None) or getattr(client, "read_resource", None)
+
+    for it in (items if isinstance(items, list) else []):
+        nm = str(it.get("name", "")).strip()
+        rid = it.get("id")
+        if not nm or not rid:
+            continue
+
+        # fetch details to obtain compiled_normalizer (list or CSV string depending on version)
+        detail = {}
+        if callable(_get):
+            try:
+                detail = _get(pool_uuid, node_id, self.RESOURCE, rid) or {}
+            except Exception as e:
+                log.warning(
+                    "Failed to get details for NormalizationPolicy %s on %s: %s",
+                    nm, node.name, e
+                )
+
+        # unify into the expected key; if absent, let canon_existing treat as []
+        compiled_field = (
+            detail.get("compiled_normalizer")
+            or detail.get("compiled_normalizers")
+            or detail.get("compiled")
+            or it.get("compiled_normalizer")
         )
+        if compiled_field is not None:
+            it["compiled_normalizer"] = compiled_field
 
-        # 1) List packages (name<->id maps)
-        pkgs = client.list_resource(pool_uuid, node_id, "NormalizationPackage") or []
-        name2id: Dict[str, str] = {}
-        id2name: Dict[str, str] = {}
-        for it in (pkgs if isinstance(pkgs, list) else []):
-            pid = it.get("id")
-            pname = str(it.get("name", "")).strip()
-            if pid and pname:
-                name2id[pname] = pid
-                id2name[pid] = pname
-        self._pkg_name_to_id[node_id] = name2id
-        self._pkg_id_to_name[node_id] = id2name
-        log.info("Cached %d NormalizationPackage(s) on %s", len(name2id), node.name)
+        it["_node_id"] = node_id
+        it["_pool_uuid"] = pool_uuid
+        out[nm] = it
 
-        # 2) Compiled normalizers inventory (for validation)
-        compiled = client.list_subresource(
-            pool_uuid, node_id, "NormalizationPackage", "CompiledNormalizers"
-        ) or []
-        compiled_set = {
-            str(it.get("name", "")).strip() for it in compiled if isinstance(it, dict)
-        }
-        self._compiled_set[node_id] = compiled_set
-        log.info("Cached %d compiled normalizer(s) on %s", len(compiled_set), node.name)
+    log.info("Found %d existing NormalizationPolicy on node %s", len(out), node.name)
+    return out
 
-        # 3) List existing policies
-        data = client.list_resource(pool_uuid, node_id, self.RESOURCE) or []
-        out: Dict[str, Dict[str, Any]] = {}
-        for it in (data if isinstance(data, list) else []):
-            nm = str(it.get("name", "")).strip()
-            if not nm:
-                continue
-            it["_node_id"] = node_id
-            it["_pool_uuid"] = pool_uuid
-            out[nm] = it
-
-        log.info("Found %d existing NormalizationPolicy on node %s", len(out), node.name)
-        return out
 
     # ---------- Dry-run hints (optional) ----------
 

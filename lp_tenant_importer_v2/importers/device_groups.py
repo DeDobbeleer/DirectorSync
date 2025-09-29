@@ -140,9 +140,13 @@ class DeviceGroupsImporter(BaseImporter):
     ) -> Dict[str, Any]:
         # MVP: allow updating description only (no rename)
         payload: Dict[str, Any] = {}
+        existing_name = (existing_obj.get("name") or "").strip()
+        # required by API:
+        payload["name"] = existing_name
+        
         if desired_row.get("description") is not None:
             payload["description"] = desired_row.get("description") or ""
-            payload["name"] = desired_row.get("name") or ""
+            
         return payload
 
     # ------------------------------------------------------------------

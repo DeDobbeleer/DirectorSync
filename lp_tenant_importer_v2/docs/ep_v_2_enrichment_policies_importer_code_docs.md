@@ -248,51 +248,31 @@ class EnrichmentPoliciesImporter(BaseImporter):
     # ---------------------- EnrichmentSource checks ------------------------
     @staticmethod
     def _list_enrichment_sources(client: DirectorClient, pool_uuid: str, node: NodeRef) -> List[str]:
+        """Use ONLY the List endpoint and match by `source_name` (exact).
+        Endpoint: /configapi/{pool}/{node}/EnrichmentSource
+        """
         path = client.configapi(pool_uuid, node.id, "EnrichmentSource")
         data = client.get_json(path) or []
         names: List[str] = []
-        # Allow wrapped format {"data": [...]} or plain list
         if isinstance(data, dict) and "data" in data:
             data = data.get("data") or []
         if isinstance(data, list):
             for item in data:
-                if isinstance(item, str):
-                    n = item.strip()
-                    if n:
+                if isinstance(item, dict):
+                    # strict: only take `source_name`
+                    n = item.get("source_name")
+                    if isinstance(n, str) and n:
                         names.append(n)
-                elif isinstance(item, dict):
-                    # Normalize keys (trim accidental spaces as seen in API samples)
-                    normalized = {str(k).strip(): v for k, v in item.items()}
-                    # Prefer explicit name keys
-                    n = normalized.get("name") or normalized.get("source_name")
-                    if not n and isinstance(normalized.get("plugin_info"), dict):
-                        n = normalized["plugin_info"].get("source_name")
-                    if isinstance(n, str) and n.strip():
-                        names.append(n.strip())
-        # De-duplicate and sort
-        return list(sorted(set(names)))
-
-    @staticmethod
-    def _refresh_enrichment_sources(client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
-        path = client.configapi(pool_uuid, node.id, "EnrichmentSource/refreshlist")
-        try:
-            # API expects a wrapper object {"data": {}}
-            client.post_json(path, {"data": {}})
-        except Exception as exc:
-            log.warning("refreshlist failed on %s/%s: %s", pool_uuid, node.id, exc)
-        except Exception as exc:
-            log.warning("refreshlist failed on %s/%s: %s", pool_uuid, node.id, exc)
+        # exact-match set (no lowercasing)
+        unique = sorted(set(names))
+        log.debug("EnrichmentSource list on %s: %s", node.name, unique)
+        return unique
 
     def _ensure_sources(self, client: DirectorClient, pool_uuid: str, node: NodeRef, desired_row: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        want = {str(spec.get("source") or "").strip().lower() for spec in desired_row.get("specifications", [])}
+        # Desired sources exactly as given in XLSX (trim spaces only)
+        want = {str(spec.get("source") or "").strip() for spec in desired_row.get("specifications", [])}
         want = {w for w in want if w}
-        have = {n.strip().lower() for n in self._list_enrichment_sources(client, pool_uuid, node)}
-        missing = sorted(w for w in (want - have))
-        if not missing:
-            return True, []
-        # Try refresh then re-check
-        self._refresh_enrichment_sources(client, pool_uuid, node)
-        have = {n.strip().lower() for n in self._list_enrichment_sources(client, pool_uuid, node)}
+        have = set(self._list_enrichment_sources(client, pool_uuid, node))
         missing = sorted(w for w in (want - have))
         return (len(missing) == 0), missing
 

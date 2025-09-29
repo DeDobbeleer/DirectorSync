@@ -29,13 +29,14 @@ class _Key:
 class EnrichmentPoliciesImporter(BaseImporter):
     """Importer for Enrichment Policies (Director API 2.7.0).
 
-    Rules enforced:
+    Enforcements / assumptions (aligned with your platform):
       - Each *specification* MUST contain `source` and at least one `criteria` object.
-      - `rules` are optional.
-      - Diff is performed on a canonical subset (order-insensitive for rules/criteria).
+      - Your API requires *at least one rule* per specification → we *skip* when a spec has no rules.
+      - We aggregate rows by **source** (V1 behavior): one `specifications[]` entry per distinct source.
+      - Diff is done on a canonical subset (order-insensitive for rules/criteria).
+      - Enrichment sources inventory uses ONLY `GET /configapi/{pool}/{node}/EnrichmentSource` and matches on `source_name` exactly.
 
     XLSX sheets required: EnrichmentPolicy, EnrichmentRules, EnrichmentCriteria.
-    We aggregate rows by policy_name and keep all spec_index blocks in `specifications`.
     """
 
     resource_name: str = "enrichment_policies"
@@ -66,7 +67,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         return out
 
     # ---------------------------------------------------------------------
-    # Desired state from XLSX
+    # Desired state from XLSX (aggregated by SOURCE)
     # ---------------------------------------------------------------------
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
         ep = sheets["EnrichmentPolicy"].copy()
@@ -122,44 +123,52 @@ class EnrichmentPoliciesImporter(BaseImporter):
         # Aggregate by policy_name → one desired row per policy
         desired_by_policy: Dict[str, Dict[str, Any]] = {}
         for policy_name, grp in ep.groupby(ep["policy_name"].map(lambda v: str(v).strip())):
-            specs: List[Dict[str, Any]] = []
+            # 1) group rows for this policy by SOURCE (not spec_index)
+            by_source: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
             description = ""
             for _, row in grp.sort_values("spec_index").iterrows():
                 k = _key(row)
-                source = str(row["source"]).strip()
-                if not source:
+                src = str(row["source"]).strip()
+                if not src:
                     raise ValidationError(
                         f"EnrichmentPolicy: missing 'source' for policy='{k.policy}' spec_index={k.index}"
                     )
                 if not description:
                     description = str(row.get("description") or "").strip()
 
-                # Attach rules (optional) and validate according to category
-                spec_rules = rules_by_key.get(k, [])
-                for rr in spec_rules:
-                    cat = str(rr.get("category") or "").strip()
-                    if cat not in {"simple", "type_based"}:
-                        raise ValidationError(
-                            f"EnrichmentRules: invalid category '{cat}' policy='{k.policy}' spec_index={k.index}"
-                        )
-                    if cat == "simple" and not str(rr.get("event_key") or "").strip():
-                        raise ValidationError(
-                            f"EnrichmentRules: missing event_key for simple rule policy='{k.policy}' spec_index={k.index}"
-                        )
-                    if cat == "type_based" and not str(rr.get("type") or "").strip():
-                        raise ValidationError(
-                            f"EnrichmentRules: missing type for type_based rule policy='{k.policy}' spec_index={k.index}"
-                        )
-                    rr["operation"] = "Equals"  # enforce
+                bucket = by_source.setdefault(src, {"rules": [], "criteria": []})
+                bucket["rules"].extend(rules_by_key.get(k, []))
+                bucket["criteria"].extend(crit_by_key.get(k, []))
 
-                # Attach criteria (required ≥1)
-                spec_criteria = crit_by_key.get(k, [])
-                if not spec_criteria:
+            # 2) build specifications list (deduplicate + keep stable order)
+            specs: List[Dict[str, Any]] = []
+            for src, coll in sorted(by_source.items(), key=lambda kv: kv[0]):
+                # Deduplicate rules/criteria by canonical JSON
+                def _uniq(items: List[Dict[str, Any]], canon_fn) -> List[Dict[str, Any]]:
+                    seen = set()
+                    out: List[Dict[str, Any]] = []
+                    for it in items:
+                        c = json.dumps(canon_fn(it), sort_keys=True)
+                        if c not in seen:
+                            seen.add(c)
+                            out.append(it)
+                    return out
+
+                rules_uniq = _uniq(coll["rules"], self._canon_rule)
+                criteria_uniq = _uniq(coll["criteria"], self._canon_criteria)
+
+                if not criteria_uniq:
                     raise ValidationError(
-                        f"EnrichmentPolicy: criteria required but not found for policy='{k.policy}' spec_index={k.index}"
+                        f"EnrichmentPolicy: criteria required for policy='{policy_name}' source='{src}'"
                     )
 
-                specs.append({"source": source, "rules": spec_rules, "criteria": spec_criteria})
+                # NOTE: your platform enforces at least one rule → do NOT drop empty here;
+                # we let apply() decide to SKIP the whole policy if any spec has no rules.
+                specs.append({
+                    "source": src,
+                    "rules": rules_uniq,
+                    "criteria": criteria_uniq,
+                })
 
             desired = {"name": policy_name, "specifications": specs}
             if description:
@@ -223,22 +232,6 @@ class EnrichmentPoliciesImporter(BaseImporter):
         return out
 
     # ---------------------------------------------------------------------
-    # Payload builders
-    # ---------------------------------------------------------------------
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        payload = {
-            "name": desired_row["name"],
-            "specifications": desired_row["specifications"],
-        }
-        if desired_row.get("description"):
-            payload["description"] = desired_row["description"]
-        return payload
-
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
-        # PUT accepts the same body shape as POST
-        return self.build_payload_create(desired_row)
-
-    # ---------------------------------------------------------------------
     # EnrichmentSource checks — ONLY the List endpoint; match on `source_name`
     # ---------------------------------------------------------------------
     @staticmethod
@@ -283,10 +276,19 @@ class EnrichmentPoliciesImporter(BaseImporter):
     ) -> Dict[str, Any]:
         desired = decision.desired or {}
 
-        # Pre-flight source validation (strict)
+        # Pre-flight source validation (strict) — if a source is missing on the node, we SKIP, no override
         ok, missing = self._ensure_sources(client, pool_uuid, node, desired)
         if not ok:
             msg = f"Missing enrichment sources: {', '.join(missing)}"
+            log.error("%s — pool=%s node=%s policy=%s", msg, pool_uuid, node.name, desired.get("name"))
+            return {"status": "Skipped", "error": msg}
+
+        # Additional strict check: every spec must have ≥1 rule (platform behavior)
+        empty_rule_sources = [s.get("source") for s in (desired.get("specifications") or []) if not (s.get("rules") or [])]
+        if empty_rule_sources:
+            msg = (
+                "Specification(s) with empty rules: " + ", ".join(sorted({str(x) for x in empty_rule_sources}))
+            )
             log.error("%s — pool=%s node=%s policy=%s", msg, pool_uuid, node.name, desired.get("name"))
             return {"status": "Skipped", "error": msg}
 
@@ -294,7 +296,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         if decision.op == "CREATE":
             payload = self.build_payload_create(desired)
             path = client.configapi(pool_uuid, node.id, resource)
-            resp = client.post_json(path, {"data": payload}) 
+            resp = client.post_json(path, {"data": payload})
         elif decision.op == "UPDATE":
             payload = self.build_payload_update(desired, decision.existing or {})
             if not existing_id:
@@ -309,7 +311,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
                             break
             if not existing_id:
                 path = client.configapi(pool_uuid, node.id, resource)
-                resp = client.post_json(path, payload)
+                resp = client.post_json(path, {"data": payload})
             else:
                 path = client.configapi(pool_uuid, node.id, f"{resource}/{existing_id}")
                 resp = client.put_json(path, {"data": payload})

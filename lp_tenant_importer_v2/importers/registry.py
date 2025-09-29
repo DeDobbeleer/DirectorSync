@@ -61,6 +61,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="RoutingPoliciesImporter",
         element_key="routing_policies",
     ),
+    # Normalization Policies (this change)
+    "normalization_policies": ImporterSpec(
+        key="normalization_policies",
+        cli="import-normalization-policies",
+        help="Import normalization policies",
+        module="lp_tenant_importer_v2.importers.normalization_policies",
+        class_name="NormalizationPoliciesImporter",
+        element_key="normalization_policies",
+    ),    
 }
 
 

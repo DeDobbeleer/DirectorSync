@@ -24,6 +24,7 @@ python -m lp_tenant_importer_v2.main \
 - import-processing-policies
 - import-device-groups
 - import-devices
+- import-syslog-collectors
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
 export PYTHONPATH=..
@@ -37,7 +38,7 @@ python -m lp_tenant_importer_v2.main \
   --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
-  import-devices
+  import-syslog-collectors
 ```
 
 ### Vérif rapide

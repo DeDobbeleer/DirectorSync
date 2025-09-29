@@ -82,6 +82,7 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/device_groups.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/devices.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/enrichment_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/normalization_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/processing_policies.py

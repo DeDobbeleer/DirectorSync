@@ -107,6 +107,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="DevicesImporter",
         element_key="devices",
     ),
+     # SyslogCollector
+    "syslog_collectors": ImporterSpec(
+        key="syslog_collectors",
+        cli="import-syslog-collectors",
+        help="Import syslog collectors",
+        module="lp_tenant_importer_v2.importers.syslog_collectors",
+        class_name="SyslogCollectorsImporter",
+        element_key="syslog_collectors",
+    ),
 
 }
 

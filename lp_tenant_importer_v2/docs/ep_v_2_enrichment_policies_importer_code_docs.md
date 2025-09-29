@@ -68,7 +68,6 @@ class EnrichmentPoliciesImporter(BaseImporter):
         data = client.get_json(path) or []
         out: Dict[str, Dict[str, Any]] = {}
         if isinstance(data, dict) and "data" in data:
-            # Accept a wrapped format: {"data": [...]} as some endpoints do.
             data = data.get("data") or []
         if not isinstance(data, list):
             log.warning("fetch_existing: unexpected payload type for %s: %s", path, type(data))
@@ -89,107 +88,89 @@ class EnrichmentPoliciesImporter(BaseImporter):
         rules = sheets["EnrichmentRules"].copy()
         crit = sheets["EnrichmentCriteria"].copy()
 
-        # Normalize column names (strip spaces) to be more forgiving if XLSX changes slightly
+        # Normalize column names (strip spaces)
         for df in (ep, rules, crit):
             df.columns = [str(c).strip() for c in df.columns]
 
-        # Required per-sheet columns
+        # Required columns per sheet
         for req_col in ("policy_name", "spec_index", "source"):
             if req_col not in ep.columns:
                 raise ValidationError(f"EnrichmentPolicy: missing required column '{req_col}'")
         for req_col in ("policy_name", "spec_index"):
             if req_col not in rules.columns:
-                # rules can be empty overall, but the sheet/columns must exist
                 raise ValidationError(f"EnrichmentRules: missing required column '{req_col}'")
             if req_col not in crit.columns:
                 raise ValidationError(f"EnrichmentCriteria: missing required column '{req_col}'")
 
-        # Cast spec_index to int for stable grouping
+        # Cast for stable grouping
         ep["spec_index"] = ep["spec_index"].astype(int)
         rules["spec_index"] = rules["spec_index"].astype(int)
         crit["spec_index"] = crit["spec_index"].astype(int)
 
-        # Build a quick index for rules and criteria by (policy_name, spec_index)
-        def _key(df_row: pd.Series) -> _SpecKey:
-            return _SpecKey(policy=str(df_row["policy_name"]).strip(), index=int(df_row["spec_index"]))
+        # Index helpers
+        def _key(df_row: pd.Series) -> Tuple[str, int]:
+            return (str(df_row["policy_name"]).strip(), int(df_row["spec_index"]))
 
-        rules_by_key: Dict[_SpecKey, List[Dict[str, Any]]] = {}
+        rules_by_key: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
         for _, r in rules.iterrows():
             k = _key(r)
-            rr = {
-                # Only copy known/allowed keys; others are ignored
-                kf: r.get(kf)
-                for kf in _ALLOWED_RULE_KEYS
-                if kf in r and pd.notna(r.get(kf))
-            }
-            # Normalize booleans/strings explicitly
+            rr = {kf: r.get(kf) for kf in _ALLOWED_RULE_KEYS if kf in r and pd.notna(r.get(kf))}
             if "prefix" in rr:
-                rr["prefix"] = bool(rr["prefix"])  # pandas may pass 0/1 or "TRUE"/"FALSE"
+                rr["prefix"] = bool(rr["prefix"])  # normalize to real boolean
             if rr.get("operation") is None:
-                rr["operation"] = "Equals"  # the API expects Equals
+                rr["operation"] = "Equals"
             rules_by_key.setdefault(k, []).append(rr)
 
-        crit_by_key: Dict[_SpecKey, List[Dict[str, Any]]] = {}
+        crit_by_key: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
         for _, c in crit.iterrows():
             k = _key(c)
-            cc = {
-                kf: c.get(kf)
-                for kf in _ALLOWED_CRITERIA_KEYS
-                if kf in c
-            }
-            # Ensure the `value` key exists (may be empty string), per API contract
+            cc = {kf: c.get(kf) for kf in _ALLOWED_CRITERIA_KEYS if kf in c}
             if "value" not in cc or pd.isna(cc.get("value")):
                 cc["value"] = ""
-            # type/key must be present
             if not str(cc.get("type") or "").strip() or not str(cc.get("key") or "").strip():
                 raise ValidationError(
-                    f"EnrichmentCriteria: invalid row (missing type/key) for policy='{k.policy}' spec_index={k.index}"
+                    f"EnrichmentCriteria: invalid row (missing type/key) for policy='{k[0]}' spec_index={k[1]}"
                 )
             crit_by_key.setdefault(k, []).append(cc)
 
-        # Iterate EP rows grouped by (policy_name, spec_index)
-        for _, e in ep.iterrows():
-            k = _key(e)
-            name = str(e["policy_name"]).strip()
-            source = str(e["source"]).strip()
-            if not source:
-                raise ValidationError(f"EnrichmentPolicy: missing 'source' for policy='{name}' spec_index={k.index}")
-            description = str(e.get("description") or "").strip()
+        # >>> Aggregate by POLICY (one desired row per policy_name) <<<
+        desired_by_policy: Dict[str, Dict[str, Any]] = {}
+        for policy_name, grp in ep.groupby(ep["policy_name"].map(lambda v: str(v).strip())):
+            specs: List[Dict[str, Any]] = []
+            description = ""
+            for _, e in grp.sort_values("spec_index").iterrows():
+                p = str(e["policy_name"]).strip()
+                idx = int(e["spec_index").__int__()] if hasattr(e["spec_index"], "__int__") else int(e["spec_index"])  # safe cast
+                source = str(e["source"]).strip()
+                if not source:
+                    raise ValidationError(f"EnrichmentPolicy: missing 'source' for policy='{p}' spec_index={idx}")
+                if not description:
+                    description = str(e.get("description") or "").strip()
 
-            spec: Dict[str, Any] = {"source": source}
-            # Attach rules (may be an empty list)
-            spec_rules = rules_by_key.get(k, [])
-            # Validate rules when provided (category-driven requirements)
-            for rr in spec_rules:
-                cat = str(rr.get("category") or "").strip()
-                if cat not in {"simple", "type_based"}:
+                spec_rules = rules_by_key.get((p, idx), [])
+                for rr in spec_rules:
+                    cat = str(rr.get("category") or "").strip()
+                    if cat not in {"simple", "type_based"}:
+                        raise ValidationError(f"EnrichmentRules: invalid category '{cat}' policy='{p}' spec_index={idx}")
+                    if cat == "simple" and not str(rr.get("event_key") or "").strip():
+                        raise ValidationError(f"EnrichmentRules: missing event_key (simple) policy='{p}' spec_index={idx}")
+                    if cat == "type_based" and not str(rr.get("type") or "").strip():
+                        raise ValidationError(f"EnrichmentRules: missing type (type_based) policy='{p}' spec_index={idx}")
+                    rr["operation"] = "Equals"
+                spec_criteria = crit_by_key.get((p, idx), [])
+                if not spec_criteria:
                     raise ValidationError(
-                        f"EnrichmentRules: invalid category '{cat}' policy='{name}' spec_index={k.index}"
+                        f"EnrichmentPolicy: criteria required but not found for policy='{p}' spec_index={idx}"
                     )
-                if cat == "simple" and not str(rr.get("event_key") or "").strip():
-                    raise ValidationError(
-                        f"EnrichmentRules: missing event_key for simple rule policy='{name}' spec_index={k.index}"
-                    )
-                if cat == "type_based" and not str(rr.get("type") or "").strip():
-                    raise ValidationError(
-                        f"EnrichmentRules: missing type for type_based rule policy='{name}' spec_index={k.index}"
-                    )
-                # Enforce Equals
-                rr["operation"] = "Equals"
-            spec["rules"] = spec_rules
+                specs.append({"source": source, "rules": spec_rules, "criteria": spec_criteria})
 
-            # Attach criteria (must exist and be >= 1)
-            spec_criteria = crit_by_key.get(k, [])
-            if not spec_criteria:
-                raise ValidationError(
-                    f"EnrichmentPolicy: criteria required but not found for policy='{name}' spec_index={k.index}"
-                )
-            spec["criteria"] = spec_criteria
-
-            desired_row: Dict[str, Any] = {"name": name, "specifications": [spec]}
+            desired = {"name": policy_name, "specifications": specs}
             if description:
-                desired_row["description"] = description
-            yield desired_row
+                desired["description"] = description
+            desired_by_policy[policy_name] = desired
+
+        for row in desired_by_policy.values():
+            yield row
 
     # ---------------------- Canonicalization for diff ----------------------
     @staticmethod

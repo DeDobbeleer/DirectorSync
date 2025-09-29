@@ -118,10 +118,13 @@ class SyslogCollectorsImporter(BaseImporter):
     # per-node caches: device name↔id
     _dev_name_to_id: Dict[str, Dict[str, str]]  # node_id -> {name -> id}
     _dev_id_to_name: Dict[str, Dict[str, str]]  # node_id -> {id -> name}
+    # per-node: known proxy endpoints (IPs/hostnames) from existing "use_as_proxy" collectors
+    _known_proxy_endpoints: Dict[str, set[str]]  # node_id -> {ip_or_hostname}
 
     def __init__(self) -> None:
         self._dev_name_to_id = {}
         self._dev_id_to_name = {}
+        self._known_proxy_endpoints = {}
 
     # ---------------------------- validation ---------------------------------
 
@@ -366,7 +369,30 @@ class SyslogCollectorsImporter(BaseImporter):
                 # Some builds expose hosts under different keys; keep raw and let canon map
                 out[dev_name] = obj
 
+        # Build known proxy endpoints for this node (used for pre-apply skip)
+        proxies: set[str] = set()
+        for obj in out.values():
+            pc = (
+                _to_str(self._g(obj, "proxy_condition")).lower()
+                or ("use_as_proxy" if obj.get("use_as_proxy") is True else "")
+            )
+            if pc == "use_as_proxy":
+                hosts = (
+                    self._g(obj, "hostname")
+                    or self._g(obj, "hostnames")
+                    or self._g(obj, "ip")
+                    or self._g(obj, "ips")
+                    or []
+                )
+                if not isinstance(hosts, list):
+                    hosts = [hosts] if _to_str(hosts) else []
+                for h in hosts:
+                    s = _to_str(h)
+                    if s:
+                        proxies.add(s)
+        self._known_proxy_endpoints[node.id] = proxies
         log.debug("Discovered %d syslog collectors via Devices->plugins [node=%s]", len(out), node.name)
+        log.debug("Known proxy endpoints on node=%s: %s", node.name, sorted(proxies))
         return out
 
     # --------------------------- payload builders ----------------------------
@@ -455,6 +481,22 @@ class SyslogCollectorsImporter(BaseImporter):
 
         desired = decision.desired or {}
         dev_name = _to_str(desired.get("device_name")) or "(unnamed)"
+        pc = (desired.get("proxy_condition") or "").lower()
+
+        # Business rule:
+        # 1) use_as_proxy: no dependency → proceed
+        # 2) uses_proxy: if any proxy_ip is unknown in cache, SKIP (no API call)
+        if decision.op in {"CREATE", "UPDATE"} and pc == "uses_proxy":
+            known = self._known_proxy_endpoints.get(node.id, set())
+            pips = [x for x in desired.get("proxy_ip", []) if _to_str(x)]
+            missing = [ip for ip in pips if _to_str(ip) not in known]
+            if missing:
+                reason = (
+                    f"Skipped: proxy_ip not found on node '{node.name}': {', '.join(missing)}. "
+                    f"Create the corresponding 'use_as_proxy' collectors first."
+                )
+                log.warning("SKIP uses_proxy collector for device=%s [node=%s]: %s", dev_name, node.name, reason)
+                return {"status": "Skipped", "message": reason}
 
         try:
             if decision.op == "CREATE":
@@ -476,7 +518,7 @@ class SyslogCollectorsImporter(BaseImporter):
                     pool_uuid, node.id, self.RESOURCE, existing_id, payload
                 )
 
-            # NOOP / SKIP
+            # NOOP / SKIP (diff said equal)
             log.info("NOOP syslog_collector device=%s [node=%s]", dev_name, node.name)
             return {"status": "Success"}
         except Exception:  # pragma: no cover — defensive

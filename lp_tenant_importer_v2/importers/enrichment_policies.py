@@ -294,7 +294,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         if decision.op == "CREATE":
             payload = self.build_payload_create(desired)
             path = client.configapi(pool_uuid, node.id, resource)
-            resp = client.post_json(path, payload)
+            resp = client.post_json(path, {"data": payload}) 
         elif decision.op == "UPDATE":
             payload = self.build_payload_update(desired, decision.existing or {})
             if not existing_id:
@@ -312,7 +312,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
                 resp = client.post_json(path, payload)
             else:
                 path = client.configapi(pool_uuid, node.id, f"{resource}/{existing_id}")
-                resp = client.put_json(path, payload)
+                resp = client.put_json(path, {"data": payload})
         else:
             # NOOP/SKIP should not call apply
             return {"status": "Success", "monitor_ok": True}

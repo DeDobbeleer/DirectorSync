@@ -1,381 +1,498 @@
 # lp_tenant_importer_v2/importers/normalization_policies.py
-"""
-Normalization Policies importer (DirectorSync v2)
-Strict payload comparison per user's spec.
-
-Algorithm
----------
-- Build SOURCE payload from Excel:
-    name (policy_name: str)
-    normalization_packages: list[str] of package *names* (sorted, may be [])
-    compiled_normalizer:    list[str] of compiled names    (sorted, may be [])
-  Constraint: both lists cannot be empty simultaneously (row is rejected/Skipped).
-
-- Build DESTINATION payload from API (List NormalizationPolicy):
-    name (str)
-    normalization_packages: list[str] of package *names* (IDs mapped to names; sorted)
-    compiled_normalizer:    list[str] of compiled names (if field absent → [])
-
-- Decision rules:
-    1) If any SOURCE package name is unknown on node OR any SOURCE compiled name
-       is not installed on node → SKIP (with reason).
-    2) Else if DESTINATION policy does not exist → CREATE.
-    3) Else if SOURCE payload == DESTINATION payload → NOOP.
-    4) Else → UPDATE.
-  For UPDATE, empty lists in SOURCE explicitly clear the field on the node:
-    - normalization_packages=[]  → send norm_packages=""  (clear)
-    - compiled_normalizer=[]     → send compiled_normalizer="" (clear)
-
-API (Director 2.7.0)
---------------------
-- POST  configapi/{pool}/{node}/NormalizationPolicy
-    data: { name, norm_packages: "ID1,ID2" or "", compiled_normalizer: "C1,C2" or "" }
-- PUT   configapi/{pool}/{node}/NormalizationPolicy/{id}
-    data: {        norm_packages: "ID1,ID2" or "", compiled_normalizer: "C1,C2" or "" }
-- GET   .../NormalizationPackage                              (list packages)
-- GET   .../NormalizationPackage/CompiledNormalizers          (inventory)
-- GET   .../NormalizationPolicy                               (list policies)
-"""
-
 from __future__ import annotations
 
+"""
+Normalization Policies importer (v2).
+
+Goal
+-----
+Keep the user-facing behavior identical to v1 while plugging into the v2
+common trunk (BaseImporter + DirectorClient). This module:
+
+- Parses the **NormalizationPolicy** sheet from the XLSX:
+  * required columns: policy_name, normalization_packages, compiled_normalizer
+  * multi-value cells may be separated by "|" or ","
+  * empties like "", "nan", "none", "-" are treated as empty
+
+- Resolves dependencies against the node:
+  * maps **normalization package names → package IDs** via
+    GET configapi/{pool}/{node}/NormalizationPackage
+  * validates **compiled normalizer names** via
+    GET configapi/{pool}/{node}/NormalizationPackage/CompiledNormalizers
+
+- Reads existing policies on the node:
+  GET configapi/{pool}/{node}/NormalizationPolicy
+  and (best-effort) details per policy:
+  GET configapi/{pool}/{node}/NormalizationPolicy/{id}
+  so that `compiled_normalizer` is available for comparison.
+
+- Uses the diff engine to decide NOOP / CREATE / UPDATE.
+  Compare keys are:
+    - "normalization_packages"  (list of *names*)
+    - "compiled_normalizer"     (list of *names*)
+
+- Applies changes with the generic DirectorClient helpers:
+  create_resource / update_resource on resource "NormalizationPolicy".
+
+Payload shape (POST/PUT data)
+-----------------------------
+{
+  "name": "<policy name>",
+  "normalization_packages": ["<pkg-id-1>", "<pkg-id-2>", ...],
+  "compiled_normalizer": ["<compiled-1>", "<compiled-2>", ...]
+}
+
+Notes
+-----
+* We compare **by names** (packages & compiled). For payloads we convert
+  package names to **IDs** (compiled stays as names).
+* If both lists in a row are empty, we SKIP that row with a warning.
+* If any referenced package/compiled does not exist on the node, we SKIP.
+"""
+
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef  # provides run_for_nodes()
+from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
-from ..utils.validators import require_columns, ValidationError
-from ..utils.resolvers import ResolverCache
+from ..utils.validators import require_columns
 
 log = logging.getLogger(__name__)
 
 
-# ---------- Helpers ----------
+# ------------------------- helpers (pure functions) ------------------------- #
+
+_EMPTY_SENTINELS = {"", "nan", "none", "null", "-", "[]"}
+
 
 def _is_blank(x: Any) -> bool:
     if x is None:
         return True
     if isinstance(x, float) and pd.isna(x):
         return True
-    return str(x).strip() == ""
+    s = str(x).strip()
+    return s == "" or s.lower() in _EMPTY_SENTINELS
 
 
-def _split_excel_list(x: Any, sep: str = "|") -> List[str]:
+def _norm_str(x: Any) -> str:
+    return "" if _is_blank(x) else str(x).strip()
+
+
+def _split_multi(cell: Any) -> List[str]:
     """
-    Excel side uses '|' separated values.
-    Return a trimmed, unique, order-preserving list.
+    Split a multi-value Excel cell by '|' or ','; normalize and de-duplicate
+    while preserving order.
     """
-    if _is_blank(x):
+    s = _norm_str(cell)
+    if not s:
         return []
+    # Accept both separators in one pass by replacing '|' with ','
+    s = s.replace("|", ",")
     out: List[str] = []
-    seen = set()
-    for part in str(x).split(sep):
-        p = part.strip()
-        if p and p not in seen:
-            seen.add(p)
-            out.append(p)
+    seen: Set[str] = set()
+    for part in (p.strip() for p in s.split(",") if p.strip()):
+        if part not in seen:
+            out.append(part)
+            seen.add(part)
     return out
 
 
-def _split_any(val: Any, seps: Tuple[str, ...] = (",", "|")) -> List[str]:
-    """
-    Split a value coming from API (CSV string) or Excel.
-    Accept both ',' and '|'; trim/unique/ordered.
-    """
-    if _is_blank(val):
-        return []
-    s = str(val)
-    parts = [s]
-    for sep in seps:
-        new_parts: List[str] = []
-        for chunk in parts:
-            new_parts.extend(chunk.split(sep))
-        parts = new_parts
-    out: List[str] = []
-    seen = set()
-    for p in (x.strip() for x in parts):
-        if p and p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
+def _node_tag(node: NodeRef) -> str:
+    name = getattr(node, "name", None) or getattr(node, "id", "")
+    return f"{name}|{node.id}"
 
 
-# ---------- Importer ----------
+# ------------------------------ importer class ----------------------------- #
+
 
 class NormalizationPoliciesImporter(BaseImporter):
-    """
-    Import Normalization Policies with strict SOURCE vs DESTINATION payload comparison.
-    """
+    """Importer for Normalization Policies (NP)."""
 
+    # BaseImporter contract
     resource_name = "normalization_policies"
     sheet_names = ("NormalizationPolicy",)
     required_columns = ("policy_name", "normalization_packages", "compiled_normalizer")
-    # Base diff engine will use these keys; we feed it canonical lists (sorted).
-    compare_keys = ("name", "normalization_packages", "compiled_normalizer")
-    RESOURCE = "NormalizationPolicy"
+    # Compare by NAMES (canonical); 'name' is implicit key but does not drive UPDATE
+    compare_keys = ("normalization_packages", "compiled_normalizer")
 
+    # Director API resource names
+    RESOURCE = "NormalizationPolicy"
+    PACKAGES_RESOURCE = "NormalizationPackage"
+    COMPILED_SUBPATH = "CompiledNormalizers"
+
+    # Caches (keyed by node.id)
     def __init__(self) -> None:
         super().__init__()
-        self._cache = ResolverCache()
-        # per-node caches
-        self._pkg_name_to_id: Dict[str, Dict[str, str]] = {}   # node.id -> {name:id}
-        self._pkg_id_to_name: Dict[str, Dict[str, str]] = {}   # node.id -> {id:name}
-        self._compiled_set: Dict[str, set] = {}                # node.id -> {compiled_name}
+        self._pkg_name_to_id: Dict[str, Dict[str, str]] = {}  # node.id -> {name: id}
+        self._pkg_id_to_name: Dict[str, Dict[str, str]] = {}  # node.id -> {id: name}
+        self._compiled_names: Dict[str, Set[str]] = {}  # node.id -> set(names)
 
-    # ---------- Validation ----------
+    # ------------------------------ validation ------------------------------ #
 
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+        # Required sheet presence handled by BaseImporter in v2 trunk, but we keep explicit
+        # column check here to provide consistent behavior if overridden.
         sheet = self.sheet_names[0]
-        if sheet not in sheets:
-            log.error("Missing required sheet: %s", sheet)
-            raise ValidationError(f"Missing required sheet: {sheet}")
-        require_columns(sheets[sheet], self.required_columns, context=sheet)
-        log.info(
-            "Sheet '%s' validated with required columns %s",
-            sheet,
-            self.required_columns,
-        )
+        try:
+            require_columns(sheets[sheet], self.required_columns, context=f"sheet '{sheet}'")  # type: ignore[arg-type]
+        except TypeError:
+            # validators.require_columns signature has no 'context' in the current trunk
+            require_columns(sheets[sheet], self.required_columns)
+        log.info("normalization_policies: using sheet '%s'", sheet)
+        log.debug("normalization_policies: columns=%s rows=%d", list(sheets[sheet].columns), len(sheets[sheet].index))
 
-    # ---------- Parse desired (SOURCE) ----------
+    # ------------------------------- desired ------------------------------- #
 
     def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
         """
-        Yield rows with raw SOURCE intent (names); canonicalization happens in canon_desired().
-        Enforce: both lists cannot be empty together → row is skipped with a warning.
+        Yield desired rows with keys:
+          - name: str
+          - normalization_packages: List[str]  (package names)
+          - compiled_normalizer: List[str]     (compiled names)
+          - skip_empty: bool (internal hint for apply/skip)
         """
-        sheet = self.sheet_names[0]
-        df = sheets[sheet]
-        log.debug("Parsing rows from sheet '%s' (%d rows)", sheet, len(df))
+        df: pd.DataFrame = sheets[self.sheet_names[0]]
+        cols = {c.lower(): c for c in df.columns}
 
-        for idx, row in df.iterrows():
-            line_no = idx + 2  # account for header
-            name = str(row.get("policy_name", "")).strip()
+        def col(name: str) -> str:
+            return cols.get(name.lower(), name)
 
+        for _, row in df.iterrows():
+            name = _norm_str(row.get(col("policy_name")))
             if not name:
-                log.warning("Row %d: empty policy_name → skip", line_no)
+                # Silent skip: empty name is simply ignored (like v1 behavior)
                 continue
 
-            pkg_names = _split_excel_list(row.get("normalization_packages"))
-            compiled_names = _split_excel_list(row.get("compiled_normalizer"))
+            pkgs = _split_multi(row.get(col("normalization_packages")))
+            compiled = _split_multi(row.get(col("compiled_normalizer")))
 
-            if not pkg_names and not compiled_names:
-                log.error(
-                    "Row %d (%s): normalization_packages and compiled_normalizer are both empty → SKIP",
-                    line_no,
-                    name,
-                )
-                yield {
-                    "name": name,
-                    "skip_empty": True,
-                    "package_names": [],
-                    "compiled_names": [],
-                }
-                continue
-
-            log.debug(
-                "Row %d (%s): pk=%s compiled=%s",
-                line_no,
-                name,
-                pkg_names,
-                compiled_names,
-            )
-
-            yield {
+            # In the canonical comparison we sort later, but retain the original
+            # order for payload convenience if needed.
+            desired = {
                 "name": name,
-                "package_names": pkg_names,
-                "compiled_names": compiled_names,
+                "normalization_packages": pkgs,
+                "compiled_normalizer": compiled,
+                "skip_empty": (len(pkgs) == 0 and len(compiled) == 0),
             }
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
-        return desired_row.get("name", "")
+            log.debug(
+                "parsed NP name=%s packages=%d compiled=%d",
+                name,
+                len(pkgs),
+                len(compiled),
+            )
+            yield desired
 
-    # ---------- Canonical (for diff) ----------
+    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+        return desired_row["name"]
+
+    # -------------------------- canonical for diff -------------------------- #
 
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        SOURCE canonical view for comparison:
-          - name: str
-          - normalization_packages: sorted list[str] (names; [] allowed)
-          - compiled_normalizer:    sorted list[str] (names; [] allowed)
-        """
-        name = desired_row.get("name", "")
-        if desired_row.get("skip_empty"):
-            # emit both lists empty; diff engine will not plan apply; we'll SKIP in apply()
-            return {"name": name, "normalization_packages": [], "compiled_normalizer": []}
-
-        pk_names = sorted(desired_row.get("package_names") or [])
-        comp_names = sorted(desired_row.get("compiled_names") or [])
-        out = {
-            "name": name,
-            "normalization_packages": pk_names,
-            "compiled_normalizer": comp_names,
+        """Compare by **names** (sorted) for stable diff behavior."""
+        return {
+            "name": desired_row.get("name", ""),
+            "normalization_packages": sorted(str(x) for x in (desired_row.get("normalization_packages") or [])),
+            "compiled_normalizer": sorted(str(x) for x in (desired_row.get("compiled_normalizer") or [])),
         }
-        log.debug("Desired canon for %s → %s", name, out)
-        return out
 
     def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
-        DESTINATION canonical view for comparison:
-          - name: str
-          - normalization_packages: IDs → names (sorted; [] if none)
-          - compiled_normalizer: CSV/list → names (sorted; [] if field is missing/empty)
+        Canonicalize an existing object:
+          - Map package **IDs → names** using the preloaded cache
+          - Normalize compiled_normalizer whether list or comma-separated string
         """
         if not existing_obj:
             return None
 
-        node_id = existing_obj.get("_node_id")
-        name = str(existing_obj.get("name") or "").strip()
-
-        # packages: IDs -> names
-        id_list = existing_obj.get("normalization_packages") or []
+        node_id = existing_obj.get("_node_id_for_cache") or ""  # injected in fetch_existing
         id2name = self._pkg_id_to_name.get(node_id, {})
-        pk_names = sorted([id2name.get(i, i) for i in id_list]) if isinstance(id_list, list) else []
 
-        # compiled: accept list or CSV string; if not present, treat as empty list
-        compiled_field = existing_obj.get("compiled_normalizer")
-        if isinstance(compiled_field, (list, str)):
-            compiled_names = sorted(_split_any(compiled_field))
+        # Packages as names
+        ids_raw = existing_obj.get("normalization_packages") or []
+        if isinstance(ids_raw, list):
+            pkg_names = [id2name.get(str(i), str(i)) for i in ids_raw if _norm_str(i)]
         else:
-            compiled_names = []
+            # Tolerate odd shapes; treat as empty if unexpected
+            pkg_names = []
 
-        out = {
-            "name": name,
-            "normalization_packages": pk_names,
-            "compiled_normalizer": compiled_names,
+        # Compiled normalizers may be list or csv string in API responses
+        comp_raw = existing_obj.get("compiled_normalizer") or []
+        if isinstance(comp_raw, list):
+            comp_names = [str(x).strip() for x in comp_raw if _norm_str(x)]
+        elif isinstance(comp_raw, str):
+            comp_names = [x.strip() for x in comp_raw.split(",") if x.strip()]
+        else:
+            comp_names = []
+
+        return {
+            "name": _norm_str(existing_obj.get("name")),
+            "normalization_packages": sorted(pkg_names),
+            "compiled_normalizer": sorted(comp_names),
         }
-        log.debug("Existing canon for node=%s policy=%s → %s", node_id, name, out)
+
+    # ----------------------------- read existing ---------------------------- #
+
+    def fetch_existing(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Preload dependencies and return {policy_name -> existing_obj}.
+
+        Also inject `_node_id_for_cache` into each existing obj so `canon_existing`
+        can translate package IDs -> names using the correct node cache.
+        """
+        node_t = _node_tag(node)
+        log.info("fetch_existing: start [node=%s]", node_t)
+
+        # 1) Load packages (name <-> id)
+        pkg_name_to_id, pkg_id_to_name = self._list_packages(client, pool_uuid, node)
+        self._pkg_name_to_id[node.id] = pkg_name_to_id
+        self._pkg_id_to_name[node.id] = pkg_id_to_name
+        log.debug(
+            "packages: %d (names) / %d (ids) cached [node=%s]",
+            len(pkg_name_to_id),
+            len(pkg_id_to_name),
+            node_t,
+        )
+
+        # 2) Load compiled normalizers (names)
+        compiled_names = self._list_compiled_normalizers(client, pool_uuid, node)
+        self._compiled_names[node.id] = compiled_names
+        log.debug("compiled_normalizers: %d cached [node=%s]", len(compiled_names), node_t)
+
+        # 3) List policies
+        data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+        if isinstance(data, dict):
+            items_any = data.get("data") or data.get("items") or data.get("results") or []
+            items = [x for x in items_any if isinstance(x, dict)]
+        elif isinstance(data, list):
+            items = [x for x in data if isinstance(x, dict)]
+        else:
+            items = []
+
+        # 4) Best-effort enrich with details (compiled may be missing in list view)
+        out: Dict[str, Dict[str, Any]] = {}
+        for it in items:
+            name = _norm_str(it.get("name"))
+            if not name:
+                continue
+            # Inject for canon_existing()
+            it["_node_id_for_cache"] = node.id
+
+            pol_id = _norm_str(it.get("id"))
+            if pol_id:
+                try:
+                    detail = client.get_json(
+                        client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{pol_id}")
+                    ) or {}
+                    # Merge fields if present under typical shapes
+                    merged = dict(it)
+                    # Common places to look for fields
+                    for src in (detail, detail.get("data") or {}, detail.get("policy") or {}):
+                        if isinstance(src, dict):
+                            if "compiled_normalizer" in src and src["compiled_normalizer"] is not None:
+                                merged["compiled_normalizer"] = src["compiled_normalizer"]
+                            if "normalization_packages" in src and src["normalization_packages"] is not None:
+                                merged["normalization_packages"] = src["normalization_packages"]
+                    it = merged
+                except Exception:
+                    # Non-fatal — we keep the list object as-is
+                    log.debug("fetch_existing: detail read failed for id=%s [node=%s]", pol_id, node_t)
+
+            out[name] = it
+
+        log.info("fetch_existing: found %d normalization policies [node=%s]", len(out), node_t)
         return out
 
-    # ---------- Fetch caches + existing ----------
+    # ------------------------------- payloads ------------------------------- #
 
-def fetch_existing(
-    self, client: DirectorClient, pool_uuid: str, node: NodeRef
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Warm per-node caches and return map of existing policies by name.
-    Crucial: fetch detail per policy to get 'compiled_normalizer', which many
-    list endpoints omit. Sans ça, on voit des UPDATE à chaque run.
-    """
-    node_id = node.id
-    log.info(
-        "Fetching caches & existing NormalizationPolicy on node=%s (%s)",
-        node.name, node_id,
-    )
+    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build POST payload from desired (names → IDs for packages).
+        """
+        name = desired_row["name"]
+        pkg_ids, _ = self._map_pkg_names_to_ids(desired_row, desired_row.get("_node_id") or "")
+        payload = {
+            "name": name,
+            "normalization_packages": pkg_ids,
+            "compiled_normalizer": list(desired_row.get("compiled_normalizer") or []),
+        }
+        log.debug("payload.create name=%s -> %s", name, payload)
+        return payload
 
-    # --- 1) NormalizationPackage cache (name <-> id) ------------------------
-    pkgs = client.list_resource(pool_uuid, node_id, "NormalizationPackage") or []
-    name2id: Dict[str, str] = {}
-    id2name: Dict[str, str] = {}
-    for it in (pkgs if isinstance(pkgs, list) else []):
-        pid = it.get("id")
-        pname = str(it.get("name", "")).strip()
-        if pid and pname:
-            name2id[pname] = pid
-            id2name[pid] = pname
-    self._pkg_name_to_id[node_id] = name2id
-    self._pkg_id_to_name[node_id] = id2name
-    log.info("Cached %d NormalizationPackage(s) on %s", len(name2id), node.name)
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build PUT payload. Same shape as POST (server owns the ID in the path).
+        """
+        name = desired_row["name"]
+        pkg_ids, _ = self._map_pkg_names_to_ids(desired_row, desired_row.get("_node_id") or "")
+        payload = {
+            "name": name,
+            "normalization_packages": pkg_ids,
+            "compiled_normalizer": list(desired_row.get("compiled_normalizer") or []),
+        }
+        log.debug("payload.update name=%s -> %s", name, payload)
+        return payload
 
-    # --- 2) Compiled normalizers inventory (présence) -----------------------
-    # V1 utilisait cette route directe, on la garde.
-    compiled = client.list_resource(
-        pool_uuid, node_id, "NormalizationPackage/CompiledNormalizers"
-    ) or []
-    compiled_set = {
-        str(it.get("name", "")).strip() for it in compiled if isinstance(it, dict)
-    }
-    self._compiled_set[node_id] = compiled_set
-    log.info("Cached %d compiled normalizer(s) on %s", len(compiled_set), node.name)
+    # -------------------------------- apply -------------------------------- #
 
-    # --- 3) Policies existantes + GET détail par policy ---------------------
-    items = client.list_resource(pool_uuid, node_id, self.RESOURCE) or []
-    out: Dict[str, Dict[str, Any]] = {}
+    def apply(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+        decision,
+        existing_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        Execute CREATE/UPDATE, enforcing SKIP on validation failures:
+          - both fields empty
+          - missing packages or compiled names on node
+        """
+        node_t = _node_tag(node)
+        desired = dict(decision.desired or {})
+        desired["_node_id"] = node.id  # for payload builders
 
-    # détecte un getter dispo dans DirectorClient
-    getters = []
-    for cand in ("get_resource", "read_resource", "get", "read"):
-        m = getattr(client, cand, None)
-        if callable(m):
-            getters.append((cand, m))
+        pol_name = desired.get("name") or "(unnamed)"
+        log.info("apply: op=%s policy=%s [node=%s]", getattr(decision, "op", "?"), pol_name, node_t)
 
-    def _get_policy_detail(rid: str) -> Dict[str, Any]:
-        # essaie d'abord les getters "propres"
-        for name, fn in getters:
-            try:
-                # signatures les plus probables: (pool, node, resource, id)
-                return fn(pool_uuid, node_id, self.RESOURCE, rid) or {}
-            except TypeError:
-                # certains clients attendent (pool, node, f"NormalizationPolicy/{id}")
-                try:
-                    return fn(pool_uuid, node_id, f"{self.RESOURCE}/{rid}") or {}
-                except Exception:
-                    continue
-            except Exception:
-                continue
+        # 0) skip if both empty
+        if desired.get("skip_empty"):
+            reason = "both 'normalization_packages' and 'compiled_normalizer' are empty"
+            log.warning("apply: SKIP policy=%s: %s [node=%s]", pol_name, reason, node_t)
+            return {"status": "Skipped", "error": reason}
 
-        # fallback générique HTTP si dispo
-        path = f"configapi/{pool_uuid}/{node_id}/{self.RESOURCE}/{rid}"
-        for cand in ("request_json", "request"):
-            fn = getattr(client, cand, None)
-            if callable(fn):
-                try:
-                    # request(_method, _path) ou request_json(_method, _path)
-                    return fn("GET", path) or {}
-                except Exception:
-                    pass
+        # 1) verify dependencies on node
+        missing_pkgs, missing_comp = self._verify_dependencies(node.id, desired)
+        if missing_pkgs or missing_comp:
+            reason_parts = []
+            if missing_pkgs:
+                reason_parts.append(f"missing packages: {', '.join(sorted(missing_pkgs))}")
+            if missing_comp:
+                reason_parts.append(f"missing compiled: {', '.join(sorted(missing_comp))}")
+            reason = "; ".join(reason_parts)
+            log.warning("apply: SKIP policy=%s due to %s [node=%s]", pol_name, reason, node_t)
+            return {
+                "status": "Skipped",
+                "result": {"missing_packages": sorted(missing_pkgs), "missing_compiled": sorted(missing_comp)},
+                "error": reason,
+            }
 
-        for cand in ("_request_json", "_request"):
-            fn = getattr(client, cand, None)
-            if callable(fn):
-                try:
-                    resp = fn("GET", path)
-                    try:
-                        return resp.json()  # si c’est un objet Response
-                    except Exception:
-                        return resp or {}
-                except Exception:
-                    pass
-
-        log.warning(
-            "No working getter for policy id=%s on node %s; detail unavailable",
-            rid, node.name
-        )
-        return {}
-
-    for it in (items if isinstance(items, list) else []):
-        nm = str(it.get("name", "")).strip()
-        rid = it.get("id")
-        if not nm or not rid:
-            continue
-
-        detail = {}
+        # 2) perform API call
         try:
-            detail = _get_policy_detail(rid)
-        except Exception as e:
-            log.warning(
-                "Failed to get details for NormalizationPolicy %s on %s: %s",
-                nm, node.name, e
-            )
-            detail = {}
+            if decision.op == "CREATE":
+                payload = self.build_payload_create(desired)
+                res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+                return res
+            if decision.op == "UPDATE" and existing_id:
+                payload = self.build_payload_update(desired, {"id": existing_id})
+                res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
+                return res
 
-        # Normalisation: on tente de peupler compiled_normalizer depuis le détail
-        compiled_field = (
-            detail.get("compiled_normalizer")
-            or detail.get("compiled_normalizers")
-            or detail.get("compiled")
-            or it.get("compiled_normalizer")  # au cas où la liste l'aurait fourni
-        )
+            log.info("apply: NOOP policy=%s [node=%s]", pol_name, node_t)
+            return {"status": "Success"}
+        except Exception:
+            log.exception("apply: API call failed for policy=%s [node=%s]", pol_name, node_t)
+            raise
 
-        if compiled_field is not None:
-            it["compiled_normalizer"] = compiled_field  # laisser canon_* unifier en []
-        # Idem: certaines versions renvoient les packages sous forme d’IDs
-        # On laisse canon_existing convertir IDs -> noms via self._pkg_id_to_name
+    # ------------------------------- internals ------------------------------ #
 
-        it["_node_id"] = node_id
-        it["_pool_uuid"] = pool_uuid
-        out[nm] = it
+    def _list_packages(
+        self, client: DirectorClient, pool_uuid: str, node: NodeRef
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """
+        Return ({name -> id}, {id -> name}) for NormalizationPackage on a node.
+        Tolerates both list and dict shapes from the API.
+        """
+        data = client.list_resource(pool_uuid, node.id, self.PACKAGES_RESOURCE) or []
+        if isinstance(data, dict):
+            items_any = data.get("data") or data.get("items") or data.get("results") or []
+            items = [x for x in items_any if isinstance(x, dict)]
+        elif isinstance(data, list):
+            items = [x for x in data if isinstance(x, dict)]
+        else:
+            items = []
 
-    log.info("Found %d existing NormalizationPolicy on node %s", len(out), node.name)
-    return out
+        name_to_id: Dict[str, str] = {}
+        id_to_name: Dict[str, str] = {}
+        for it in items:
+            nm = _norm_str(it.get("name"))
+            pid = _norm_str(it.get("id"))
+            if nm and pid:
+                name_to_id[nm] = pid
+                id_to_name[pid] = nm
+        return name_to_id, id_to_name
+
+    def _list_compiled_normalizers(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Set[str]:
+        """
+        Return {compiled normalizer names} present on the node.
+        Accepts list of dicts or list of strings.
+        """
+        data = client.list_subresource(pool_uuid, node.id, self.PACKAGES_RESOURCE, self.COMPILED_SUBPATH) or []
+        names: Set[str] = set()
+        if isinstance(data, list):
+            for it in data:
+                if isinstance(it, dict):
+                    nm = _norm_str(it.get("name"))
+                    if nm:
+                        names.add(nm)
+                else:
+                    nm = _norm_str(it)
+                    if nm:
+                        names.add(nm)
+        elif isinstance(data, dict):
+            # Some APIs return {"data": [...]}
+            for it in (data.get("data") or data.get("items") or data.get("results") or []):
+                if isinstance(it, dict):
+                    nm = _norm_str(it.get("name"))
+                    if nm:
+                        names.add(nm)
+        return names
+
+    def _map_pkg_names_to_ids(self, desired_row: Dict[str, Any], node_id: str) -> Tuple[List[str], List[str]]:
+        """
+        Map desired package names -> IDs using cache.
+        Returns (ids, missing_names).
+        """
+        name_to_id = self._pkg_name_to_id.get(node_id, {})
+        ids: List[str] = []
+        missing: List[str] = []
+        for nm in (desired_row.get("normalization_packages") or []):
+            key = _norm_str(nm)
+            if not key:
+                continue
+            pid = name_to_id.get(key)
+            if pid:
+                ids.append(pid)
+            else:
+                missing.append(key)
+        return ids, missing
+
+    def _verify_dependencies(self, node_id: str, desired: Dict[str, Any]) -> Tuple[Set[str], Set[str]]:
+        """
+        Return (missing_packages_by_name, missing_compiled_by_name).
+        """
+        missing_pkgs: Set[str] = set()
+        missing_comp: Set[str] = set()
+
+        # Packages
+        pkg_name_to_id = self._pkg_name_to_id.get(node_id, {})
+        for nm in (desired.get("normalization_packages") or []):
+            n = _norm_str(nm)
+            if n and n not in pkg_name_to_id:
+                missing_pkgs.add(n)
+
+        # Compiled
+        compiled_available = self._compiled_names.get(node_id, set())
+        for nm in (desired.get("compiled_normalizer") or []):
+            n = _norm_str(nm)
+            if n and n not in compiled_available:
+                missing_comp.add(n)
+
+        return missing_pkgs, missing_comp

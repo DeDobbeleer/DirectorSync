@@ -1,6 +1,6 @@
-# Developer Guide — DirectorSync (v2, Common Trunk)
+# Developer Guide — DirectorSync (v2, Common Trunk) — updated
 
-> Status: **Updated – 29 Sep 2025**. This revision reflects the modules already migrated to the v2 common trunk and clarifies API payload contracts (notably **Normalization Policies CSV fields**).
+> Status: **Updated – 29 Sep 2025**. This revision reflects the modules migrated to the v2 common trunk and adds **Enrichment Policies** with their API/validation rules.
 > Audience: Developers building, extending, or operating the DirectorSync importer tool.
 
 ---
@@ -11,7 +11,7 @@ DirectorSync is a command-line tool that synchronizes configuration data ("resou
 
 **Key goals**
 
-- Eliminate redundancy across importers (Repos, Routing Policies, Normalization Policies, …).
+- Eliminate redundancy across importers (Repos, Routing Policies, Normalization Policies, **Enrichment Policies**).
 - Keep the CLI and input files identical for users.
 - Provide strong logging, validation, and a clear decision model (**NOOP / CREATE / UPDATE / SKIP**).
 - Make importer behavior **declarative** via **resource profiles** (built-in defaults + optional YAML overrides).
@@ -34,12 +34,13 @@ lp_tenant_importer_v2/
 │  ├─ base.py                  # shared pipeline: load→validate→fetch→diff→apply→report
 │  ├─ repos.py                 # migrated
 │  ├─ routing_policies.py      # migrated
-│  └─ normalization_policies.py# migrated (CSV payload semantics)
+│  ├─ normalization_policies.py# migrated (CSV payload semantics)
+│  └─ enrichment_policies.py   # **migrated in this update**
 └─ utils/
    ├─ __init__.py
    ├─ diff_engine.py           # NOOP/CREATE/UPDATE/SKIP decision helper
    ├─ validators.py            # XLSX sheet/column validation
-   ├─ resolvers.py             # simple in-memory caches for lookups
+   ├─ resolvers.py             # simple per-node caches for lookups
    └─ reporting.py             # uniform table/json output
 ```
 
@@ -71,14 +72,14 @@ defaults:
     repos: ["backends"]
     routing_policies: ["backends"]
     normalization_policies: ["backends"]
-    # others to be added as they are migrated
+    enrichment_policies: ["backends"]
 ```
 
 ### 3.3 Excel (XLSX) conventions
 
 - Sheets and columns depend on the resource **profile**.
 - Multi-value cells are supported via separators **`|`** or **`,`**.
-- **All parsed cell values are strings**. Numeric fields required by the API are cast (when needed) by builders at payload time.
+- **All parsed cell values are strings**. Numeric fields required by the API are cast by builders at payload time.
 
 ---
 
@@ -121,63 +122,47 @@ Standard pipeline:
 
 ---
 
-## 5. Migrated Modules — Quick Reference
+## 5. Migrated Modules — Quick Reference (updated)
 
-| Resource                   | XLSX Sheet             | CLI Command                      | Targets (default) | Payload Contract (POST/PUT)                                                                  | Special Notes |
-|---------------------------|------------------------|----------------------------------|-------------------|-----------------------------------------------------------------------------------------------|---------------|
-| **Repos**                 | `Repo`                 | `import-repos`                   | `backends`        | `name`, `hiddenrepopath:[{path,retention}]`, optional `repoha:[{ha_li,ha_day}]`               | Pre-flight **RepoPaths** check; list-of-dicts compared **order-insensitively** by key. |
-| **Routing Policies**      | `RoutingPolicy`        | `import-routing-policies`        | `backends`        | `policy_name`, `routing_criteria:[{type,key,value,repo,drop}]`, `catch_all`, `active`        | Repo **names→IDs** lookups (criteria & `catch_all`); group rows by policy. |
-| **Normalization Policies**| `NormalizationPolicy`  | `import-normalization-policies`  | `backends`        | **CSV strings**: `norm_packages:"ID1,ID2"`, `compiled_normalizer:"C1,C2"`; `name` on POST | **CSV required** by API (not arrays). Packages are **name→ID**; compiled must exist on node. |
-
-> Equality rules: defined per importer; generally, lists are compared without order using key fields, while scalar fields are direct-equality.
-
----
-
-## 6. Module Details
-
-### 6.1 Repos (canonical example)
-
-- **Parsing**: `storage_paths` and `retention_days` are paired 1:1; optional HA pairs `repoha_li`/`repoha_day`.
-- **Verification**: desired paths must be present in `Repos/RepoPaths` on the node.
-- **Comparison**: `hiddenrepopath` and `repoha` lists are compared **order-insensitively**.
-- **Payload**: list-of-dicts per API contract; numeric values cast appropriately by builders.
-
-### 6.2 Routing Policies
-
-- **Parsing**: group rows by `cleaned_policy_name` (or `policy_name` alias). Multi-value columns (`rule_type`,`key`,`value`,`repo`,`drop`) are zipped into `routing_criteria`.
-- **Lookups**: repo names resolved to IDs (per-node cache) for both `catch_all` and each criterion.
-- **Comparison**: `routing_criteria` compared without order; keys = `{type,key,value,repo}`; `drop` compared as value; also compare `active` and `catch_all`.
-- **Payload**: only documented fields; monitor polled when present.
-
-### 6.3 Normalization Policies
-
-- **Parsing**: `policy_name`, `normalization_packages` (names), `compiled_normalizer` (names). Empty both → **SKIP**.
-- **Dependencies**: preload `NormalizationPackage` (name↔id) and `CompiledNormalizers` sets per node; missing items → **SKIP** with reason.
-- **Comparison**: compare **by names** (sorted) for both fields.
-- **Payload**: **CSV strings** (not lists):
-  - POST: `{ name, norm_packages:"ID1,ID2" | "", compiled_normalizer:"C1,C2" | "" }`
-  - PUT: `{ norm_packages:"ID1,ID2" | "", compiled_normalizer:"C1,C2" | "" }`
+| Resource                   | XLSX Sheets                                     | CLI Command                      | Targets (default) | Payload Contract (POST/PUT)                                                                                 | Special Notes |
+|---------------------------|--------------------------------------------------|----------------------------------|-------------------|--------------------------------------------------------------------------------------------------------------|---------------|
+| **Repos**                 | `Repo`                                          | `import-repos`                   | `backends`        | `name`, `hiddenrepopath:[{path,retention}]`, optional `repoha:[{ha_li,ha_day}]`                              | Pre-flight **RepoPaths** check; list-of-dicts compared **order-insensitively** by key. |
+| **Routing Policies**      | `RoutingPolicy`                                 | `import-routing-policies`        | `backends`        | `policy_name`, `routing_criteria:[{type,key,value,repo,drop}]`, `catch_all`, `active`                       | Repo **names→IDs** lookups (criteria & `catch_all`); group rows by policy. |
+| **Normalization Policies**| `NormalizationPolicy`                           | `import-normalization-policies`  | `backends`        | **CSV strings**: `norm_packages:"ID1,ID2"`, `compiled_normalizer:"C1,C2"`; `name` on POST                | **CSV required** by API (not arrays). Packages are **name→ID**; compiled must exist on node. |
+| **Enrichment Policies**   | `EnrichmentPolicy`, `EnrichmentRules`, `EnrichmentCriteria` | `import-enrichment-policies`      | `backends`        | Envelope **`{"data": { name, specifications, [description] }}`**; PUT accepts same body shape as POST      | **Aggregate by `source`**; strict **SKIP** if **any spec has empty rules** or **any `source` missing on node**; inventory via **`GET …/EnrichmentSource`** and exact match on **`source_name`**. |
 
 ---
 
-## 7. CLI Usage (unchanged from v1)
+## 6. Enrichment Policies (details)
+
+**Aggregation (V1‑compatible):** one specification per `source`. We union & deduplicate `rules` and `criteria` across all rows for a given `(policy_name, source)`.
+
+**Pre-flight checks (hard SKIPs):**
+- **Missing `source_name` on node**: Inventory comes **only** from `GET /configapi/{pool}/{node}/EnrichmentSource` and we match exactly on `source_name` (case‑sensitive). If any required source is absent → **SKIP** the policy.
+- **Empty rules in any specification**: If after aggregation a specification ends up with `rules = []`, the **entire policy is SKIPPED**. Operators must fix the spreadsheet.
+
+**Validation:**
+- Each specification must have **≥ 1 criteria** (empty `value` allowed).
+- Rule fields respected: `category` (`simple` or `type_based`); `operation` defaults to `Equals`; when `category=simple` → `event_key` required; when `type_based` → `type` required; boolean `prefix` coerced to bool.
+
+**Diff & Apply:**
+- Comparison limited to `specifications` (optionally include `description` if required by your process). Lists are order‑insensitive.
+- `POST/PUT /EnrichmentPolicy` with **`{"data": payload}`**. If a job id or monitor URL is returned, we poll; otherwise we infer success from response `status/message` and surface any error text.
+
+---
+
+## 7. CLI Usage (unchanged)
 
 ```bash
-# Repos
-python -m lp_tenant_importer_v2.main   --tenant core   --tenants-file ./tenants.yml   --xlsx ./samples/core_config.xlsx   import-repos --format table
+# Enrichment Policies
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ./tenants.yml \
+  --xlsx ./samples/core_config.xlsx \
+  import-enrichment-policies --format table
 ```
 
-```bash
-# Routing Policies
-python -m lp_tenant_importer_v2.main   --tenant core   --tenants-file ./tenants.yml   --xlsx ./samples/core_config.xlsx   import-routing-policies --format table
-```
-
-```bash
-# Normalization Policies
-python -m lp_tenant_importer_v2.main   --tenant core   --tenants-file ./tenants.yml   --xlsx ./samples/core_config.xlsx   import-normalization-policies --format table
-```
-
-Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`. The final `status` column honors monitor results when present.
+Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`.
 
 ---
 
@@ -185,7 +170,7 @@ Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`. The final `st
 
 - **Idempotence**: re-running with identical inputs yields **NOOP** everywhere.
 - **Unit tests**: per importer (diff logic, lookups, payload builders). Parity tests (v1 vs v2 dry-run) recommended.
-- **Logging**: `DEBUG/INFO/WARNING/ERROR`; tokens masked; concise error surfacing.
+- **Logging**: `DEBUG/INFO/WARNING/ERROR`; tokens masked; concise error surfacing. Enrichment Policies log aggregated `sources` with counts per policy.
 - **Packaging**: Windows `.exe` using **auto-py-exe** (`lp_tenant_importer_v2/main.py` entry point).
 
 ---
@@ -194,14 +179,15 @@ Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`. The final `st
 
 - Same CLI and inputs for end users.
 - Only **global** `defaults.target` is honored for selecting nodes.
-- Importers are thinner; behavior is profile-driven. **Normalization Policies** now explicitly use **CSV fields** per API requirement.
+- Importers are thinner; behavior is profile-driven. **Normalization Policies** use **CSV fields**; **Enrichment Policies** introduce strict SKIP rules and source inventory via the `EnrichmentSource` list endpoint.
 
 ---
 
 ## 10. Glossary
 
 - **Repo**: Storage repository with one or more `{path, retention}` pairs.
-- **RP/NP/PP**: Routing, Normalization, Processing Policies.
+- **EP/RP/NP/PP**: Enrichment, Routing, Normalization, Processing Policies.
 - **BE/SH/AIO**: Backend, Search Head, All-in-One nodes.
 - **NOOP**: No change required.
 - **SKIP**: Not applied due to validation/pre-flight failures.
+

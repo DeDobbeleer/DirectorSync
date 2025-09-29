@@ -1,6 +1,5 @@
-# DirectorSync v2 — Framework Deep Dive (updated)
-
-**Status:** Living document — updated **29 Sep 2025**  
+# DirectorSync v2 — Framework Deep Dive
+**Status:** Living document — initial version _29 Sep 2025_  
 **Scope:** Architecture, common trunk modules, importer algorithms (migrated modules), error handling, testing, and extensibility.
 
 > This document complements, but does not replace, the short Developer Guide.  
@@ -12,7 +11,7 @@
 
 DirectorSync v2 is a refactor of the v1 importer tool that preserves the **same user-facing CLI and inputs** while consolidating cross-cutting logic into a **common trunk**. The goals are:
 - **Maintainability:** No duplicate plumbing across importers.
-- **Idempotence & Safety:** Every run yields deterministic **NOOP / CREATE / UPDATE / SKIP** outcomes.
+- **Idempotence & Safety:** Every run yields deterministic **NOOP/CREATE/UPDATE/SKIP** outcomes.
 - **Observability:** Clear logs, structured results, and monitor-aware statuses.
 - **Extensibility:** New importers are thin; behavior can be expressed declaratively (profiles) and registered centrally.
 
@@ -54,7 +53,7 @@ Per command & per node:
       repos: ["backends"]
       routing_policies: ["backends"]
       normalization_policies: ["backends"]
-      enrichment_policies: ["backends"]
+      # new importers will add their own keys here
   ```
 - Per-tenant overrides of `defaults.target` are ignored (warned), which eliminates inconsistent targeting.
 
@@ -127,7 +126,6 @@ Defines the importer lifecycle and overridable hooks:
 - `repos` → `import-repos` (targets: `backends`)
 - `routing_policies` → `import-routing-policies` (targets: `backends`)
 - `normalization_policies` → `import-normalization-policies` (targets: `backends`)
-- `enrichment_policies` → `import-enrichment-policies` (targets: `backends`) ← **new in this update**
 
 ### 5.2 Resource Profiles (declarative)
 Two forms coexist:
@@ -140,7 +138,7 @@ Two forms coexist:
 
 ## 6) Algorithms — Migrated Importers (Complete)
 
-> The following describe the exact behavior at the time of writing. Any API or importer change should be reflected here.
+> The following describe the exact behavior at the time of writing. Any API changes or new edge cases should be reflected here.
 
 ### 6.1 Repos
 
@@ -247,59 +245,17 @@ Two forms coexist:
 
 ---
 
-### 6.4 **Enrichment Policies** — **new in v2**
-
-**Inputs (sheets):**
-- `EnrichmentPolicy` — columns: `policy_name`, `spec_index`, `source`, optional `description`.
-- `EnrichmentRules` — columns: `policy_name`, `spec_index`, `category` (`simple`|`type_based`), `operation` (default `Equals`), `prefix` (bool), `event_key` (for `simple`), `source_key`, `type` (for `type_based`).
-- `EnrichmentCriteria` — columns: `policy_name`, `spec_index`, `type`, `key`, `value` (empty allowed).
-
-**Aggregation model (v2):**
-- **One specification per `source`** (V1 behavior, preserved). All rows for the same `policy_name` + `source` are **unioned**:
-  - `rules` = union of all rules across `spec_index` for that source (deduplicated; order-insensitive).
-  - `criteria` = union of all criteria across `spec_index` for that source (deduplicated; order-insensitive).  
-- `criteria` **must** contain **≥ 1** item per specification.
-
-**Strict SKIP rules (operator‑friendly):**
-1. **Missing source on node** → `SKIP` policy.  
-   Inventory comes **only** from `GET /configapi/{pool}/{node}/EnrichmentSource`; we match **exactly** on the `source_name` field (case‑sensitive). No other endpoint (e.g., `refreshlist`) is used.
-2. **Any specification has `rules = []`** → `SKIP` policy.  
-   This mirrors the platform’s behavior (the API rejects empty rules). The **only** remediation path is to **edit the XLSX**.
-
-**Fetch existing:**
-- `GET /configapi/{pool}/{node}/EnrichmentPolicy` (list). Handle both raw list and `{data:[…]}` wrapper.
-
-**Canonicalization & Diff:**
-- Compare **only** the `specifications` field (optionally include `description` if required).  
-- Lists `rules` and `criteria` are compared **order‑insensitively** by canonical JSON.
-
-**Payload (POST/PUT):**
-- Envelope required: **`{"data": { name, specifications, [description] }}`**.
-- PUT accepts the same body shape as POST.
-
-**Apply & Monitor:**
-- Prefer job monitoring when a job id or monitor URL is returned; otherwise infer success from response `status/message`.  
-- Error messages from the API are surfaced verbatim in the final report (no more silent `Failed`).
-
-**Operator guidance:**
-- Ensure the target node exposes the required `source_name` values in `GET …/EnrichmentSource` before running.  
-- Populate at least one rule per source in the spreadsheet; otherwise the whole policy is skipped.  
-- Re‑run to confirm **NOOP** idempotence after a successful apply.
-
----
-
 ## 7) Error Handling & SKIP Policy
 
 **Categories:**
 - **VALIDATION ERROR** (e.g., missing sheet/columns) → abort command with clear message.
-- **SKIP** (non‑fatal, per row): missing dependencies, intentionally empty config, unknown references.
-- **FAIL** (fatal per row): network/HTTP errors that prevent certainty; surfaced with context.
+- **SKIP** (non-fatal, per-row): missing dependencies, intentionally empty config, unknown repos, invalid references.
+- **FAIL** (fatal per-row): network/HTTP errors that prevent certainty; surfaced with context.
 - **NOOP**: explicit when desired == existing.
 
 **Principles:**
-- Prefer **SKIP** over FAIL when the issue is input/data completeness (operator can fix and re‑run).
+- Prefer **SKIP** over FAIL when the issue is input/data completeness (operator can fix and re-run).
 - Aggregate errors per resource to avoid cascading aborts.
-- For Enrichment Policies, the two SKIP guards (missing source, empty rules) are **hard** and non‑overridable.
 
 ---
 
@@ -308,15 +264,14 @@ Two forms coexist:
 - Levels: `DEBUG` (deep payloads), `INFO` (pipeline milestones, counts), `WARNING` (SKIPs), `ERROR` (failures).
 - Tokens are masked in all log lines.
 - Reports: **table** (human) and **json** (machine), always including a `status` per item. Monitor terminal states (e.g., `Created`, `Updated`, `Noop`, `Skipped`) are propagated.
-- For Enrichment Policies, we log per policy the aggregated **sources** with counts: `#rules` and `#criteria`.
 
 ---
 
 ## 9) Performance & Scaling
 
 - **Caching:** name↔ID maps and inventories are kept per node for the duration of a run.
-- **Batching:** where APIs support it, can be explored in future importers (current ones operate item‑wise).
-- **Detail calls:** used only when list views are incomplete. Prefer minimal footprints.
+- **Batching:** where APIs support it, can be explored in future importers (current ones operate item-wise).
+- **Detail calls:** used only when list views are incomplete (e.g., NP compiled). Prefer minimal footprints.
 
 ---
 
@@ -333,7 +288,7 @@ Two forms coexist:
 - **Unit tests:** parsing, canonicalization, and diff decisions. Include CSV vs array edge cases for NP.
 - **Contract tests:** recorded API fixtures covering list vs wrapped shapes and missing fields.
 - **Idempotence tests:** second run after apply yields 100% NOOP.
-- **Dry‑run parity:** dry‑run decision set equals apply decision set (minus monitor statuses).
+- **Dry-run parity:** dry-run decision set equals apply decision set (minus monitor statuses).
 
 ---
 
@@ -352,17 +307,16 @@ python -m lp_tenant_importer_v2.main \
 - `import-repos`
 - `import-routing-policies`
 - `import-normalization-policies`
-- `import-enrichment-policies`  ← **new**
 
 **Typical flow:**
 1. Run with `--dry-run` and review plan.
 2. Run without `--dry-run` to apply.
-3. Re‑run to confirm **NOOP** (idempotence).
+3. Re-run to confirm **NOOP** (idempotence).
 
 **Troubleshooting:**
-- Enrichment Policies: if you see `Skipped` due to missing sources, onboard those sources on the node first; if `Skipped` due to empty rules, populate rules in the spreadsheet.
-- Normalization Policies: ensure payload builders emit **CSV strings**.
-- TLS issues: use `--no-verify` in lab, never in production.
+- CSV vs Arrays (NP): ensure payload builders emit CSV strings.
+- Unknown repo/package/compiled: create them first or fix names; re-run.
+- TLS issues: use `--no-verify` temporarily in lab, never in production.
 
 ---
 
@@ -388,11 +342,12 @@ python -m lp_tenant_importer_v2.main \
 
 ## 14) Roadmap & Change Log
 
-- **Migrated now:** Repos, Routing Policies, Normalization Policies, **Enrichment Policies (new)**.
+- **Migrated now:** Repos, Routing Policies, Normalization Policies.
 - **Next candidates:** Processing Policies, Devices, Device Groups, Syslog Collectors, Alerts.
 - **Breaking changes tracker:**  
-  - NP payloads -> **CSV** strings (v2).
-  - **EP v2**: aggregation **by source**, strict SKIPs: **missing `source_name`** on node or **empty rules in any spec**; payload envelope `{ "data": ... }` for POST/PUT.
+  - NP payloads -> **CSV** strings (v2) — documented and implemented.
+
+A table of migrated modules is maintained in the short Developer Guide and mirrored here.
 
 ---
 
@@ -404,9 +359,6 @@ python -m lp_tenant_importer_v2.main \
 | Repos | `Repo` | `name`, `storage_paths`, `retention_days` *(+ optional HA fields)* |
 | Routing Policies | `RoutingPolicy` | `policy_name`, `rule_type`, `key`, `value`, `repo`, `drop`, `catch_all`, `active` |
 | Normalization Policies | `NormalizationPolicy` | `policy_name`, `normalization_packages`, `compiled_normalizer` |
-| **Enrichment Policies** | `EnrichmentPolicy` | `policy_name`, `spec_index`, `source` |
-|  | `EnrichmentRules` | `policy_name`, `spec_index`, `category`, `operation?`, `prefix?`, `event_key?`, `source_key?`, `type?` |
-|  | `EnrichmentCriteria` | `policy_name`, `spec_index`, `type`, `key`, `value?` |
 
 > Multi-values accept `|` or `,`. Empty cells are skipped after normalization.
 
@@ -414,7 +366,8 @@ python -m lp_tenant_importer_v2.main \
 - Repos: `Repos` resource (+ `RepoPaths` pre-flight list).
 - Routing Policies: `RoutingPolicy` resource.
 - Normalization Policies: `NormalizationPolicy`, `NormalizationPackage`, `NormalizationPackage/CompiledNormalizers`.
-- **Enrichment Policies**: `EnrichmentPolicy`; inventory of sources via `GET …/EnrichmentSource` (`source_name`), **no** `refreshlist`.
+
+> Exact URLs are built with `configapi(pool_uuid, node_id, <Resource or Subpath>)` and may differ by Director version; the client tolerates `data/items/results` wrappers.
 
 ### C) Status Reference
 - **NOOP** — existing config already matches desired state.
@@ -422,3 +375,9 @@ python -m lp_tenant_importer_v2.main \
 - **UPDATE** — resource found but differs; PUT will be issued.
 - **SKIP** — input/dependency invalid; nothing applied; a human-readable reason is recorded.
 
+---
+
+_This document is versioned with the repository and should be updated whenever:_
+- A new importer is migrated or substantially changed.
+- An API contract changes (e.g., NP CSV fields).
+- A new equality or validation rule is introduced.

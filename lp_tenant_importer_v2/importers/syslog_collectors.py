@@ -122,7 +122,7 @@ class SyslogCollectorsImporter(BaseImporter):
 
     # BaseImporter contract (we override validate, so required_columns is unused here)
     resource_name: str = "syslog_collectors"
-    sheet_names = ("SyslogCollector", "SyslogCollectors")
+    sheet_names = ("DeviceFetcher","SyslogCollector", "SyslogCollectors")
     required_columns = tuple()
 
     # Stable subset used by diff engine (node-agnostic)

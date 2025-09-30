@@ -4,11 +4,11 @@ from __future__ import annotations
 """
 Syslog Collectors importer (DirectorSync v2)
 
-Strictly aligned to BaseImporter pipeline and coding style used in the existing
-importers (e.g., processing_policies.py, devices.py).
+Strictly aligned with BaseImporter pipeline and coding style used in the
+existing importers (e.g., processing_policies.py, devices.py).
 
-Product truth recap:
-- Workbook is filtered by app == "SyslogCollector" (device-scoped only).
+Product rules recap:
+- Input rows are filtered by app == "SyslogCollector" (device-scoped only).
 - Mandatory fields for CREATE/UPDATE: device_name (resolved to id), charset,
   parser, proxy_condition in {"use_as_proxy", "uses_proxy", "None"}.
 - Matrix:
@@ -18,16 +18,20 @@ Product truth recap:
                     (already present on the node or created earlier in this run),
                     hostname required, processpolicy required
   * None          : proxy_ip empty, hostname empty, processpolicy required
-- ProcessingPolicy resolution: workbook provides a *source id* that we map to a
-  *name* via the "ProcessingPolicies" sheet, then we resolve name → id on the node.
-- We deliberately ignore any "log_collector" field in this project.
-- We implement a phase-like ordering by yielding all `use_as_proxy` desired rows
-  first, then `None`, then `uses_proxy`. During `apply`, when we CREATE a proxy,
-  we update an in-memory proxy-IP set so subsequent `uses_proxy` rows see it.
+- ProcessingPolicy resolution:
+  * Preferred path: workbook provides a *source id* that we map to a *name*
+    via the "ProcessingPolicies" sheet, then we resolve name → id on the node.
+  * Fallback: if the cell does not map as an ID, treat it as a *name* directly
+    (the final id is resolved via API).
+- We ignore any "log_collector" field in this project.
+- Phase-like ordering without extra inventory passes:
+  1) use_as_proxy, 2) None, 3) uses_proxy.
+  When we CREATE a proxy, we add the device IP into an in-memory set so later
+  uses_proxy rows in the same run can pass the dependency check.
 
-Resulting diff:
-- We compare on names (processpolicy_name) and order-insensitive lists (proxy_ip, hostname)
-  normalized to CSV strings for subset equality, following the simplicity of other importers.
+Diff subset (node-agnostic):
+- Compare on processpolicy_name (not id) and on order-insensitive CSV lists
+  (proxy_ip, hostname), same simplicity as used elsewhere.
 """
 
 import logging
@@ -45,11 +49,11 @@ log = logging.getLogger(__name__)
 
 # ----------------------------- helpers ------------------------------------
 
-
 _EMPTY = {"", "nan", "none", "null", "-"}
 
 
 def _is_blank(x: Any) -> bool:
+    """Return True if the cell is effectively empty."""
     if x is None:
         return True
     if isinstance(x, float):
@@ -63,10 +67,12 @@ def _is_blank(x: Any) -> bool:
 
 
 def _s(x: Any) -> str:
+    """Normalize any scalar to a stripped string (empty if blank)."""
     return "" if _is_blank(x) else str(x).strip()
 
 
-def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",")) -> List[str]:
+def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str]:
+    """Split a multi-valued cell by allowed separators, trim, dedupe, sort."""
     raw = _s(cell)
     if not raw:
         return []
@@ -78,10 +84,12 @@ def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",")) -> List[str]:
 
 
 def _csv(parts: Iterable[str]) -> str:
+    """Canonical CSV string from an iterable, trimmed/deduped/sorted."""
     return ",".join(sorted({_s(x) for x in parts if _s(x)}))
 
 
 def _norm_condition(v: Any) -> str:
+    """Normalize proxy_condition to one of ('use_as_proxy', 'uses_proxy', 'None')."""
     low = _s(v).lower()
     mapping = {"use_as_proxy": "use_as_proxy", "uses_proxy": "uses_proxy", "none": "None"}
     return mapping.get(low, _s(v))
@@ -92,7 +100,6 @@ def _node_tag(node: NodeRef) -> str:
 
 
 # ------------------------------ model -------------------------------------
-
 
 @dataclass(frozen=True)
 class _DesiredSC:
@@ -107,38 +114,35 @@ class _DesiredSC:
 
 # ----------------------------- importer -----------------------------------
 
-
 class SyslogCollectorsImporter(BaseImporter):
     """
     SyslogCollector importer using the BaseImporter pipeline.
 
-    Sheet:
-      - "SyslogCollector" (preferred) or "SyslogCollectors" (alias)
-    Required columns (case-insensitive):
+    Sheets searched (in order):
+      - "SyslogCollector" (preferred)
+      - "SyslogCollectors" (alias)
+      - "DeviceFetcher" (fallback if you co-locate rows there)
+    Required columns (case-insensitive) on the chosen sheet:
       - app, device_name, parser, charset, proxy_condition
     Optional columns:
-      - proxy_ip (list), hostname (list), processpolicy (source PP id from workbook)
+      - proxy_ip (list), hostname (list), processpolicy (source PP id or direct name)
     """
 
-    # BaseImporter contract (we override validate, so required_columns is unused here)
     resource_name: str = "syslog_collectors"
-    sheet_names = ("DeviceFetcher","SyslogCollector", "SyslogCollectors")
+    sheet_names = ("DeviceFetcher", "SyslogCollector", "SyslogCollectors", )
     required_columns = tuple()
 
-    # Stable subset used by diff engine (node-agnostic)
     compare_keys = ("proxy_condition", "parser", "charset", "proxy_ips", "hostnames", "processpolicy_name")
-
-    # Director API resource name
     RESOURCE = "SyslogCollector"
 
     # Per-node caches
-    _device_name_to_id: Dict[str, Dict[str, str]]          # node.id -> {device_name -> device_id}
-    _device_name_to_ip: Dict[str, Dict[str, str]]          # node.id -> {device_name -> device_ip}
-    _pp_name_to_id: Dict[str, Dict[str, str]]              # node.id -> {pp_name -> pp_id}
-    _pp_id_to_name: Dict[str, Dict[str, str]]              # node.id -> {pp_id -> pp_name}
-    _available_proxy_ips: Dict[str, set]                   # node.id -> {ip strings}
-    _xlsx_pp_id_to_name: Dict[str, str]                    # workbook-level cache (source id -> name)
-    _sheet_key: str                                        # chosen sheet name in this run
+    _device_name_to_id: Dict[str, Dict[str, str]]
+    _device_name_to_ip: Dict[str, Dict[str, str]]
+    _pp_name_to_id: Dict[str, Dict[str, str]]
+    _pp_id_to_name: Dict[str, Dict[str, str]]
+    _available_proxy_ips: Dict[str, set]
+    _xlsx_pp_id_to_name: Dict[str, str]
+    _sheet_key: Optional[str]
 
     def __init__(self) -> None:
         super().__init__()
@@ -148,27 +152,43 @@ class SyslogCollectorsImporter(BaseImporter):
         self._pp_id_to_name = {}
         self._available_proxy_ips = {}
         self._xlsx_pp_id_to_name = {}
-        self._sheet_key = "SyslogCollector"
+        self._sheet_key = None
 
     # ----------------------------- validate --------------------------------
 
+    def _choose_sheet_with_rows(self, sheets: Dict[str, pd.DataFrame]) -> Optional[str]:
+        """Pick the first candidate sheet containing at least one app == 'SyslogCollector' row."""
+        for s in self.sheet_names:
+            if s not in sheets:
+                continue
+            df = sheets[s]
+            # find an 'app' column
+            app_col = None
+            for c in df.columns:
+                if str(c).strip().lower() == "app":
+                    app_col = c
+                    break
+            if not app_col:
+                continue
+            if (df[app_col].astype(str).str.strip() == "SyslogCollector").any():
+                return s
+        return None
+
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         """
-        Custom validation to support sheet alias and case-tolerant columns.
+        Choose sheet robustly and perform minimal structural validation.
+        If no candidate sheet has SyslogCollector rows, we no-op gracefully.
         """
-        # Choose the actual sheet present
-        chosen: Optional[str] = None
-        for s in self.sheet_names:
-            if s in sheets:
-                chosen = s
-                break
+        chosen = self._choose_sheet_with_rows(sheets)
         if not chosen:
-            raise ValidationError("Missing required sheet: SyslogCollector (or SyslogCollectors)")
+            log.info("No SyslogCollector rows found across candidate sheets %s — nothing to do.", self.sheet_names)
+            self._sheet_key = None
+            return
 
         self._sheet_key = chosen
         df = sheets[chosen]
 
-        # Build lowercase->original column name map
+        # Lowercase->original column map
         cols = {str(c).strip().lower(): str(c) for c in df.columns}
 
         def need(*names: str) -> str:
@@ -178,23 +198,21 @@ class SyslogCollectorsImporter(BaseImporter):
                     return cols[k]
             raise ValidationError(f"{chosen}: missing required column ({' / '.join(names)})")
 
-        # Required
+        # Required columns present on the chosen sheet
         need("app")
         need("device_name", "device", "name")
         need("parser")
         need("charset")
         need("proxy_condition", "condition", "mode")
 
-        # Optional columns not enforced; we discover at iter_desired time.
-
-        # Build workbook-level PP source-id -> name mapping if sheet present
+        # Load PP source id -> name mapping if present
         if "ProcessingPolicies" in sheets:
             pp = sheets["ProcessingPolicies"].copy()
             pp.columns = [str(c).strip() for c in pp.columns]
 
-            def pick_col(df: pd.DataFrame, *cands: str) -> Optional[str]:
+            def pick_col(df_: pd.DataFrame, *cands: str) -> Optional[str]:
                 for c in cands:
-                    if c in df.columns:
+                    if c in df_.columns:
                         return c
                 return None
 
@@ -220,11 +238,29 @@ class SyslogCollectorsImporter(BaseImporter):
           2) None
           3) uses_proxy
         """
+        if not self._sheet_key:
+            return  # nothing to do
+
         df: pd.DataFrame = sheets[self._sheet_key].copy()
-        # Normalize headers (keep original for access)
+        # lowercase map for tolerant header matching
         cols = {str(c).strip().lower(): str(c) for c in df.columns}
 
         def col(*names: str) -> Optional[str]:
+            aliases = {
+                "device_name": ("device_name", "device", "name"),
+                "parser": ("parser",),
+                "charset": ("charset",),
+                "proxy_condition": ("proxy_condition", "condition", "mode"),
+                "proxy_ip": ("proxy_ip", "proxy_ips", "proxy ip", "proxy-ips"),
+                "hostname": ("hostname", "hostnames", "host_name"),
+                "processpolicy": ("processpolicy", "processingpolicy", "pp_id", "process_policy", "process_policy_id"),
+                "app": ("app",),
+            }
+            for n in names:
+                for k in aliases.get(n, (n,)):
+                    if k in cols:
+                        return cols[k]
+            # generic fallback
             for n in names:
                 k = n.strip().lower()
                 if k in cols:
@@ -232,19 +268,21 @@ class SyslogCollectorsImporter(BaseImporter):
             return None
 
         c_app = col("app")
-        c_dev = col("device_name", "device", "name")
+        c_dev = col("device_name")
         c_par = col("parser")
         c_chr = col("charset")
-        c_con = col("proxy_condition", "condition", "mode")
-        c_pip = col("proxy_ip", "proxy_ips", "proxy ip")
-        c_hst = col("hostname", "hostnames")
-        c_pps = col("processpolicy", "processingpolicy", "pp_id")
+        c_con = col("proxy_condition")
+        c_pip = col("proxy_ip")
+        c_hst = col("hostname")
+        c_pps = col("processpolicy")
 
         if not all([c_app, c_dev, c_par, c_chr, c_con]):
             raise ValidationError("SyslogCollector: missing one of required columns")
 
         # Filter on app == SyslogCollector
         df = df[(df[c_app].astype(str).str.strip() == "SyslogCollector")].copy()
+        if df.empty:
+            return
 
         phase_A: List[Dict[str, Any]] = []
         phase_B: List[Dict[str, Any]] = []
@@ -253,7 +291,11 @@ class SyslogCollectorsImporter(BaseImporter):
         for _, row in df.iterrows():
             device_name = _s(row[c_dev])
             if not device_name:
-                continue  # silently drop unnamed rows (same tolerance as other importers)
+                continue
+
+            # processpolicy: try source-id -> name mapping; fallback to direct name
+            pp_cell = _s(row[c_pps]) if c_pps else ""
+            processpolicy_name = self._xlsx_pp_id_to_name.get(pp_cell, "") or pp_cell
 
             desired = _DesiredSC(
                 device_name=device_name,
@@ -262,7 +304,7 @@ class SyslogCollectorsImporter(BaseImporter):
                 proxy_condition=_norm_condition(row[c_con]),
                 proxy_ips=_split_multi(row[c_pip]) if c_pip else [],
                 hostnames=_split_multi(row[c_hst]) if c_hst else [],
-                processpolicy_name=self._xlsx_pp_id_to_name.get(_s(row[c_pps]), "") if c_pps else "",
+                processpolicy_name=processpolicy_name,
             )
             as_dict = {
                 "device_name": desired.device_name,
@@ -281,7 +323,6 @@ class SyslogCollectorsImporter(BaseImporter):
             else:
                 phase_C.append(as_dict)
 
-        # Yield in phase order
         for item in phase_A + phase_B + phase_C:
             yield item
 
@@ -329,21 +370,16 @@ class SyslogCollectorsImporter(BaseImporter):
         self._device_name_to_id[node.id] = {}
         self._device_name_to_ip[node.id] = {}
         dev_raw = client.list_resource(pool_uuid, node.id, "Devices") or []
-        dev_items: List[Dict[str, Any]]
-        if isinstance(dev_raw, list):
-            dev_items = [x for x in dev_raw if isinstance(x, dict)]
-        elif isinstance(dev_raw, dict):
-            dev_items = (dev_raw.get("data") or dev_raw.get("items") or dev_raw.get("devices") or []) or []
-            dev_items = [x for x in dev_items if isinstance(x, dict)]
+        if isinstance(dev_raw, dict):
+            dev_items = dev_raw.get("data") or dev_raw.get("items") or dev_raw.get("devices") or []
         else:
-            dev_items = []
+            dev_items = dev_raw
+        dev_items = [x for x in (dev_items or []) if isinstance(x, dict)]
 
         def _dev_ip(d: Dict[str, Any]) -> str:
-            # Be tolerant to common field names
             for k in ("ip", "ip_address", "ipaddress", "device_ip", "management_ip"):
                 v = d.get(k)
                 if _s(v):
-                    # if list, pick the first IP (Devices importer stores list)
                     if isinstance(v, list) and v:
                         return _s(v[0])
                     return _s(v)
@@ -360,15 +396,11 @@ class SyslogCollectorsImporter(BaseImporter):
         self._pp_name_to_id[node.id] = {}
         self._pp_id_to_name[node.id] = {}
         pp_raw = client.list_resource(pool_uuid, node.id, "ProcessingPolicy") or []
-        pp_items: List[Dict[str, Any]]
-        if isinstance(pp_raw, list):
-            pp_items = [x for x in pp_raw if isinstance(x, dict)]
-        elif isinstance(pp_raw, dict):
-            pp_items = (pp_raw.get("data") or pp_raw.get("items") or pp_raw.get("results") or []) or []
-            pp_items = [x for x in pp_items if isinstance(x, dict)]
+        if isinstance(pp_raw, dict):
+            pp_items = pp_raw.get("data") or pp_raw.get("items") or pp_raw.get("results") or []
         else:
-            pp_items = []
-
+            pp_items = pp_raw
+        pp_items = [x for x in (pp_items or []) if isinstance(x, dict)]
         for it in pp_items:
             nm = _s(it.get("name") or it.get("policy_name"))
             pid = _s(it.get("id"))
@@ -386,17 +418,12 @@ class SyslogCollectorsImporter(BaseImporter):
             if not dev_name or not dev_id:
                 continue
             try:
-                plugins = client.list_subresource(
-                    pool_uuid, node.id, "Devices", f"{dev_id}/plugins"
-                ) or []
-            except Exception as exc:  # pragma: no cover (defensive)
-                log.error(
-                    "fetch_existing: list plugins failed device=%s [node=%s] err=%s",
-                    dev_name, node_t, exc
-                )
+                # Signature aligned with other importers
+                plugins = client.list_subresource(pool_uuid, node.id, "Devices", dev_id, "plugins") or []
+            except Exception as exc:  # pragma: no cover
+                log.error("fetch_existing: list plugins failed device=%s [node=%s] err=%s", dev_name, node_t, exc)
                 continue
 
-            # Accept list or dict("data"/"items")
             if isinstance(plugins, dict):
                 items = plugins.get("data") or plugins.get("items") or []
             else:
@@ -418,13 +445,12 @@ class SyslogCollectorsImporter(BaseImporter):
                     "proxy_ips": _split_multi(p.get("proxy_ip") or p.get("ips") or p.get("addresses")),
                     "hostnames": _split_multi(p.get("hostname") or p.get("hostnames")),
                 }
-                # Enrich: PP name from id (if any)
+                # Enrich PP name from id (if any)
                 pp_id = _s(p.get("processpolicy") or p.get("processpolicy_id"))
                 obj["processpolicy_name"] = self._pp_id_to_name[node.id].get(pp_id, "")
 
                 existing[dev_name] = obj
 
-                # Build proxy IP index from *device IP* when it's a proxy
                 if obj["proxy_condition"] == "use_as_proxy":
                     ip = self._device_name_to_ip[node.id].get(dev_name, "")
                     if ip:
@@ -441,46 +467,41 @@ class SyslogCollectorsImporter(BaseImporter):
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Build the POST payload. Device id and PP id are resolved in apply()
-        using per-node caches and the _current_node sentinel.
+        Build POST payload. Device id and PP id are resolved using per-node caches
+        and the _current_node sentinel set in apply().
         """
-        d = {k: v for k, v in desired_row.items()}
-        # Resolve device id
         node = getattr(self, "_current_node", None)
         if node is None:
             raise RuntimeError("current node not set in apply()")
 
-        dev_id = self._device_name_to_id.get(node.id, {}).get(_s(d.get("device_name")) or "")
+        dev_id = self._device_name_to_id.get(node.id, {}).get(_s(desired_row.get("device_name")) or "")
         if not dev_id:
-            # apply() handles SKIP logic; raise here to surface neat error upstream
-            raise RuntimeError(f"Device not found: '{_s(d.get('device_name'))}'")
+            raise RuntimeError(f"Device not found: '{_s(desired_row.get('device_name'))}'")
 
         payload: Dict[str, Any] = {
             "device_id": dev_id,
-            "proxy_condition": _norm_condition(d.get("proxy_condition")),
-            "parser": _s(d.get("parser")),
-            "charset": _s(d.get("charset")),
+            "proxy_condition": _norm_condition(desired_row.get("proxy_condition")),
+            "parser": _s(desired_row.get("parser")),
+            "charset": _s(desired_row.get("charset")),
         }
 
         cond = payload["proxy_condition"]
         if cond == "use_as_proxy":
-            # must be empty
             return payload
 
-        # resolve PP id (required for None/uses_proxy)
-        pp_name = _s(d.get("processpolicy_name"))
+        # resolve PP id (required for None/uses_proxy) if known on node
+        pp_name = _s(desired_row.get("processpolicy_name"))
         if pp_name:
             pp_id = self._pp_name_to_id.get(node.id, {}).get(pp_name, "")
             if pp_id:
                 payload["processpolicy"] = pp_id
 
         if cond == "None":
-            # lists must be empty; processpolicy already set (if known)
             return payload
 
         # uses_proxy
-        ips = [x for x in d.get("proxy_ips", []) if _s(x)]
-        host = [x for x in d.get("hostnames", []) if _s(x)]
+        ips = [x for x in desired_row.get("proxy_ips", []) if _s(x)]
+        host = [x for x in desired_row.get("hostnames", []) if _s(x)]
         if ips:
             payload["proxy_ip"] = ips
         if host:
@@ -488,10 +509,7 @@ class SyslogCollectorsImporter(BaseImporter):
         return payload
 
     def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
-        p = self.build_payload_create(desired_row)
-        # The Director API usually expects the id at path level; some endpoints also
-        # accept an 'id' in body. Be tolerant but avoid injecting unless necessary.
-        return p
+        return self.build_payload_create(desired_row)
 
     # -------------------------------- apply --------------------------------
 
@@ -505,7 +523,7 @@ class SyslogCollectorsImporter(BaseImporter):
     ) -> Dict[str, Any]:
         """
         Apply decision with strict validation and dependency checks on the *node*.
-        Returns a dict suitable for BaseImporter to enrich the report row.
+        Returns a dict for BaseImporter to enrich the report row.
         """
         # Make node available to payload builders
         self._current_node = node  # type: ignore[attr-defined]
@@ -520,22 +538,48 @@ class SyslogCollectorsImporter(BaseImporter):
         ips = [x for x in desired.get("proxy_ips", []) if _s(x)]
         hosts = [x for x in desired.get("hostnames", []) if _s(x)]
 
+        log.debug(
+            "apply.check device=%s cond=%s parser=%s charset=%s ips=%s hosts=%s pp_name=%s [node=%s]",
+            dev_name, cond, parser, charset, ips, hosts, pp_name, node_t
+        )
+
         # ---- Mandatory field checks (common) ----
-        if not parser or not charset or not cond:
-            msg = "Missing mandatory fields (parser/charset/proxy_condition)"
+        missing_common = []
+        if not parser:
+            missing_common.append("parser")
+        if not charset:
+            missing_common.append("charset")
+        if not cond:
+            missing_common.append("proxy_condition")
+        if missing_common:
+            msg = "Missing mandatory fields: " + ", ".join(missing_common)
             log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
             return {"status": "Skipped", "error": msg}
 
         # ---- Matrix enforcement ----
         if cond == "use_as_proxy":
-            if ips or hosts or pp_name:
-                msg = "use_as_proxy requires empty proxy_ip, hostname, processpolicy"
+            bad = []
+            if ips:
+                bad.append("proxy_ip must be empty for use_as_proxy")
+            if hosts:
+                bad.append("hostname must be empty for use_as_proxy")
+            if pp_name:
+                bad.append("processpolicy must be empty for use_as_proxy")
+            if bad:
+                msg = "; ".join(bad)
                 log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
                 return {"status": "Skipped", "error": msg}
 
         elif cond == "None":
-            if ips or hosts or not pp_name:
-                msg = "None requires processpolicy (and empty proxy_ip/hostname)"
+            bad = []
+            if not pp_name:
+                bad.append("processpolicy missing for None")
+            if ips:
+                bad.append("proxy_ip must be empty for None")
+            if hosts:
+                bad.append("hostname must be empty for None")
+            if bad:
+                msg = "; ".join(bad)
                 log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
                 return {"status": "Skipped", "error": msg}
             if pp_name not in self._pp_name_to_id.get(node.id, {}):
@@ -544,18 +588,25 @@ class SyslogCollectorsImporter(BaseImporter):
                 return {"status": "Skipped", "error": msg}
 
         elif cond == "uses_proxy":
-            if not ips or not hosts or not pp_name:
-                msg = "uses_proxy requires proxy_ip[], hostname[], and processpolicy"
+            missing = []
+            if not ips:
+                missing.append("proxy_ip")
+            if not hosts:
+                missing.append("hostname")
+            if not pp_name:
+                missing.append("processpolicy")
+            if missing:
+                msg = "uses_proxy missing fields: " + ", ".join(missing)
                 log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
                 return {"status": "Skipped", "error": msg}
             if pp_name not in self._pp_name_to_id.get(node.id, {}):
                 msg = f"Unknown processpolicy on node: '{pp_name}'"
                 log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
                 return {"status": "Skipped", "error": msg}
-            # Check proxy IP presence on node (post "phase A" logical order)
-            missing = [ip for ip in ips if ip not in self._available_proxy_ips.get(node.id, set())]
-            if missing:
-                msg = "Missing proxy IP(s) on node (no use_as_proxy present): " + ", ".join(missing)
+            # Dependency: each proxy_ip must exist as a use_as_proxy (by device IP) on this node
+            missing_ips = [ip for ip in ips if ip not in self._available_proxy_ips.get(node.id, set())]
+            if missing_ips:
+                msg = "Missing proxy IP(s) on node (no use_as_proxy present): " + ", ".join(missing_ips)
                 log.warning("apply: SKIP device=%s reason=%s [node=%s]", dev_name, msg, node_t)
                 return {"status": "Skipped", "error": msg}
 
@@ -565,42 +616,34 @@ class SyslogCollectorsImporter(BaseImporter):
             return {"status": "Skipped", "error": msg}
 
         # ---- Build payload and call API ----
-        try:
-            if decision.op == "CREATE":
-                payload = self.build_payload_create(desired)
-                log.info("CREATE syslog_collector device=%s [node=%s]", dev_name, node.name)
-                log.debug("CREATE payload=%s", payload)
-                res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
+        if decision.op == "CREATE":
+            payload = self.build_payload_create(desired)
+            log.info("CREATE syslog_collector device=%s [node=%s]", dev_name, node.name)
+            log.debug("CREATE payload=%s", payload)
+            res = client.create_resource(pool_uuid, node.id, self.RESOURCE, payload)
 
-                # If we created a *proxy* (use_as_proxy), update in-memory proxy set so
-                # subsequent uses_proxy rows can pass within the same run.
-                if cond == "use_as_proxy":
-                    # Add this device's IP to the available set (if known)
-                    dev_ip = self._device_name_to_ip.get(node.id, {}).get(dev_name, "")
-                    if dev_ip:
-                        self._available_proxy_ips.setdefault(node.id, set()).add(dev_ip)
+            # If we created a proxy, update in-memory proxy set so later uses_proxy can pass
+            if cond == "use_as_proxy":
+                dev_ip = self._device_name_to_ip.get(node.id, {}).get(dev_name, "")
+                if dev_ip:
+                    self._available_proxy_ips.setdefault(node.id, set()).add(dev_ip)
 
-                return {
-                    "status": res.get("status"),
-                    "monitor_ok": res.get("monitor_ok"),
-                    "monitor_branch": res.get("monitor_branch"),
-                }
+            return {
+                "status": res.get("status"),
+                "monitor_ok": res.get("monitor_ok"),
+                "monitor_branch": res.get("monitor_branch"),
+            }
 
-            if decision.op == "UPDATE" and existing_id:
-                payload = self.build_payload_update(desired, {"id": existing_id})
-                log.info("UPDATE syslog_collector device=%s id=%s [node=%s]", dev_name, existing_id, node.name)
-                log.debug("UPDATE payload=%s", payload)
-                res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
-                return {
-                    "status": res.get("status"),
-                    "monitor_ok": res.get("monitor_ok"),
-                    "monitor_branch": res.get("monitor_branch"),
-                }
+        if decision.op == "UPDATE" and existing_id:
+            payload = self.build_payload_update(desired, {"id": existing_id})
+            log.info("UPDATE syslog_collector device=%s id=%s [node=%s]", dev_name, existing_id, node.name)
+            log.debug("UPDATE payload=%s", payload)
+            res = client.update_resource(pool_uuid, node.id, self.RESOURCE, existing_id, payload)
+            return {
+                "status": res.get("status"),
+                "monitor_ok": res.get("monitor_ok"),
+                "monitor_branch": res.get("monitor_branch"),
+            }
 
-            # NOOP (and SKIP surfaced above as 'status: Skipped')
-            log.info("NOOP syslog_collector device=%s [node=%s]", dev_name, node.name)
-            return {"status": "Success"}
-
-        except Exception:  # pragma: no cover — defensive
-            log.exception("API error for syslog_collector device=%s [node=%s]", dev_name, node.name)
-            raise
+        log.info("NOOP syslog_collector device=%s [node=%s]", dev_name, node.name)
+        return {"status": "Success"}

@@ -18,13 +18,6 @@ def require_sheets(xlsx_sheets: Dict[str, pd.DataFrame], required: Iterable[str]
     if missing:
         raise ValidationError(f"Missing required sheets: {', '.join(missing)}")
 
-
-def require_columns(df: pd.DataFrame, required: Iterable[str]) -> None:
-    """Ensure that all required columns are present in a DataFrame."""
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValidationError(f"Missing required columns: {', '.join(missing)}")
-
 def require_columns(
     df: pd.DataFrame,
     required: Iterable[str],

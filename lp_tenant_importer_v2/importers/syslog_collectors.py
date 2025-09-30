@@ -7,8 +7,8 @@ Syslog Collectors importer (DirectorSync v2)
 Strictly aligned with BaseImporter pipeline and coding style used in the
 existing importers (e.g., processing_policies.py, devices.py).
 
-Product rules recap:
-- Input rows are filtered by app == "SyslogCollector" (device-scoped only).
+Business rules:
+- Input rows filtered by app == "SyslogCollector".
 - Mandatory fields for CREATE/UPDATE: device_name (resolved to id), charset,
   parser, proxy_condition in {"use_as_proxy", "uses_proxy", "None"}.
 - Matrix:
@@ -19,19 +19,18 @@ Product rules recap:
                     hostname required, processpolicy required
   * None          : proxy_ip empty, hostname empty, processpolicy required
 - ProcessingPolicy resolution:
-  * Preferred path: workbook provides a *source id* that we map to a *name*
-    via the "ProcessingPolicies" sheet, then we resolve name → id on the node.
-  * Fallback: if the cell does not map as an ID, treat it as a *name* directly
-    (the final id is resolved via API).
+  * Excel mapping: DeviceFetcher.processpolicy (source *policy_id*) →
+    match in sheet "ProcessingPolicy"/"ProcessingPolicies" on column *policy_id* →
+    read *cleaned_policy_name* →
+    resolve name → runtime id via node API.
 - We ignore any "log_collector" field in this project.
-- Phase-like ordering without extra inventory passes:
-  1) use_as_proxy, 2) None, 3) uses_proxy.
+- Execution order: 1) use_as_proxy, 2) None, 3) uses_proxy.
   When we CREATE a proxy, we add the device IP into an in-memory set so later
   uses_proxy rows in the same run can pass the dependency check.
 
 Diff subset (node-agnostic):
 - Compare on processpolicy_name (not id) and on order-insensitive CSV lists
-  (proxy_ip, hostname), same simplicity as used elsewhere.
+  (proxy_ip, hostname).
 """
 
 import logging
@@ -125,11 +124,11 @@ class SyslogCollectorsImporter(BaseImporter):
     Required columns (case-insensitive) on the chosen sheet:
       - app, device_name, parser, charset, proxy_condition
     Optional columns:
-      - proxy_ip (list), hostname (list), processpolicy (source PP id or direct name)
+      - proxy_ip (list), hostname (list), processpolicy (source policy_id or direct name)
     """
 
     resource_name: str = "syslog_collectors"
-    sheet_names = ("DeviceFetcher", "SyslogCollector", "SyslogCollectors", )
+    sheet_names = ("DeviceFetcher", "SyslogCollector", "SyslogCollectors")
     required_columns = tuple()
 
     compare_keys = ("proxy_condition", "parser", "charset", "proxy_ips", "hostnames", "processpolicy_name")
@@ -141,7 +140,7 @@ class SyslogCollectorsImporter(BaseImporter):
     _pp_name_to_id: Dict[str, Dict[str, str]]
     _pp_id_to_name: Dict[str, Dict[str, str]]
     _available_proxy_ips: Dict[str, set]
-    _xlsx_pp_id_to_name: Dict[str, str]
+    _xlsx_policy_id_to_clean_name: Dict[str, str]
     _sheet_key: Optional[str]
 
     def __init__(self) -> None:
@@ -151,7 +150,7 @@ class SyslogCollectorsImporter(BaseImporter):
         self._pp_name_to_id = {}
         self._pp_id_to_name = {}
         self._available_proxy_ips = {}
-        self._xlsx_pp_id_to_name = {}
+        self._xlsx_policy_id_to_clean_name = {}
         self._sheet_key = None
 
     # ----------------------------- validate --------------------------------
@@ -205,10 +204,15 @@ class SyslogCollectorsImporter(BaseImporter):
         need("charset")
         need("proxy_condition", "condition", "mode")
 
-        # Load PP source id -> name mapping if present
-        if "ProcessingPolicies" in sheets:
-            pp = sheets["ProcessingPolicies"].copy()
-            pp.columns = [str(c).strip() for c in pp.columns]
+        # Load ProcessingPolicy mapping: policy_id -> cleaned_policy_name
+        xpp = None
+        for sheet_name in ("ProcessingPolicy", "ProcessingPolicies"):
+            if sheet_name in sheets:
+                xpp = sheets[sheet_name].copy()
+                break
+
+        if xpp is not None:
+            xpp.columns = [str(c).strip() for c in xpp.columns]
 
             def pick_col(df_: pd.DataFrame, *cands: str) -> Optional[str]:
                 for c in cands:
@@ -216,16 +220,18 @@ class SyslogCollectorsImporter(BaseImporter):
                         return c
                 return None
 
-            c_id = pick_col(pp, "id", "pp_id", "policy_id")
-            c_nm = pick_col(pp, "policy_name", "name")
+            c_id = pick_col(xpp, "policy_id", "id", "pp_id")
+            c_nm = pick_col(xpp, "cleaned_policy_name", "policy_name", "name")
             if c_id and c_nm:
-                self._xlsx_pp_id_to_name = {
+                self._xlsx_policy_id_to_clean_name = {
                     _s(r[c_id]): _s(r[c_nm])
-                    for _, r in pp.iterrows()
+                    for _, r in xpp.iterrows()
                     if not _is_blank(r.get(c_id)) and not _is_blank(r.get(c_nm))
                 }
+            else:
+                self._xlsx_policy_id_to_clean_name = {}
         else:
-            self._xlsx_pp_id_to_name = {}
+            self._xlsx_policy_id_to_clean_name = {}
 
         log.info("syslog_collectors: validation passed (sheet='%s')", chosen)
 
@@ -293,9 +299,9 @@ class SyslogCollectorsImporter(BaseImporter):
             if not device_name:
                 continue
 
-            # processpolicy: try source-id -> name mapping; fallback to direct name
+            # processpolicy: source-id -> cleaned name (via XLSX), or fallback to direct name
             pp_cell = _s(row[c_pps]) if c_pps else ""
-            processpolicy_name = self._xlsx_pp_id_to_name.get(pp_cell, "") or pp_cell
+            processpolicy_name = self._xlsx_policy_id_to_clean_name.get(pp_cell, "") or pp_cell
 
             desired = _DesiredSC(
                 device_name=device_name,
@@ -418,8 +424,9 @@ class SyslogCollectorsImporter(BaseImporter):
             if not dev_name or not dev_id:
                 continue
             try:
-                # Signature aligned with other importers
-                plugins = client.list_subresource(pool_uuid, node.id, "Devices", dev_id, "plugins") or []
+                # FIX: use list_resource with concrete path (avoid wrong signature)
+                path = f"Devices/{dev_id}/plugins"
+                plugins = client.list_resource(pool_uuid, node.id, path) or []
             except Exception as exc:  # pragma: no cover
                 log.error("fetch_existing: list plugins failed device=%s [node=%s] err=%s", dev_name, node_t, exc)
                 continue

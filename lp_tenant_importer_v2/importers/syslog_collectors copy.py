@@ -1,3 +1,4 @@
+# lp_tenant_importer_v2/importers/syslog_collectors.py
 from __future__ import annotations
 
 """
@@ -22,7 +23,10 @@ Business rules:
     match in sheet "ProcessingPolicy"/"ProcessingPolicies" on column *policy_id* →
     read *cleaned_policy_name* →
     resolve name → runtime id via node API.
+- We ignore any "log_collector" field in this project.
 - Execution order: 1) use_as_proxy, 2) None, 3) uses_proxy.
+  When we CREATE a proxy, we add the device IP into an in-memory set so later
+  uses_proxy rows in the same run can pass the dependency check.
 
 Diff subset (node-agnostic):
 - Compare on processpolicy_name (not id) and on order-insensitive CSV lists
@@ -31,7 +35,7 @@ Diff subset (node-agnostic):
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
@@ -66,43 +70,8 @@ def _s(x: Any) -> str:
     return "" if _is_blank(x) else str(x).strip()
 
 
-def _extract_from_dict(d: Dict[str, Any]) -> str:
-    """Best-effort extraction of a meaningful string from dict items returned by some APIs."""
-    for k in ("ip", "hostname", "name", "address", "value"):
-        if k in d and _s(d[k]):
-            return _s(d[k])
-    # fallback to whole dict as string (unlikely to match desired)
-    return _s(d)
-
-
 def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str]:
-    """
-    Split a multi-valued cell by allowed separators, trim, dedupe, sort.
-
-    Robust to:
-      - string with separators
-      - list / tuple / set of strings
-      - list d’objets (dicts) renvoyés par l’API (ex: [{"ip": "1.2.3.4"}, ...])
-    """
-    # list-like → aplatir proprement
-    if isinstance(cell, (list, tuple, set)):
-        parts: List[str] = []
-        for e in cell:
-            if isinstance(e, dict):
-                parts.append(_extract_from_dict(e))
-            elif isinstance(e, (list, tuple, set)):
-                # on ne s'attend pas à des listes imbriquées mais gérons-le proprement
-                parts.extend([_s(x) for x in e if _s(x)])
-            else:
-                parts.append(_s(e))
-        return sorted({p for p in parts if p})
-
-    # dict seul
-    if isinstance(cell, dict):
-        v = _extract_from_dict(cell)
-        return [v] if v else []
-
-    # scalaire → split par séparateurs
+    """Split a multi-valued cell by allowed separators, trim, dedupe, sort."""
     raw = _s(cell)
     if not raw:
         return []
@@ -382,7 +351,6 @@ class SyslogCollectorsImporter(BaseImporter):
     def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not existing_obj:
             return None
-        # existing_obj['proxy_ips'] / ['hostnames'] sont déjà normalisés via _split_multi
         return {
             "proxy_condition": _norm_condition(existing_obj.get("proxy_condition")),
             "parser": _s(existing_obj.get("parser")),
@@ -456,7 +424,7 @@ class SyslogCollectorsImporter(BaseImporter):
             if not dev_name or not dev_id:
                 continue
             try:
-                # Use a concrete path (correct signature)
+                # FIX: use list_resource with concrete path (avoid wrong signature)
                 path = f"Devices/{dev_id}/plugins"
                 plugins = client.list_resource(pool_uuid, node.id, path) or []
             except Exception as exc:  # pragma: no cover

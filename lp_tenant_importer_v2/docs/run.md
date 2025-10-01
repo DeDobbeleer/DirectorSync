@@ -50,3 +50,16 @@ python -c "import lp_tenant_importer_v2, sys; print('OK:', lp_tenant_importer_v2
 ```
 
 > Astuce pro : utilise des **chemins absolus** dans `.env` (`LP_TENANTS_FILE`, `LP_PROFILE_FILE`) pour être insensible au répertoire courant.
+
+
+
+convert to exe
+
+pyinstaller --onefile --name DirectorSync app.py --collect-submodules lp_tenant_importer_v2 --collect-all pandas --collect-all openpyxl --collect-all requests --collect-all PyYAML 
+
+pyinstaller --onefile --name DirectorSync "app.py" --additional-hooks-dir=hooks --collect-all pandas --collect-all openpyxl
+  requests
+pandas
+openpyxl
+python-dotenv
+PyYAML

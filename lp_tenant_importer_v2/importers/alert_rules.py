@@ -194,6 +194,29 @@ def _parse_notifications(cell: Any) -> List[Dict[str, Any]]:
     return out
 
 
+# ------------------------- column selection helpers --------------------------
+
+
+def _cols_map(df: pd.DataFrame) -> Dict[str, str]:
+    """Lower-cased -> original column name mapping."""
+    return {str(c).strip().lower(): str(c) for c in df.columns}
+
+
+def _pick_col(df: pd.DataFrame, *aliases: str) -> Optional[str]:
+    """
+    Return the first existing column name among the aliases (case-insensitive).
+    Avoids using Python's `or` on pandas Series, which is ambiguous.
+    """
+    cmap = _cols_map(df)
+    for a in aliases:
+        if not a:
+            continue
+        cn = cmap.get(a.strip().lower())
+        if cn:
+            return cn
+    return None
+
+
 # ------------------------------ data model -----------------------------------
 
 
@@ -371,91 +394,87 @@ class AlertRulesImporter(BaseImporter):
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
         df = sheets["Alert"].copy()
 
-        # Normalize column names (case-insensitive lookups)
-        def col(name: str) -> Optional[str]:
-            targets = {c.lower(): c for c in df.columns}
-            return targets.get(name.lower())
+        # Choose columns once (case-insensitive)
+        name_col = _pick_col(df, "name")
+        owner_col = _pick_col(df, "settings.user")
+        risk_col = _pick_col(df, "settings.risk")
+        repos_col = _pick_col(df, "settings.repos")
+        agg_col = _pick_col(df, "settings.aggregate")
+        cond_opt = _pick_col(df, "settings.condition.condition_option")
+        cond_val = _pick_col(df, "settings.condition.condition_value")
+        limit_col = _pick_col(df, "settings.livesearch_data.limit")
 
-        def get(name: str) -> Any:
-            c = col(name)
-            return df[c] if c in df else None
+        tr_min = _pick_col(df, "settings.livesearch_data.timerange_minute")
+        tr_hr = _pick_col(df, "settings.livesearch_data.timerange_hour")
+        tr_day = _pick_col(df, "settings.livesearch_data.timerange_day")
+        tr_sec = _pick_col(df, "settings.time_range_seconds")
 
-        # Extract/convert columns
-        name_col = get("name")
-        owner_col = get("settings.user")
-        risk_col = get("settings.risk")
-        repos_col = get("settings.repos")
-        agg_col = get("settings.aggregate")
-        cond_opt = get("settings.condition.condition_option")
-        cond_val = get("settings.condition.condition_value")
-        limit_col = get("settings.livesearch_data.limit")
+        query_col = _pick_col(
+            df, "settings.livesearch_data.query", "settings.extra_config.query"
+        )
+        desc_col = _pick_col(df, "settings.description")
+        flush_col = _pick_col(
+            df, "settings.flush_on_trigger", "settings.livesearch_data.flush_on_trigger"
+        )
+        search_iv = _pick_col(df, "settings.livesearch_data.search_interval_minute")
+        thr_en = _pick_col(df, "settings.throttling_enabled")
+        thr_field = _pick_col(df, "settings.throttling_field")
+        thr_range = _pick_col(df, "settings.throttling_time_range")
+        meta_col = _pick_col(df, "settings.metadata")
+        logsrc_col = _pick_col(df, "settings.log_source")
+        ctxt_tmpl = _pick_col(df, "settings.context_template")
 
-        tr_min = get("settings.livesearch_data.timerange_minute")
-        tr_hr = get("settings.livesearch_data.timerange_hour")
-        tr_day = get("settings.livesearch_data.timerange_day")
-        tr_sec = get("settings.time_range_seconds")
+        active_col = _pick_col(df, "settings.active")
+        vis_groups = _pick_col(df, "settings.visible_to")
+        vis_users = _pick_col(df, "settings.visible_to_users")
+        notif_col = _pick_col(df, "settings.notifications")
 
-        query_col = get("settings.livesearch_data.query") or get("settings.extra_config.query")
-        desc_col = get("settings.description")
-        flush_col = get("settings.flush_on_trigger") or get("settings.livesearch_data.flush_on_trigger")
-        search_iv = get("settings.livesearch_data.search_interval_minute")
-        thr_en = get("settings.throttling_enabled")
-        thr_field = get("settings.throttling_field")
-        thr_range = get("settings.throttling_time_range")
-        meta_col = get("settings.metadata")
-        logsrc_col = get("settings.log_source")
-        ctxt_tmpl = get("settings.context_template")
+        # Row iteration (avoids Series boolean ambiguity)
+        for idx, row in df.iterrows():
+            def cell(cn: Optional[str]) -> Any:
+                return row[cn] if cn else None
 
-        active_col = get("settings.active")
-        vis_groups = get("settings.visible_to")
-        vis_users = get("settings.visible_to_users")
-        notif_col = get("settings.notifications")
-
-        # Build row-wise desired
-        for idx in range(len(df)):
-            name = _s(name_col.iloc[idx])
+            name = _s(cell(name_col))
             if not name:
                 # silently skip empty names (consistent with other importers)
                 continue
 
             # Convert timerange (favor day/hour/minute columns; else convert seconds → minutes)
-            tr_d = _int_or_none(tr_day.iloc[idx]) if tr_day is not None else None
-            tr_h = _int_or_none(tr_hr.iloc[idx]) if tr_hr is not None else None
-            tr_m = _int_or_none(tr_min.iloc[idx]) if tr_min is not None else None
+            tr_d = _int_or_none(cell(tr_day))
+            tr_h = _int_or_none(cell(tr_hr))
+            tr_m = _int_or_none(cell(tr_min))
             if not (tr_d or tr_h or tr_m):
-                sec = _int_or_none(tr_sec.iloc[idx]) if tr_sec is not None else None
+                sec = _int_or_none(cell(tr_sec))
                 if sec:
                     # choose best bucket: prefer minutes
                     tr_m = max(1, int(round(sec / 60.0)))
 
             desired = _DesiredAlert(
                 name=name,
-                owner=_s(owner_col.iloc[idx]),
-                risk=_s(risk_col.iloc[idx]),
-                repos=_split_multi(repos_col.iloc[idx]),
-                aggregate=_s(agg_col.iloc[idx]),
-                condition_option=_s(cond_opt.iloc[idx]),
-                condition_value=int(_int_or_none(cond_val.iloc[idx]) or 0),
-                limit=int(_int_or_none(limit_col.iloc[idx]) or 0),
+                owner=_s(cell(owner_col)),
+                risk=_s(cell(risk_col)),
+                repos=_split_multi(cell(repos_col)),
+                aggregate=_s(cell(agg_col)),
+                condition_option=_s(cell(cond_opt)),
+                condition_value=int(_int_or_none(cell(cond_val)) or 0),
+                limit=int(_int_or_none(cell(limit_col)) or 0),
                 timerange_day=tr_d,
                 timerange_hour=tr_h,
                 timerange_minute=tr_m,
-                query=_s(query_col.iloc[idx]) if query_col is not None else "",
-                description=_s(desc_col.iloc[idx]) if desc_col is not None else "",
-                search_interval_minute=_int_or_none(search_iv.iloc[idx]) if search_iv is not None else None,
-                flush_on_trigger=bool(_as_bool_flag_on(flush_col.iloc[idx])) if flush_col is not None else False,
-                throttling_enabled=bool(_as_bool_flag_on(thr_en.iloc[idx])) if thr_en is not None else False,
-                throttling_field=_s(thr_field.iloc[idx]) if thr_field is not None else "",
-                throttling_time_range=_int_or_none(thr_range.iloc[idx]) if thr_range is not None else None,
-                metadata=self._parse_metadata(meta_col.iloc[idx]) if meta_col is not None else [],
-                log_source=_split_multi(logsrc_col.iloc[idx]) if logsrc_col is not None else [],
-                context_template=_s(ctxt_tmpl.iloc[idx]) if ctxt_tmpl is not None else "",
-                active=(_s(active_col.iloc[idx]).lower() in {"1", "true", "yes", "on"})
-                if active_col is not None
-                else False,
-                visible_to_groups=_split_multi(vis_groups.iloc[idx]) if vis_groups is not None else [],
-                visible_to_users=_split_multi(vis_users.iloc[idx]) if vis_users is not None else [],
-                notifications=_parse_notifications(notif_col.iloc[idx]) if notif_col is not None else [],
+                query=_s(cell(query_col)),
+                description=_s(cell(desc_col)),
+                search_interval_minute=_int_or_none(cell(search_iv)),
+                flush_on_trigger=bool(_as_bool_flag_on(cell(flush_col))),
+                throttling_enabled=bool(_as_bool_flag_on(cell(thr_en))),
+                throttling_field=_s(cell(thr_field)),
+                throttling_time_range=_int_or_none(cell(thr_range)),
+                metadata=self._parse_metadata(cell(meta_col)),
+                log_source=_split_multi(cell(logsrc_col)),
+                context_template=_s(cell(ctxt_tmpl)),
+                active=(_s(cell(active_col)).lower() in {"1", "true", "yes", "on"}),
+                visible_to_groups=_split_multi(cell(vis_groups)),
+                visible_to_users=_split_multi(cell(vis_users)),
+                notifications=_parse_notifications(cell(notif_col)),
             )
 
             # Validate critical numeric requirements here (friendlier than API 400)
@@ -580,16 +599,9 @@ class AlertRulesImporter(BaseImporter):
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Try to list existing rules for a node, returning {searchname -> obj}.
-
-        Strategy (defensive to API flavors):
-        1) GET configapi/{pool}/{node}/AlertRules                (direct list)
-        2) POST configapi/.../AlertRules/MyAlertRules/fetch      (monitor)
-        3) POST configapi/.../AlertRules/SharedAlertRules/fetch  (monitor)
-        4) POST configapi/.../AlertRules/VendorAlertRules/fetch  (monitor)
-
-        The first successful response wins. Unknown payload shapes are adapted
-        best-effort (we look for common containers like result[], data[], rules[]).
+        List existing rules for a node via Fetch* endpoints (monitorized),
+        returning {searchname -> obj}. AlertRules do not offer a direct
+        GET list; we must POST with a body wrapped in {"data": {...}}.
         """
         def _adapt_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not isinstance(payload, dict):
@@ -621,43 +633,29 @@ class AlertRulesImporter(BaseImporter):
                 return data if ok else {}
             return res
 
-        # 1) Direct GET list
-        try:
-            raw = client.get_json(
-                client.configapi(pool_uuid, node.id, self.RESOURCE)
-            ) or {}
-            items = _adapt_list(raw) or (raw if isinstance(raw, list) else [])
-            out: Dict[str, Dict[str, Any]] = {}
-            for it in items:
-                key = _s(it.get("searchname") or it.get("name"))
-                if key:
-                    out[key] = {"id": _s(it.get("id") or it.get("_id")), **it}
-            if out:
-                return out
-        except Exception as exc:  # pragma: no cover - informative only
-            log.debug("GET AlertRules failed on %s: %s", node.name, exc)
+        out: Dict[str, Dict[str, Any]] = {}
+        node_t = f"{getattr(node, 'name', node.id)}|{node.id}"
 
-        # 2..4) Fetch flavors (monitor)
+        # Fetch flavors (monitor)
         for path in (
             f"{self.RESOURCE}/MyAlertRules/fetch",
             f"{self.RESOURCE}/SharedAlertRules/fetch",
             f"{self.RESOURCE}/VendorAlertRules/fetch",
         ):
             try:
-                res = client.post_json(client.configapi(pool_uuid, node.id, path), {})
+                # Body MUST be wrapped in {"data": {...}} to avoid server NPEs
+                res = client.post_json(client.configapi(pool_uuid, node.id, path), {"data": {}})
                 data = _monitorize(res)
                 items = _adapt_list(data)
-                out: Dict[str, Dict[str, Any]] = {}
                 for it in items:
                     key = _s(it.get("searchname") or it.get("name"))
                     if key:
                         out[key] = {"id": _s(it.get("id") or it.get("_id")), **it}
-                if out:
-                    return out
             except Exception as exc:  # pragma: no cover
-                log.debug("fetch %s failed on %s: %s", path, node.name, exc)
+                log.debug("fetch %s failed on %s: %s", path, node_t, exc)
 
-        return {}
+        log.info("fetch_existing: found %d alert rules [node=%s]", len(out), node_t)
+        return out
 
     # --- payload builders --------------------------------------------------
 
@@ -808,8 +806,6 @@ class AlertRulesImporter(BaseImporter):
         # 1) state
         state_path = None
         try:
-            # Try to detect current active state from existing (best-effort)
-            # If unknown, just apply desired unconditionally.
             if desired.active:
                 state_path = f"{self.RESOURCE}/{rule_id}/activate"
             else:

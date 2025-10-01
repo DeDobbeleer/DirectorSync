@@ -2,34 +2,18 @@
 """
 AlertRules importer (DirectorSync v2)
 
-This module implements an end-to-end importer for Logpoint Alert Rules
-using the v2 framework pipeline (BaseImporter). It mirrors the structure
-and conventions used by the other v2 importers (e.g., ProcessingPolicies,
-SyslogCollectors), and strictly delegates HTTP/monitoring to DirectorClient.
+- Robust XLSX parsing (no Series ambiguity)
+- Correct API envelopes: ALL POST/PUT use {"data": ...}
+- Fetch via .../fetch + monitor flow
+- Comprehensive logging (DEBUG/INFO/WARNING/ERROR) for API actions
 
 Design goals
 ------------
-- Parse the `Alert` sheet from the provided XLSX (see samples/*_config.xlsx).
-- Compute an idempotent plan based on a canonical "core rule" subset:
-  (searchname, risk, repos, aggregate, condition_*, limit, timerange_*,
-   query, description, flush_on_trigger, search_interval_minute,
-   throttling_*, metadata, log_source, alert_context_template).
-- Apply in a deterministic sequence:
-  1) CREATE/UPDATE the core rule,
-  2) Sync active state (activate/deactivate),
-  3) Apply sharing (RBAC) based on visible_to / visible_to_users,
-  4) Apply notifications by type (Email/Syslog/HTTP/SMS/SNMP/SSH).
-- Fail fast with actionable messages on missing dependencies (repos, users,
-  groups, etc.) and return SKIP (not FAIL) when operator action is needed.
-- Keep HTTP plumbing out of the importer (use DirectorClient helpers only).
-
-Note
-----
-This importer intentionally compares only the "core rule" fields when building
-the plan (NOOP / CREATE / UPDATE). Sharing and notifications are treated as
-post-apply sub-resources and are not part of the diff subset; they are kept
-idempotent by re-applying their desired state deterministically.
-
+- Parse the `Alert` sheet to build a desired model per rule.
+- Plan on a canonical "core" subset (sharing/state/notifications are post-apply).
+- Apply in sequence: core (create/update) -> state -> sharing -> notifications.
+- Log each API action with useful context and safe redaction.
+- Fail fast on operator errors (SKIP) and surface API errors clearly.
 """
 
 from __future__ import annotations
@@ -48,15 +32,21 @@ from ..utils.validators import ValidationError
 
 log = logging.getLogger(__name__)
 
-
-# ----------------------------- small helpers ---------------------------------
-
+# ----------------------------- redaction & utils ------------------------------
 
 _EMPTY = {"", "nan", "none", "null", "-", "[]", "{}"}
 
+# fields to redact when logging payloads
+_REDACT_KEYS = {
+    "authorization", "x-api-key", "api_key", "token", "auth_key", "auth_value", "auth_pass",
+    "ssh_auth_password", "ssh_key", "sms_password",
+    "snmp_community", "snmp_auth", "snmp_priv",
+    # email list is PII; only count it
+    "email_emails",
+}
+
 
 def _is_blank(x: Any) -> bool:
-    """Return True if the cell is effectively empty."""
     if x is None:
         return True
     if isinstance(x, float):
@@ -70,15 +60,10 @@ def _is_blank(x: Any) -> bool:
 
 
 def _s(x: Any) -> str:
-    """Normalize any scalar to a stripped string (empty if blank)."""
     return "" if _is_blank(x) else str(x).strip()
 
 
 def _as_bool_flag_on(x: Any) -> Optional[str]:
-    """
-    Convert Excel boolean-ish to "on" (string) when truthy; otherwise None.
-    API endpoints often use string flags ("on") instead of booleans.
-    """
     if isinstance(x, bool):
         return "on" if x else None
     val = _s(x).lower()
@@ -88,25 +73,16 @@ def _as_bool_flag_on(x: Any) -> Optional[str]:
 
 
 def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str]:
-    """
-    Split a multi-valued cell by allowed separators, trim, dedupe, sort.
-    Robust to list-like inputs and JSON; returns a *sorted* list of strings.
-    """
     if _is_blank(cell):
         return []
-
-    # list-like already
     if isinstance(cell, (list, tuple, set)):
         return sorted({_s(x) for x in cell if _s(x)})
-
     raw = _s(cell)
-    # Try JSON first (array or scalar)
     if raw.startswith("[") or raw.startswith("{"):
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
                 return sorted({_s(x) for x in parsed if _s(x)})
-            # Scalar-ish dict: pick readable values if any
             if isinstance(parsed, dict):
                 parts = []
                 for k in ("name", "value", "id"):
@@ -117,8 +93,6 @@ def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str
                 return []
         except Exception:
             pass
-
-    # fallback: string split with multiple separators
     canon = raw
     for s in seps[1:]:
         canon = canon.replace(s, seps[0])
@@ -127,12 +101,10 @@ def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str
 
 
 def _csv(parts: Iterable[str]) -> str:
-    """Canonical CSV from an iterable (trim, dedupe, sort)."""
     return ",".join(sorted({_s(x) for x in parts if _s(x)}))
 
 
 def _int_or_none(x: Any) -> Optional[int]:
-    """Cast to int when possible, else None."""
     s = _s(x)
     if not s:
         return None
@@ -143,31 +115,17 @@ def _int_or_none(x: Any) -> Optional[int]:
 
 
 def _parse_notifications(cell: Any) -> List[Dict[str, Any]]:
-    """
-    Parse `settings.notifications` column into a list of dicts.
-
-    Accepted formats:
-    - JSON array [{...}, {...}]
-    - JSON object {"type": "...", ...} (wrapped into a list)
-    - CSV of mini-JSONs (rare) -> we try naive split then json.loads per part
-    - Empty / invalid -> []
-    """
     if _is_blank(cell):
         return []
-
     if isinstance(cell, list):
-        # best-effort: ensure list of dicts
         out: List[Dict[str, Any]] = []
         for item in cell:
             if isinstance(item, dict):
                 out.append(item)
             else:
-                # scalar → wrap
                 out.append({"value": _s(item)})
         return out
-
     raw = _s(cell)
-    # Try a direct JSON parse
     if raw.startswith("[") or raw.startswith("{"):
         try:
             parsed = json.loads(raw)
@@ -179,8 +137,6 @@ def _parse_notifications(cell: Any) -> List[Dict[str, Any]]:
         if isinstance(parsed, dict):
             return [parsed]
         return []
-
-    # Try CSV of json fragments
     parts = _split_multi(raw)
     out: List[Dict[str, Any]] = []
     for p in parts:
@@ -194,19 +150,11 @@ def _parse_notifications(cell: Any) -> List[Dict[str, Any]]:
     return out
 
 
-# ------------------------- column selection helpers --------------------------
-
-
 def _cols_map(df: pd.DataFrame) -> Dict[str, str]:
-    """Lower-cased -> original column name mapping."""
     return {str(c).strip().lower(): str(c) for c in df.columns}
 
 
 def _pick_col(df: pd.DataFrame, *aliases: str) -> Optional[str]:
-    """
-    Return the first existing column name among the aliases (case-insensitive).
-    Avoids using Python's `or` on pandas Series, which is ambiguous.
-    """
     cmap = _cols_map(df)
     for a in aliases:
         if not a:
@@ -217,12 +165,39 @@ def _pick_col(df: pd.DataFrame, *aliases: str) -> Optional[str]:
     return None
 
 
+def _redact_for_log(obj: Any) -> Any:
+    """
+    Redact sensitive fields recursively.
+    - For dicts: mask values of known sensitive keys.
+    - For lists of emails: replace with a count.
+    """
+    if isinstance(obj, dict):
+        red: Dict[str, Any] = {}
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in _REDACT_KEYS:
+                if lk == "email_emails":
+                    red[k] = f"<{len(v) if isinstance(v, list) else 1} recipients>"
+                else:
+                    red[k] = "<redacted>"
+            else:
+                red[k] = _redact_for_log(v)
+        return red
+    if isinstance(obj, list):
+        return [_redact_for_log(x) for x in obj]
+    return obj
+
+
+def _payload_keys_summary(payload: Dict[str, Any]) -> str:
+    keys = sorted(payload.keys())
+    return f"keys={keys} size={len(json.dumps(payload))}"
+
+
 # ------------------------------ data model -----------------------------------
 
 
 @dataclass(frozen=True)
 class _DesiredAlert:
-    """In-memory desired model built from a row."""
     name: str
     # core
     owner: str
@@ -252,10 +227,6 @@ class _DesiredAlert:
     notifications: List[Dict[str, Any]]
 
     def canon_core(self) -> Dict[str, Any]:
-        """
-        Comparable subset for plan decisions (NOOP/CREATE/UPDATE).
-        Lists are normalized into order-insensitive strings.
-        """
         return {
             "risk": _s(self.risk).lower(),
             "repos": _csv(self.repos),
@@ -263,7 +234,6 @@ class _DesiredAlert:
             "condition_option": _s(self.condition_option).lower(),
             "condition_value": int(self.condition_value),
             "limit": int(self.limit),
-            # represent timerange using a single key/value pair
             "timerange_key": "day"
             if self.timerange_day
             else ("hour" if self.timerange_hour else "minute"),
@@ -294,43 +264,11 @@ class AlertRulesImporter(BaseImporter):
 
     Sheets:
         - "Alert" (required)
-
-    Required columns (case-insensitive):
-        - name
-        - settings.user
-        - settings.risk
-        - settings.repos
-        - settings.aggregate
-        - settings.condition.condition_option
-        - settings.condition.condition_value
-        - at least ONE of:
-          settings.livesearch_data.timerange_minute
-          settings.livesearch_data.timerange_hour
-          settings.livesearch_data.timerange_day
-          OR settings.time_range_seconds (will be converted)
-        - settings.livesearch_data.limit
-
-    Optional (recommended):
-        - settings.livesearch_data.query
-        - settings.description
-        - settings.flush_on_trigger
-        - settings.livesearch_data.search_interval_minute
-        - settings.throttling_enabled
-        - settings.throttling_field
-        - settings.throttling_time_range
-        - settings.metadata   (expects either JSON [{field,value},..] or CSV "k=v|k2=v2")
-        - settings.log_source (CSV or JSON list)
-        - settings.context_template
-        - settings.active
-        - settings.visible_to            (groups)
-        - settings.visible_to_users      (users)
-        - settings.notifications         (JSON list of typed objects)
-        - tenant_scope                   (used to choose fetch endpoint family)
     """
 
     resource_name: str = "alert_rules"
     sheet_names = ("Alert",)
-    required_columns = tuple()  # custom validate() below
+    required_columns = tuple()
     compare_keys = (
         "risk",
         "repos",
@@ -351,8 +289,6 @@ class AlertRulesImporter(BaseImporter):
         "log_source",
         "context_template",
     )
-
-    # Resource root segment (relative to configapi/{pool}/{node}/...)
     RESOURCE = "AlertRules"
 
     # --- validate ---------------------------------------------------------
@@ -360,7 +296,6 @@ class AlertRulesImporter(BaseImporter):
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
             raise ValidationError("Missing required sheet: 'Alert'")
-
         df = sheets["Alert"]
         cols = {str(c).strip().lower() for c in df.columns}
 
@@ -368,7 +303,6 @@ class AlertRulesImporter(BaseImporter):
             if col_name.lower() not in cols:
                 raise ValidationError(f"Missing required column in 'Alert': {col_name}")
 
-        # Hard requirements
         need("name")
         need("settings.user")
         need("settings.risk")
@@ -394,7 +328,7 @@ class AlertRulesImporter(BaseImporter):
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
         df = sheets["Alert"].copy()
 
-        # Choose columns once (case-insensitive)
+        # Column mapping (once)
         name_col = _pick_col(df, "name")
         owner_col = _pick_col(df, "settings.user")
         risk_col = _pick_col(df, "settings.risk")
@@ -409,13 +343,9 @@ class AlertRulesImporter(BaseImporter):
         tr_day = _pick_col(df, "settings.livesearch_data.timerange_day")
         tr_sec = _pick_col(df, "settings.time_range_seconds")
 
-        query_col = _pick_col(
-            df, "settings.livesearch_data.query", "settings.extra_config.query"
-        )
+        query_col = _pick_col(df, "settings.livesearch_data.query", "settings.extra_config.query")
         desc_col = _pick_col(df, "settings.description")
-        flush_col = _pick_col(
-            df, "settings.flush_on_trigger", "settings.livesearch_data.flush_on_trigger"
-        )
+        flush_col = _pick_col(df, "settings.flush_on_trigger", "settings.livesearch_data.flush_on_trigger")
         search_iv = _pick_col(df, "settings.livesearch_data.search_interval_minute")
         thr_en = _pick_col(df, "settings.throttling_enabled")
         thr_field = _pick_col(df, "settings.throttling_field")
@@ -429,24 +359,20 @@ class AlertRulesImporter(BaseImporter):
         vis_users = _pick_col(df, "settings.visible_to_users")
         notif_col = _pick_col(df, "settings.notifications")
 
-        # Row iteration (avoids Series boolean ambiguity)
         for idx, row in df.iterrows():
             def cell(cn: Optional[str]) -> Any:
                 return row[cn] if cn else None
 
             name = _s(cell(name_col))
             if not name:
-                # silently skip empty names (consistent with other importers)
                 continue
 
-            # Convert timerange (favor day/hour/minute columns; else convert seconds → minutes)
             tr_d = _int_or_none(cell(tr_day))
             tr_h = _int_or_none(cell(tr_hr))
             tr_m = _int_or_none(cell(tr_min))
             if not (tr_d or tr_h or tr_m):
                 sec = _int_or_none(cell(tr_sec))
                 if sec:
-                    # choose best bucket: prefer minutes
                     tr_m = max(1, int(round(sec / 60.0)))
 
             desired = _DesiredAlert(
@@ -477,26 +403,20 @@ class AlertRulesImporter(BaseImporter):
                 notifications=_parse_notifications(cell(notif_col)),
             )
 
-            # Validate critical numeric requirements here (friendlier than API 400)
             if desired.limit < 1:
                 raise ValidationError(f"[Alert:{name}] 'limit' must be >= 1")
             if not (desired.timerange_day or desired.timerange_hour or desired.timerange_minute):
                 raise ValidationError(f"[Alert:{name}] missing timerange (day/hour/minute or time_range_seconds)")
 
             yield {
-                "key": name,      # stable key used by BaseImporter
+                "key": name,
                 "desired": desired,
             }
 
     @staticmethod
     def _parse_metadata(cell: Any) -> List[Tuple[str, str]]:
-        """
-        Parse metadata either as JSON array [{"field":"k","value":"v"}, ...]
-        or as CSV of "k=v" items. Returns a list of (k, v).
-        """
         if _is_blank(cell):
             return []
-
         if isinstance(cell, list):
             out: List[Tuple[str, str]] = []
             for item in cell:
@@ -506,7 +426,6 @@ class AlertRulesImporter(BaseImporter):
                     if k:
                         out.append((k, v))
             return sorted(set(out))
-
         raw = _s(cell)
         if raw.startswith("["):
             try:
@@ -522,8 +441,6 @@ class AlertRulesImporter(BaseImporter):
                     return sorted(set(out))
             except Exception:
                 pass
-
-        # CSV of k=v items
         parts = _split_multi(raw)
         out: List[Tuple[str, str]] = []
         for p in parts:
@@ -545,8 +462,6 @@ class AlertRulesImporter(BaseImporter):
         if not existing_obj:
             return None
 
-        # Convert API payload to the same comparable subset used by desired.canon_core()
-        # We accept minor schema drift gracefully (missing keys default to empty).
         def get_any(d: Dict[str, Any], *keys: str) -> Any:
             for k in keys:
                 if k in d:
@@ -556,7 +471,6 @@ class AlertRulesImporter(BaseImporter):
         repos = _split_multi(get_any(existing_obj, "repos", "repository", "repositories"))
         log_source = _split_multi(get_any(existing_obj, "log_source", "logsources"))
 
-        # timerange: prefer day>hour>minute if present
         tr_d = _int_or_none(get_any(existing_obj, "timerange_day"))
         tr_h = _int_or_none(get_any(existing_obj, "timerange_hour"))
         tr_m = _int_or_none(get_any(existing_obj, "timerange_minute"))
@@ -593,27 +507,45 @@ class AlertRulesImporter(BaseImporter):
             "context_template": _s(get_any(existing_obj, "alert_context_template", "context_template")),
         }
 
+    # --- logging helpers for API/monitor ----------------------------------
+
+    def _log_api_start(self, method: str, path: str, action: str, tenant: str, node: NodeRef, rule: str, payload: Dict[str, Any]) -> None:
+        log.info("event=http.request method=%s path=%s action=%s tenant=%s node=%s|%s rule=%s %s",
+                 method, path, action, tenant, getattr(node, "name", node.id), node.id, rule, _payload_keys_summary(_redact_for_log(payload)))
+        log.debug("payload=%s", json.dumps(_redact_for_log(payload))[:1024])
+
+    def _log_api_ok(self, method: str, path: str, action: str, tenant: str, node: NodeRef, rule: str) -> None:
+        log.info("event=http.ok method=%s path=%s action=%s tenant=%s node=%s|%s rule=%s",
+                 method, path, action, tenant, getattr(node, "name", node.id), node.id, rule)
+
+    def _log_monitor_start(self, request_id: str, url: str, tenant: str, node: NodeRef, rule: str) -> None:
+        log.info("event=monitor.start request_id=%s url=%s tenant=%s node=%s|%s rule=%s",
+                 request_id, url, tenant, getattr(node, "name", node.id), node.id, rule)
+
+    def _log_monitor_done(self, request_id: str, tenant: str, node: NodeRef, rule: str, items: Optional[int] = None) -> None:
+        log.info("event=monitor.done request_id=%s items=%s tenant=%s node=%s|%s rule=%s",
+                 request_id, (items if items is not None else "-"), tenant, getattr(node, "name", node.id), node.id, rule)
+
+    def _log_monitor_fail(self, request_id: str, tenant: str, node: NodeRef, rule: str, reason: str) -> None:
+        log.warning("event=monitor.fail request_id=%s reason=%s tenant=%s node=%s|%s rule=%s",
+                    request_id, reason, tenant, getattr(node, "name", node.id), node.id, rule)
+
     # --- fetch existing ---------------------------------------------------
 
-    def fetch_existing(  # type: ignore[override]
-        self, client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:  # type: ignore[override]
         """
         List existing rules for a node via Fetch* endpoints (monitorized),
-        returning {searchname -> obj}. AlertRules do not offer a direct
-        GET list; we must POST with a body wrapped in {"data": {...}}.
+        returning {searchname -> obj}. AlertRules do not offer a direct GET list.
         """
         def _adapt_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not isinstance(payload, dict):
                 return []
-            # common containers
             for key in ("result", "results", "data", "rules", "items", "list"):
                 val = payload.get(key)
                 if isinstance(val, list):
                     return [x for x in val if isinstance(x, dict)]
                 if isinstance(val, dict) and isinstance(val.get("items"), list):
                     return [x for x in val["items"] if isinstance(x, dict)]
-            # monitor responses often have {response: {success, result: []}}
             resp = payload.get("response")
             if isinstance(resp, dict):
                 val = resp.get("result") or resp.get("results")
@@ -621,38 +553,48 @@ class AlertRulesImporter(BaseImporter):
                     return [x for x in val if isinstance(x, dict)]
             return []
 
-        def _monitorize(res: Dict[str, Any]) -> Dict[str, Any]:
-            # Try job id first (modern), then monitor URL (legacy)
+        def _monitorize(res: Dict[str, Any], tenant: str) -> Dict[str, Any]:
             job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
+            mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
             if isinstance(job_id, str) and job_id:
+                self._log_monitor_start(job_id, f"(job:{job_id})", tenant, node, "<fetch>")
                 ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                return data if ok else {}
-            mpath = client._extract_monitor_path(res)  # type: ignore[attr-defined]
-            if isinstance(mpath, str) and mpath:
-                ok, data = client.monitor_job_url(mpath)
-                return data if ok else {}
+                if ok:
+                    self._log_monitor_done(job_id, tenant, node, "<fetch>")
+                    return data
+                self._log_monitor_fail(job_id, tenant, node, "<fetch>", "job monitor failed")
+                return {}
+            if isinstance(mon_path, str) and mon_path:
+                self._log_monitor_start("<url>", mon_path, tenant, node, "<fetch>")
+                ok, data = client.monitor_job_url(mon_path)
+                if ok:
+                    self._log_monitor_done("<url>", tenant, node, "<fetch>")
+                    return data
+                self._log_monitor_fail("<url>", tenant, node, "<fetch>", "url monitor failed")
+                return {}
             return res
 
         out: Dict[str, Dict[str, Any]] = {}
         node_t = f"{getattr(node, 'name', node.id)}|{node.id}"
 
-        # Fetch flavors (monitor)
-        for path in (
+        for sub in (
             f"{self.RESOURCE}/MyAlertRules/fetch",
             f"{self.RESOURCE}/SharedAlertRules/fetch",
             f"{self.RESOURCE}/VendorAlertRules/fetch",
         ):
+            path = client.configapi(pool_uuid, node.id, sub)
             try:
-                # Body MUST be wrapped in {"data": {...}} to avoid server NPEs
-                res = client.post_json(client.configapi(pool_uuid, node.id, path), {"data": {}})
-                data = _monitorize(res)
+                self._log_api_start("POST", path, "fetch", client.tenant, node, "<fetch>", {"data": {}})
+                res = client.post_json(path, {"data": {}})
+                self._log_api_ok("POST", path, "fetch", client.tenant, node, "<fetch>")
+                data = _monitorize(res, client.tenant)
                 items = _adapt_list(data)
                 for it in items:
                     key = _s(it.get("searchname") or it.get("name"))
                     if key:
                         out[key] = {"id": _s(it.get("id") or it.get("_id")), **it}
-            except Exception as exc:  # pragma: no cover
-                log.debug("fetch %s failed on %s: %s", path, node_t, exc)
+            except Exception as exc:
+                log.warning("fetch_existing: POST %s failed on %s: %s", sub, node_t, exc)
 
         log.info("fetch_existing: found %d alert rules [node=%s]", len(out), node_t)
         return out
@@ -661,7 +603,6 @@ class AlertRulesImporter(BaseImporter):
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
         d: _DesiredAlert = desired_row["desired"]
-
         payload: Dict[str, Any] = {
             "searchname": d.name,
             "owner": d.owner,
@@ -674,44 +615,31 @@ class AlertRulesImporter(BaseImporter):
             "query": d.query,
             "description": d.description,
         }
-
-        # timerange: choose exactly one
         if d.timerange_day:
             payload["timerange_day"] = d.timerange_day
         elif d.timerange_hour:
             payload["timerange_hour"] = d.timerange_hour
         else:
             payload["timerange_minute"] = d.timerange_minute or 1
-
         if d.search_interval_minute:
             payload["search_interval_minute"] = d.search_interval_minute
-
         if d.flush_on_trigger:
             payload["flush_on_trigger"] = "on"
-
         if d.throttling_enabled:
             payload["throttling_enabled"] = "on"
             if d.throttling_field:
                 payload["throttling_field"] = d.throttling_field
             if d.throttling_time_range:
                 payload["throttling_time_range"] = d.throttling_time_range
-
         if d.metadata:
             payload["metadata"] = [{"field": k, "value": v} for (k, v) in d.metadata]
-
         if d.log_source:
             payload["log_source"] = d.log_source
-
         if d.context_template:
             payload["alert_context_template"] = d.context_template
-
         return payload
 
-    def build_payload_update(  # type: ignore[override]
-        self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        # For now we use the same shape as CREATE; Director accepts PUT with
-        # the full definition. If later the API requires partials, filter here.
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
         return self.build_payload_create(desired_row)
 
     # --- apply ------------------------------------------------------------
@@ -725,131 +653,172 @@ class AlertRulesImporter(BaseImporter):
         existing_id: Optional[str],
     ) -> Dict[str, Any]:
         """
-        Execute CREATE/UPDATE/NOOP/SKIP on the API and then post-apply:
-        - active state (activate/deactivate),
+        Execute CREATE/UPDATE and then post-apply:
+        - state (activate/deactivate),
         - sharing (share/unshare),
         - notifications (per type).
+        All API calls are logged; all POST/PUT bodies are wrapped in {"data": ...}.
         """
         desired: _DesiredAlert = decision.desired["desired"]
         monitor_branch = None
+        rule_name = desired.name
 
         # ------------ core create/update
-        if decision.op == "CREATE":
-            res = client.post_json(
-                client.configapi(pool_uuid, node.id, self.RESOURCE),
-                self.build_payload_create(decision.desired),
-            )
-            # monitor if needed
-            job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
-            if job_id:
-                ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                monitor_branch = f"job:{job_id}"
-                if not ok:
-                    return {
-                        "status": "Failed",
-                        "monitor_ok": False,
-                        "monitor_branch": monitor_branch,
-                        "error": f"Create failed: {data.get('message')}",
-                    }
-                created = data.get("response", {}).get("result") or data.get("result") or {}
-            else:
-                created = res.get("result") or res
+        try:
+            if decision.op == "CREATE":
+                path = client.configapi(pool_uuid, node.id, self.RESOURCE)
+                body = {"data": self.build_payload_create(decision.desired)}
+                self._log_api_start("POST", path, "create", client.tenant, node, rule_name, body)
+                res = client.post_json(path, body)
+                self._log_api_ok("POST", path, "create", client.tenant, node, rule_name)
+                job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
+                mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
+                if job_id:
+                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    ok, data = client.monitor_job(pool_uuid, node.id, job_id)
+                    monitor_branch = f"job:{job_id}"
+                    if not ok:
+                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "create monitor failed")
+                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                                "error": f"Create failed: {data.get('message')}"}
+                    self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                    created = data.get("response", {}).get("result") or data.get("result") or {}
+                elif mon_path:
+                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    ok, data = client.monitor_job_url(mon_path)
+                    monitor_branch = "<url>"
+                    if not ok:
+                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "create monitor failed")
+                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                                "error": f"Create failed via monitor url"}
+                    self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                    created = data.get("response", {}).get("result") or data.get("result") or {}
+                else:
+                    created = res.get("result") or res
 
-            rule_id = _s(created.get("id") or created.get("_id"))
-            if not rule_id:
-                # try to re-fetch by name as a fallback
-                existing_map = self.fetch_existing(client, pool_uuid, node)
-                rule = existing_map.get(desired.name)
-                rule_id = rule and _s(rule.get("id"))
+                rule_id = _s(created.get("id") or created.get("_id"))
                 if not rule_id:
-                    return {
-                        "status": "Failed",
-                        "monitor_ok": False,
-                        "monitor_branch": monitor_branch,
-                        "error": "Create succeeded but rule id missing",
-                    }
+                    # fallback: re-fetch by name
+                    exist_map = self.fetch_existing(client, pool_uuid, node)
+                    rule = exist_map.get(rule_name)
+                    rule_id = rule and _s(rule.get("id"))
+                    if not rule_id:
+                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                                "error": "Create succeeded but rule id missing"}
 
-        elif decision.op == "UPDATE":
-            if not existing_id:
-                return {
-                    "status": "Failed",
-                    "monitor_ok": False,
-                    "monitor_branch": monitor_branch,
-                    "error": "Update planned but no existing id",
-                }
-            res = client.put_json(
-                client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{existing_id}"),
-                self.build_payload_update(decision.desired, decision.existing or {}),
-            )
-            job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
-            if job_id:
-                ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                monitor_branch = f"job:{job_id}"
-                if not ok:
-                    return {
-                        "status": "Failed",
-                        "monitor_ok": False,
-                        "monitor_branch": monitor_branch,
-                        "error": f"Update failed: {data.get('message')}",
-                    }
-            rule_id = existing_id
+            elif decision.op == "UPDATE":
+                if not existing_id:
+                    return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                            "error": "Update planned but no existing id"}
+                path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{existing_id}")
+                body = {"data": self.build_payload_update(decision.desired, decision.existing or {})}
+                self._log_api_start("PUT", path, "update", client.tenant, node, rule_name, body)
+                res = client.put_json(path, body)
+                self._log_api_ok("PUT", path, "update", client.tenant, node, rule_name)
+                job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
+                mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
+                if job_id:
+                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    ok, data = client.monitor_job(pool_uuid, node.id, job_id)
+                    monitor_branch = f"job:{job_id}"
+                    if not ok:
+                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "update monitor failed")
+                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                                "error": f"Update failed: {data.get('message')}"}
+                    self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                elif mon_path:
+                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    ok, _data = client.monitor_job_url(mon_path)
+                    monitor_branch = "<url>"
+                    if not ok:
+                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "update monitor failed")
+                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
+                                "error": "Update failed via monitor url"}
+                rule_id = existing_id
 
-        elif decision.op in ("NOOP", "SKIP"):
-            # BaseImporter never calls apply for NOOP/SKIP, but keep safe.
-            return {"status": "Skipped", "monitor_ok": True, "monitor_branch": monitor_branch}
+            elif decision.op in ("NOOP", "SKIP"):
+                return {"status": "Skipped", "monitor_ok": True, "monitor_branch": monitor_branch}
 
-        else:
-            return {"status": "Failed", "error": f"Unknown decision {decision.op}"}
+            else:
+                return {"status": "Failed", "error": f"Unknown decision {decision.op}"}
+
+        except Exception as exc:
+            log.error("apply core %s failed: %s", decision.op, exc)
+            return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch, "error": str(exc)}
 
         # ----------- post-apply (state, sharing, notifications)
 
-        # 1) state
-        state_path = None
+        # 1) state (activate/deactivate)
         try:
-            if desired.active:
-                state_path = f"{self.RESOURCE}/{rule_id}/activate"
-            else:
-                state_path = f"{self.RESOURCE}/{rule_id}/deactivate"
-            resp = client.post_json(client.configapi(pool_uuid, node.id, state_path), {})
+            state_action = "activate" if desired.active else "deactivate"
+            state_path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/{state_action}")
+            self._log_api_start("POST", state_path, f"state.{state_action}", client.tenant, node, rule_name, {"data": {}})
+            resp = client.post_json(state_path, {"data": {}})
+            self._log_api_ok("POST", state_path, f"state.{state_action}", client.tenant, node, rule_name)
             job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+            mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
             if job_id:
+                self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
                 ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                 if not ok:
-                    log.warning("activate/deactivate monitor failed: id=%s", job_id)
+                    self._log_monitor_fail(job_id, client.tenant, node, rule_name, "state monitor failed")
+            elif mon_path:
+                self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                ok, _data = client.monitor_job_url(mon_path)
+                if not ok:
+                    self._log_monitor_fail("<url>", client.tenant, node, rule_name, "state monitor failed")
+            log.info("event=state.%s rule_id=%s node=%s|%s", state_action, rule_id, getattr(node, "name", node.id), node.id)
         except Exception as exc:
-            log.warning("state sync failed (%s): %s", state_path, exc)
+            log.warning("state sync failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
 
         # 2) sharing (RBAC)
         try:
             rbac_cfg = self._make_rbac_config(desired.visible_to_groups, desired.visible_to_users)
             if rbac_cfg:
-                resp = client.post_json(
-                    client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/share"),
-                    {"rbac_config": rbac_cfg},
-                )
+                spath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/share")
+                body = {"data": {"rbac_config": rbac_cfg}}
+                self._log_api_start("POST", spath, "share", client.tenant, node, rule_name, body)
+                resp = client.post_json(spath, body)
+                self._log_api_ok("POST", spath, "share", client.tenant, node, rule_name)
                 job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+                mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
                 if job_id:
+                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
                     ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                     if not ok:
-                        log.warning("share monitor failed: id=%s", job_id)
+                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "share monitor failed")
+                elif mon_path:
+                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    ok, _data = client.monitor_job_url(mon_path)
+                    if not ok:
+                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "share monitor failed")
+                log.info("event=share.apply rule_id=%s groups=%d users=%d", rule_id, len(desired.visible_to_groups), len(desired.visible_to_users))
             else:
-                # If sheet wants no sharing, unshare to reset
-                resp = client.post_json(
-                    client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/unshare"), {}
-                )
+                upath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/unshare")
+                self._log_api_start("POST", upath, "unshare", client.tenant, node, rule_name, {"data": {}})
+                resp = client.post_json(upath, {"data": {}})
+                self._log_api_ok("POST", upath, "unshare", client.tenant, node, rule_name)
                 job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+                mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
                 if job_id:
+                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
                     ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                     if not ok:
-                        log.warning("unshare monitor failed: id=%s", job_id)
+                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "unshare monitor failed")
+                elif mon_path:
+                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    ok, _data = client.monitor_job_url(mon_path)
+                    if not ok:
+                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "unshare monitor failed")
+                log.info("event=unshare.apply rule_id=%s", rule_id)
         except Exception as exc:
-            log.warning("share/unshare failed: %s", exc)
+            log.warning("share/unshare failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
 
         # 3) notifications (per type)
         try:
-            self._apply_notifications(client, pool_uuid, node, rule_id, desired.notifications)
+            self._apply_notifications(client, pool_uuid, node, rule_id, desired.notifications, rule_name)
         except Exception as exc:
-            log.warning("notifications apply failed: %s", exc)
+            log.warning("notifications apply failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
 
         return {"status": "Success", "monitor_ok": True, "monitor_branch": monitor_branch}
 
@@ -857,11 +826,6 @@ class AlertRulesImporter(BaseImporter):
 
     @staticmethod
     def _make_rbac_config(groups: List[str], users: List[str]) -> Dict[str, Any]:
-        """
-        Convert visible_to / visible_to_users into `rbac_config`.
-        The sheet is expected to provide identifiers that Director accepts.
-        If you keep names here, resolve to IDs prior to calling share if needed.
-        """
         cfg: Dict[str, Any] = {}
         if groups:
             cfg["group_permissions"] = [{"group_id": g, "permission": "READ"} for g in groups]
@@ -878,62 +842,64 @@ class AlertRulesImporter(BaseImporter):
         node: NodeRef,
         rule_id: str,
         items: List[Dict[str, Any]],
+        rule_name: str,
     ) -> None:
-        """
-        Apply notifications in a simple idempotent way:
-        - For each item, POST to its corresponding sub-endpoint.
-        - If the API requires delete/update semantics, extend here to
-          diff against existing notifications (future enhancement).
-        """
         for item in items or []:
             typ = _s(item.get("type")).lower()
             if not typ:
                 continue
             if typ == "email":
-                self._post_email_notification(client, pool, node, rule_id, item)
+                self._post_email_notification(client, pool, node, rule_id, item, rule_name)
             elif typ == "syslog":
-                self._post_syslog_notification(client, pool, node, rule_id, item)
+                self._post_syslog_notification(client, pool, node, rule_id, item, rule_name)
             elif typ == "http":
-                self._post_http_notification(client, pool, node, rule_id, item)
+                self._post_http_notification(client, pool, node, rule_id, item, rule_name)
             elif typ == "sms":
-                self._post_sms_notification(client, pool, node, rule_id, item)
+                self._post_sms_notification(client, pool, node, rule_id, item, rule_name)
             elif typ == "snmp":
-                self._post_snmp_notification(client, pool, node, rule_id, item)
+                self._post_snmp_notification(client, pool, node, rule_id, item, rule_name)
             elif typ == "ssh":
-                self._post_ssh_notification(client, pool, node, rule_id, item)
+                self._post_ssh_notification(client, pool, node, rule_id, item, rule_name)
             else:
-                log.warning("Unknown notification type: %s", typ)
+                log.warning("Unknown notification type: %s (rule=%s id=%s)", typ, rule_name, rule_id)
 
     def _post_email_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_email": _as_bool_flag_on(d.get("notify_email")) or "on",
             "email_emails": d.get("email_emails") or d.get("emails") or [],
         }
         for k in (
-            "subject",
-            "email_template",
-            "email_threshold_option",
-            "email_threshold_value",
-            "dispatch_option",
-            "simple_view",
-            "logo_enable",
-            "b64_logo",
-            "link_disable",
+            "subject", "email_template", "email_threshold_option", "email_threshold_value",
+            "dispatch_option", "simple_view", "logo_enable", "b64_logo", "link_disable",
         ):
             if k in d and not _is_blank(d[k]):
                 payload[k] = d[k]
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/EmailNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/EmailNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.email", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.email", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify email monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify email monitor failed")
 
     def _post_syslog_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_syslog": _as_bool_flag_on(d.get("notify_syslog")) or "on",
@@ -949,17 +915,30 @@ class AlertRulesImporter(BaseImporter):
             payload["threshold_option"] = d["threshold_option"]
         if d.get("threshold_value") is not None:
             payload["threshold_value"] = _int_or_none(d.get("threshold_value")) or 0
-
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SyslogNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SyslogNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.syslog", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.syslog", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify syslog monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify syslog monitor failed")
 
     def _post_http_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_http": _as_bool_flag_on(d.get("notify_http")) or "on",
@@ -973,17 +952,30 @@ class AlertRulesImporter(BaseImporter):
             payload["http_threshold_option"] = d["http_threshold_option"]
         if d.get("http_threshold_value") is not None:
             payload["http_threshold_value"] = _int_or_none(d.get("http_threshold_value")) or 0
-
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/HTTPNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/HTTPNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.http", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.http", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify http monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify http monitor failed")
 
     def _post_sms_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_sms": _as_bool_flag_on(d.get("notify_sms")) or "on",
@@ -998,37 +990,62 @@ class AlertRulesImporter(BaseImporter):
             payload["sms_threshold_option"] = d["sms_threshold_option"]
         if d.get("sms_threshold_value") is not None:
             payload["sms_threshold_value"] = _int_or_none(d.get("sms_threshold_value")) or 0
-
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SMSNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SMSNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.sms", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.sms", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify sms monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify sms monitor failed")
 
     def _post_snmp_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_snmp": _as_bool_flag_on(d.get("notify_snmp")) or "on",
             "snmp_agent": d.get("snmp_agent"),
         }
-        # pass-through additional SNMP security/version keys if provided
         for k in ("snmp_version", "snmp_security", "snmp_community", "snmp_user", "snmp_auth", "snmp_priv"):
             if k in d and not _is_blank(d[k]):
                 payload[k] = d[k]
-
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SNMPNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SNMPNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.snmp", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.snmp", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify snmp monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify snmp monitor failed")
 
     def _post_ssh_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any]
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_ssh": _as_bool_flag_on(d.get("notify_ssh")) or "on",
@@ -1041,7 +1058,6 @@ class AlertRulesImporter(BaseImporter):
             payload["ssh_auth_password"] = d.get("ssh_auth_password") or d.get("ssh_password") or ""
         else:
             payload["ssh_key"] = d.get("ssh_key") or ""
-
         if d.get("ssh_command"):
             payload["ssh_command"] = d["ssh_command"]
         if d.get("ssh_threshold_option"):
@@ -1049,10 +1065,24 @@ class AlertRulesImporter(BaseImporter):
         if d.get("ssh_threshold_value") is not None:
             payload["ssh_threshold_value"] = _int_or_none(d.get("ssh_threshold_value")) or 0
 
-        resp = client.post_json(
-            client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SSHNotification"),
-            payload,
-        )
+        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SSHNotification")
+        body = {"data": payload}
+        self._log_api_start("POST", path, "notify.ssh", client.tenant, node, rule_name, body)
+        resp = client.post_json(path, body)
+        self._log_api_ok("POST", path, "notify.ssh", client.tenant, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
+        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            client.monitor_job(pool, node.id, job_id)
+            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            ok, _ = client.monitor_job(pool, node.id, job_id)
+            if ok:
+                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify ssh monitor failed")
+        elif mon_path:
+            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            ok, _ = client.monitor_job_url(mon_path)
+            if ok:
+                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+            else:
+                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify ssh monitor failed")

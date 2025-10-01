@@ -29,5 +29,5 @@ defaults:
     device_groups: [ backends, all_in_one ]
     devices: [ backends, all_in_one ]
     syslog_collectors: [ backends, all_in_one ]
-    alerts: [ search_heads ]
+    alert_rules: [ search_heads ]
  

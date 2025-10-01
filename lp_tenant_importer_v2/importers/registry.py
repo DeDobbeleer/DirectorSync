@@ -116,6 +116,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="SyslogCollectorsImporter",
         element_key="syslog_collectors",
     ),
+    # Alert Rules
+    "alert_rules": ImporterSpec(
+        key="alert_rules",
+        cli="import-alert-rules",
+        help="Import alert rules",
+        module="lp_tenant_importer_v2.importers.alert_rules",
+        class_name="AlertRulesImporter",
+        element_key="alert_rules",
+    )
 
 }
 

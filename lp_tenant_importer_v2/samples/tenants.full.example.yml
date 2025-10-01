@@ -10,6 +10,8 @@ tenants:
       backends:
         - name: "lb-backend01" 
           id: "506caf32de83054497d07c3c632a98cb"
+          ip: "10.160.100.10"
+          ip_private: "10.205.83.1"
         - name: "lb-backend02"
           id: "01925abf82fe0db0a75c190c4316b8a6"
       all_in_one: []

@@ -1,8 +1,8 @@
 # DirectorSync v2 — runtime dependencies
 # Python >= 3.10 required
 
-requests==2.32.3
-pandas==2.2.2
-openpyxl==3.1.5
-python-dotenv==1.0.1
-PyYAML==6.0.2
+requests
+pandas
+openpyxl
+python-dotenv
+PyYAML

@@ -8,3 +8,6 @@ artifacts/
 # *.xlsx
 .venv/
 temp/
+*.spec
+build/
+dist/

@@ -2,6 +2,8 @@
 """
 AlertRules importer (DirectorSync v2)
 
+Fixes:
+- Remove reliance on `client.tenant`; use `tenant_or_pool` = pool_uuid in logs
 - Robust XLSX parsing (no Series ambiguity)
 - Correct API envelopes: ALL POST/PUT use {"data": ...}
 - Fetch via .../fetch + monitor flow
@@ -509,26 +511,26 @@ class AlertRulesImporter(BaseImporter):
 
     # --- logging helpers for API/monitor ----------------------------------
 
-    def _log_api_start(self, method: str, path: str, action: str, tenant: str, node: NodeRef, rule: str, payload: Dict[str, Any]) -> None:
-        log.info("event=http.request method=%s path=%s action=%s tenant=%s node=%s|%s rule=%s %s",
-                 method, path, action, tenant, getattr(node, "name", node.id), node.id, rule, _payload_keys_summary(_redact_for_log(payload)))
+    def _log_api_start(self, method: str, path: str, action: str, tenant_or_pool: str, node: NodeRef, rule: str, payload: Dict[str, Any]) -> None:
+        log.info("event=http.request method=%s path=%s action=%s tenant_or_pool=%s node=%s|%s rule=%s %s",
+                 method, path, action, tenant_or_pool, getattr(node, "name", node.id), node.id, rule, _payload_keys_summary(_redact_for_log(payload)))
         log.debug("payload=%s", json.dumps(_redact_for_log(payload))[:1024])
 
-    def _log_api_ok(self, method: str, path: str, action: str, tenant: str, node: NodeRef, rule: str) -> None:
-        log.info("event=http.ok method=%s path=%s action=%s tenant=%s node=%s|%s rule=%s",
-                 method, path, action, tenant, getattr(node, "name", node.id), node.id, rule)
+    def _log_api_ok(self, method: str, path: str, action: str, tenant_or_pool: str, node: NodeRef, rule: str) -> None:
+        log.info("event=http.ok method=%s path=%s action=%s tenant_or_pool=%s node=%s|%s rule=%s",
+                 method, path, action, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
 
-    def _log_monitor_start(self, request_id: str, url: str, tenant: str, node: NodeRef, rule: str) -> None:
-        log.info("event=monitor.start request_id=%s url=%s tenant=%s node=%s|%s rule=%s",
-                 request_id, url, tenant, getattr(node, "name", node.id), node.id, rule)
+    def _log_monitor_start(self, request_id: str, url: str, tenant_or_pool: str, node: NodeRef, rule: str) -> None:
+        log.info("event=monitor.start request_id=%s url=%s tenant_or_pool=%s node=%s|%s rule=%s",
+                 request_id, url, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
 
-    def _log_monitor_done(self, request_id: str, tenant: str, node: NodeRef, rule: str, items: Optional[int] = None) -> None:
-        log.info("event=monitor.done request_id=%s items=%s tenant=%s node=%s|%s rule=%s",
-                 request_id, (items if items is not None else "-"), tenant, getattr(node, "name", node.id), node.id, rule)
+    def _log_monitor_done(self, request_id: str, tenant_or_pool: str, node: NodeRef, rule: str, items: Optional[int] = None) -> None:
+        log.info("event=monitor.done request_id=%s items=%s tenant_or_pool=%s node=%s|%s rule=%s",
+                 request_id, (items if items is not None else "-"), tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
 
-    def _log_monitor_fail(self, request_id: str, tenant: str, node: NodeRef, rule: str, reason: str) -> None:
-        log.warning("event=monitor.fail request_id=%s reason=%s tenant=%s node=%s|%s rule=%s",
-                    request_id, reason, tenant, getattr(node, "name", node.id), node.id, rule)
+    def _log_monitor_fail(self, request_id: str, tenant_or_pool: str, node: NodeRef, rule: str, reason: str) -> None:
+        log.warning("event=monitor.fail request_id=%s reason=%s tenant_or_pool=%s node=%s|%s rule=%s",
+                    request_id, reason, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
 
     # --- fetch existing ---------------------------------------------------
 
@@ -553,24 +555,24 @@ class AlertRulesImporter(BaseImporter):
                     return [x for x in val if isinstance(x, dict)]
             return []
 
-        def _monitorize(res: Dict[str, Any], tenant: str) -> Dict[str, Any]:
+        def _monitorize(res: Dict[str, Any], tenant_or_pool: str) -> Dict[str, Any]:
             job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
             mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
             if isinstance(job_id, str) and job_id:
-                self._log_monitor_start(job_id, f"(job:{job_id})", tenant, node, "<fetch>")
+                self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, "<fetch>")
                 ok, data = client.monitor_job(pool_uuid, node.id, job_id)
                 if ok:
-                    self._log_monitor_done(job_id, tenant, node, "<fetch>")
+                    self._log_monitor_done(job_id, tenant_or_pool, node, "<fetch>")
                     return data
-                self._log_monitor_fail(job_id, tenant, node, "<fetch>", "job monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, "<fetch>", "job monitor failed")
                 return {}
             if isinstance(mon_path, str) and mon_path:
-                self._log_monitor_start("<url>", mon_path, tenant, node, "<fetch>")
+                self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, "<fetch>")
                 ok, data = client.monitor_job_url(mon_path)
                 if ok:
-                    self._log_monitor_done("<url>", tenant, node, "<fetch>")
+                    self._log_monitor_done("<url>", tenant_or_pool, node, "<fetch>")
                     return data
-                self._log_monitor_fail("<url>", tenant, node, "<fetch>", "url monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, "<fetch>", "url monitor failed")
                 return {}
             return res
 
@@ -584,10 +586,10 @@ class AlertRulesImporter(BaseImporter):
         ):
             path = client.configapi(pool_uuid, node.id, sub)
             try:
-                self._log_api_start("POST", path, "fetch", client.tenant, node, "<fetch>", {"data": {}})
+                self._log_api_start("POST", path, "fetch", pool_uuid, node, "<fetch>", {"data": {}})
                 res = client.post_json(path, {"data": {}})
-                self._log_api_ok("POST", path, "fetch", client.tenant, node, "<fetch>")
-                data = _monitorize(res, client.tenant)
+                self._log_api_ok("POST", path, "fetch", pool_uuid, node, "<fetch>")
+                data = _monitorize(res, pool_uuid)
                 items = _adapt_list(data)
                 for it in items:
                     key = _s(it.get("searchname") or it.get("name"))
@@ -662,36 +664,37 @@ class AlertRulesImporter(BaseImporter):
         desired: _DesiredAlert = decision.desired["desired"]
         monitor_branch = None
         rule_name = desired.name
+        tenant_or_pool = pool_uuid  # label used in logs
 
         # ------------ core create/update
         try:
             if decision.op == "CREATE":
                 path = client.configapi(pool_uuid, node.id, self.RESOURCE)
                 body = {"data": self.build_payload_create(decision.desired)}
-                self._log_api_start("POST", path, "create", client.tenant, node, rule_name, body)
+                self._log_api_start("POST", path, "create", tenant_or_pool, node, rule_name, body)
                 res = client.post_json(path, body)
-                self._log_api_ok("POST", path, "create", client.tenant, node, rule_name)
+                self._log_api_ok("POST", path, "create", tenant_or_pool, node, rule_name)
                 job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
                 mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
                 if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
                     ok, data = client.monitor_job(pool_uuid, node.id, job_id)
                     monitor_branch = f"job:{job_id}"
                     if not ok:
-                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "create monitor failed")
+                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "create monitor failed")
                         return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
                                 "error": f"Create failed: {data.get('message')}"}
-                    self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                    self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
                     created = data.get("response", {}).get("result") or data.get("result") or {}
                 elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
                     ok, data = client.monitor_job_url(mon_path)
                     monitor_branch = "<url>"
                     if not ok:
-                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "create monitor failed")
+                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "create monitor failed")
                         return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": f"Create failed via monitor url"}
-                    self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                                "error": "Create failed via monitor url"}
+                    self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
                     created = data.get("response", {}).get("result") or data.get("result") or {}
                 else:
                     created = res.get("result") or res
@@ -712,26 +715,26 @@ class AlertRulesImporter(BaseImporter):
                             "error": "Update planned but no existing id"}
                 path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{existing_id}")
                 body = {"data": self.build_payload_update(decision.desired, decision.existing or {})}
-                self._log_api_start("PUT", path, "update", client.tenant, node, rule_name, body)
+                self._log_api_start("PUT", path, "update", tenant_or_pool, node, rule_name, body)
                 res = client.put_json(path, body)
-                self._log_api_ok("PUT", path, "update", client.tenant, node, rule_name)
+                self._log_api_ok("PUT", path, "update", tenant_or_pool, node, rule_name)
                 job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
                 mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
                 if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
                     ok, data = client.monitor_job(pool_uuid, node.id, job_id)
                     monitor_branch = f"job:{job_id}"
                     if not ok:
-                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "update monitor failed")
+                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "update monitor failed")
                         return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
                                 "error": f"Update failed: {data.get('message')}"}
-                    self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                    self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
                 elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
                     ok, _data = client.monitor_job_url(mon_path)
                     monitor_branch = "<url>"
                     if not ok:
-                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "update monitor failed")
+                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "update monitor failed")
                         return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
                                 "error": "Update failed via monitor url"}
                 rule_id = existing_id
@@ -752,21 +755,21 @@ class AlertRulesImporter(BaseImporter):
         try:
             state_action = "activate" if desired.active else "deactivate"
             state_path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/{state_action}")
-            self._log_api_start("POST", state_path, f"state.{state_action}", client.tenant, node, rule_name, {"data": {}})
+            self._log_api_start("POST", state_path, f"state.{state_action}", tenant_or_pool, node, rule_name, {"data": {}})
             resp = client.post_json(state_path, {"data": {}})
-            self._log_api_ok("POST", state_path, f"state.{state_action}", client.tenant, node, rule_name)
+            self._log_api_ok("POST", state_path, f"state.{state_action}", tenant_or_pool, node, rule_name)
             job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
             mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
             if job_id:
-                self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
                 ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                 if not ok:
-                    self._log_monitor_fail(job_id, client.tenant, node, rule_name, "state monitor failed")
+                    self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "state monitor failed")
             elif mon_path:
-                self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
                 ok, _data = client.monitor_job_url(mon_path)
                 if not ok:
-                    self._log_monitor_fail("<url>", client.tenant, node, rule_name, "state monitor failed")
+                    self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "state monitor failed")
             log.info("event=state.%s rule_id=%s node=%s|%s", state_action, rule_id, getattr(node, "name", node.id), node.id)
         except Exception as exc:
             log.warning("state sync failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
@@ -777,46 +780,46 @@ class AlertRulesImporter(BaseImporter):
             if rbac_cfg:
                 spath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/share")
                 body = {"data": {"rbac_config": rbac_cfg}}
-                self._log_api_start("POST", spath, "share", client.tenant, node, rule_name, body)
+                self._log_api_start("POST", spath, "share", tenant_or_pool, node, rule_name, body)
                 resp = client.post_json(spath, body)
-                self._log_api_ok("POST", spath, "share", client.tenant, node, rule_name)
+                self._log_api_ok("POST", spath, "share", tenant_or_pool, node, rule_name)
                 job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
                 mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
                 if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
                     ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                     if not ok:
-                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "share monitor failed")
+                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "share monitor failed")
                 elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
                     ok, _data = client.monitor_job_url(mon_path)
                     if not ok:
-                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "share monitor failed")
+                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "share monitor failed")
                 log.info("event=share.apply rule_id=%s groups=%d users=%d", rule_id, len(desired.visible_to_groups), len(desired.visible_to_users))
             else:
                 upath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/unshare")
-                self._log_api_start("POST", upath, "unshare", client.tenant, node, rule_name, {"data": {}})
+                self._log_api_start("POST", upath, "unshare", tenant_or_pool, node, rule_name, {"data": {}})
                 resp = client.post_json(upath, {"data": {}})
-                self._log_api_ok("POST", upath, "unshare", client.tenant, node, rule_name)
+                self._log_api_ok("POST", upath, "unshare", tenant_or_pool, node, rule_name)
                 job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
                 mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
                 if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
                     ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
                     if not ok:
-                        self._log_monitor_fail(job_id, client.tenant, node, rule_name, "unshare monitor failed")
+                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "unshare monitor failed")
                 elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
                     ok, _data = client.monitor_job_url(mon_path)
                     if not ok:
-                        self._log_monitor_fail("<url>", client.tenant, node, rule_name, "unshare monitor failed")
+                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "unshare monitor failed")
                 log.info("event=unshare.apply rule_id=%s", rule_id)
         except Exception as exc:
             log.warning("share/unshare failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
 
         # 3) notifications (per type)
         try:
-            self._apply_notifications(client, pool_uuid, node, rule_id, desired.notifications, rule_name)
+            self._apply_notifications(client, pool_uuid, node, rule_id, desired.notifications, rule_name, tenant_or_pool)
         except Exception as exc:
             log.warning("notifications apply failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
 
@@ -843,28 +846,29 @@ class AlertRulesImporter(BaseImporter):
         rule_id: str,
         items: List[Dict[str, Any]],
         rule_name: str,
+        tenant_or_pool: str,
     ) -> None:
         for item in items or []:
             typ = _s(item.get("type")).lower()
             if not typ:
                 continue
             if typ == "email":
-                self._post_email_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_email_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             elif typ == "syslog":
-                self._post_syslog_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_syslog_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             elif typ == "http":
-                self._post_http_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_http_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             elif typ == "sms":
-                self._post_sms_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_sms_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             elif typ == "snmp":
-                self._post_snmp_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_snmp_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             elif typ == "ssh":
-                self._post_ssh_notification(client, pool, node, rule_id, item, rule_name)
+                self._post_ssh_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
             else:
                 log.warning("Unknown notification type: %s (rule=%s id=%s)", typ, rule_name, rule_id)
 
     def _post_email_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_email": _as_bool_flag_on(d.get("notify_email")) or "on",
@@ -878,28 +882,28 @@ class AlertRulesImporter(BaseImporter):
                 payload[k] = d[k]
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/EmailNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.email", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.email", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.email", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.email", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify email monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify email monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify email monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify email monitor failed")
 
     def _post_syslog_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_syslog": _as_bool_flag_on(d.get("notify_syslog")) or "on",
@@ -917,28 +921,28 @@ class AlertRulesImporter(BaseImporter):
             payload["threshold_value"] = _int_or_none(d.get("threshold_value")) or 0
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SyslogNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.syslog", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.syslog", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.syslog", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.syslog", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify syslog monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify syslog monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify syslog monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify syslog monitor failed")
 
     def _post_http_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_http": _as_bool_flag_on(d.get("notify_http")) or "on",
@@ -954,28 +958,28 @@ class AlertRulesImporter(BaseImporter):
             payload["http_threshold_value"] = _int_or_none(d.get("http_threshold_value")) or 0
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/HTTPNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.http", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.http", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.http", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.http", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify http monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify http monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify http monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify http monitor failed")
 
     def _post_sms_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_sms": _as_bool_flag_on(d.get("notify_sms")) or "on",
@@ -992,28 +996,28 @@ class AlertRulesImporter(BaseImporter):
             payload["sms_threshold_value"] = _int_or_none(d.get("sms_threshold_value")) or 0
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SMSNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.sms", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.sms", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.sms", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.sms", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify sms monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify sms monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify sms monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify sms monitor failed")
 
     def _post_snmp_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_snmp": _as_bool_flag_on(d.get("notify_snmp")) or "on",
@@ -1024,28 +1028,28 @@ class AlertRulesImporter(BaseImporter):
                 payload[k] = d[k]
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SNMPNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.snmp", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.snmp", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.snmp", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.snmp", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify snmp monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify snmp monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify snmp monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify snmp monitor failed")
 
     def _post_ssh_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str
+        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
     ) -> None:
         payload: Dict[str, Any] = {
             "notify_ssh": _as_bool_flag_on(d.get("notify_ssh")) or "on",
@@ -1067,22 +1071,22 @@ class AlertRulesImporter(BaseImporter):
 
         path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SSHNotification")
         body = {"data": payload}
-        self._log_api_start("POST", path, "notify.ssh", client.tenant, node, rule_name, body)
+        self._log_api_start("POST", path, "notify.ssh", tenant_or_pool, node, rule_name, body)
         resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.ssh", client.tenant, node, rule_name)
+        self._log_api_ok("POST", path, "notify.ssh", tenant_or_pool, node, rule_name)
         job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
         mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
         if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", client.tenant, node, rule_name)
+            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job(pool, node.id, job_id)
             if ok:
-                self._log_monitor_done(job_id, client.tenant, node, rule_name)
+                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail(job_id, client.tenant, node, rule_name, "notify ssh monitor failed")
+                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify ssh monitor failed")
         elif mon_path:
-            self._log_monitor_start("<url>", mon_path, client.tenant, node, rule_name)
+            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
             ok, _ = client.monitor_job_url(mon_path)
             if ok:
-                self._log_monitor_done("<url>", client.tenant, node, rule_name)
+                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
             else:
-                self._log_monitor_fail("<url>", client.tenant, node, rule_name, "notify ssh monitor failed")
+                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify ssh monitor failed")

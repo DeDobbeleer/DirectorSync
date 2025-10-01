@@ -34,6 +34,8 @@ class NodeRef:
     """A minimal reference to a SIEM node (id + name)."""
     id: str
     name: str
+    ip: str
+    ip_private: str
 
 
 @dataclass
@@ -132,10 +134,10 @@ class Config:
         def to_nodes(lst: Optional[List[Dict[str, str]]]) -> List[NodeRef]:
             res: List[NodeRef] = []
             for it in lst or []:
-                nid, nname = it.get("id"), it.get("name")
+                nid, nname, nip, nip_private = it.get("id"), it.get("name"), it.get("ip", ""), it.get("ip_private", "")
                 if not nid or not nname:
                     raise ConfigError("Every node must have 'id' and 'name' fields")
-                res.append(NodeRef(id=str(nid), name=str(nname)))
+                res.append(NodeRef(id=str(nid), name=str(nname), ip=str(nip), ip_private=str(nip_private)))
             return res
 
         siems_norm = {

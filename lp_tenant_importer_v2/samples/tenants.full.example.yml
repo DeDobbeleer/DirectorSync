@@ -6,12 +6,19 @@ tenants:
 
     # Cibles SIEM par rôle
     siems:
-      search_heads: []
+      search_heads: 
+        - name: "sh01"
+          id: "19fc63880b018d978aabe9162b851a9d"
+          ip: "10.160.184.151"
       backends:
         - name: "lb-backend01" 
           id: "506caf32de83054497d07c3c632a98cb"
+          ip: "10.160.100.10"
+          ip_private: "10.205.83.1"
         - name: "lb-backend02"
           id: "01925abf82fe0db0a75c190c4316b8a6"
+          ip: "10.160.59.216"
+          ip_private: "10.234.74.1"
       all_in_one: []
 
 defaults:

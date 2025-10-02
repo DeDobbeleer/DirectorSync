@@ -229,3 +229,164 @@ RoutingPolicy:
     options:
       stringify_payload_values: true
       warn_on_unknown_columns: true
+
+######### AlertRule ############################################################
+
+  AlertRules:
+    resource: "AlertRules"
+
+    api:
+      resource: "AlertRules"
+      methods:
+        post:
+          whitelist: [
+            "searchname","owner","risk","repos","aggregate",
+            "condition_option","condition_value","limit",
+            "timerange_minute","timerange_hour","timerange_day",
+            "query","description","log_source","search_interval_minute",
+            "flush_on_trigger","throttling_enabled","throttling_field",
+            "throttling_time_range","alert_context_template"
+          ]
+        put:
+          whitelist: [
+            "owner","risk","repos","aggregate",
+            "condition_option","condition_value","limit",
+            "timerange_minute","timerange_hour","timerange_day",
+            "query","description","log_source","search_interval_minute",
+            "flush_on_trigger","throttling_enabled","throttling_field",
+            "throttling_time_range","alert_context_template"
+          ]
+
+    options:
+      # Résolution du propriétaire sans XLSX (obligatoire API)
+      # Ordre: profiles.yml -> env(LP_ALERT_OWNER) -> contexte(token)
+      default_owner: "admin"
+
+      # Parsing listes (repos, log_source) : mêmes séparateurs que les autres modules
+      list_split_separators: ["|", ",", "\n"]
+
+      # Timerange : on n’émet QU’UNE seule unité (priorité minute > hour > day)
+      timerange_priority: ["minute","hour","day"]
+
+      # Normalisation des repos (legacy ip:port/Repo → ip:port:Repo_CLEANED)
+      repos_normalize: true
+      repos_use_tenant_ip_private: true   # filtre sur backends du tenant si activé
+      repo_sheet_mapping_enabled: true    # feuille "Repo" old -> cleaned (si présente)
+
+    mapping:
+      columns:
+        # --- IDENTITÉ ---
+        - source: "name"                 # XLSX column
+          rename: "searchname"           # API field
+          type: str
+          required: true
+          normalize: ["trim"]
+
+        # --- OWNER (hors XLSX) ---
+        - source: "settings.user"            # pas dans XLSX
+          rename: "owner"
+          required: true
+          default_from: "profiles.options.default_owner"  
+
+        # --- RISQUE / AGGRÉGATION ---
+        - source: "settings.risk"
+          rename: "risk"
+          type: str
+          normalize: ["trim","upper"]   
+          default: ""
+        - source: "settings.aggregate"
+          rename: "aggregate"
+          type: str
+          normalize: ["trim"]
+          default: ""
+
+        # --- CONDITION ---
+        - source: "settings.condition.condition_option"
+          rename: "condition_option"
+          type: str
+          normalize: ["trim"]
+          default: "count"
+        - source: "settings.condition.condition_value"
+          rename: "condition_value"
+          type: int
+          default: 0
+          min: 0
+
+        # --- LIMIT / QUERY ---
+        - source: "settings.livesearch_data.limit"
+          rename: "limit"
+          type: int
+          default: 0
+          min: 0
+        - source: ["settings.livesearch_data.query", "settings.extra_config.query"]  # premier non-vide
+          rename: "query"
+          type: str
+          normalize: ["trim"]
+          default: ""                         # optionnel
+
+        # --- DESCRIPTION / LOG SOURCE ---
+        - source: "settings.description"
+          rename: "description"
+          type: str
+          default: ""
+        - source: "settings.log_source"
+          rename: "log_source"
+          type: list[str]
+          split: true                         # utilise options.list_split_separators
+          default: []
+
+        # --- INTERVAL / FLUSH / THROTTLING ---
+        - source: "settings.search_interval_minute"
+          rename: "search_interval_minute"
+          type: int
+          default: 0
+          min: 0
+        - source: "settings.flush_on_trigger"
+          rename: "flush_on_trigger"
+          type: bool
+          bool_onoff: true                    # true -> "on", false -> absent
+        - source: "settings.throttling_enabled"
+          rename: "throttling_enabled"
+          type: bool
+          bool_onoff: true
+        - source: "settings.throttling_field"
+          rename: "throttling_field"
+          type: str
+          default: ""
+        - source: "settings.throttling_time_range"
+          rename: "throttling_time_range"
+          type: int
+          default: 0
+          min: 0
+
+        # --- CONTEXTE ---
+        - source: "settings.context_template"
+          rename: "alert_context_template"
+          type: str
+          default: ""
+
+        # --- TIMERANGE (une seule unité) ---
+        - source: "settings.timerange.minute"
+          rename: "timerange_minute"
+          type: int
+          default: null
+          min: 0
+        - source: "settings.timerange.hour"
+          rename: "timerange_hour"
+          type: int
+          default: null
+          min: 0
+        - source: "settings.timerange.day"
+          rename: "timerange_day"
+          type: int
+          default: null
+          min: 0
+
+        # --- REPOS (obligatoire) ---
+        - source: "settings.repos"
+          rename: "repos"
+          type: list[str]
+          split: true
+          required: true
+          normalize_repos: true     # applique ip:port[:Repo_CLEANED], filtre tenant, mapping feuille Repo
+

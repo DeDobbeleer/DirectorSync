@@ -1,0 +1,15 @@
+{
+  "tenant_list": ["core", "esait", "moi", "sccoe", "tia", "esrin"],
+  "collector_to_tenant": {
+    "dcol_id": "core",
+    "dcol_id": "esait",
+    "dcol_id": "moi",
+    "dcol_id": "sccoe",
+    "dcol_id": "sccoe",
+    "dcol_id": "tia",
+    "dcol_id": "esrin"
+  },
+  "collector_field_column": "distributed_collector",
+  "collector_field_split_regex": "[,;|\\s]+",
+  "collector_value_left_of_colon": true
+}

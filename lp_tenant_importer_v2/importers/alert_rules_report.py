@@ -1,235 +1,254 @@
+# lp_tenant_importer_v2/importers/alert_rules_report.py
+"""
+Alert Rules XLSX Lister (report-only importer).
+
+This importer reads the Alert Rules sheet from the tenant XLSX and produces
+a tabular report with the following fields per row:
+  - siem (node id)
+  - node (node name)
+  - name (Alert/Rule name)
+  - owner
+  - assign_to
+  - visible_to_users
+
+Notes
+-----
+* No API calls are made. This is a read-only, reporting-oriented importer.
+* Sheet and column names are resolved using flexible aliases.
+* The importer returns ImportResult to integrate with the common CLI pipeline.
+"""
+
 from __future__ import annotations
 
-"""
-AlertRules XLSX lister (report-only importer)
-
-- Reads the Alert rules sheet from the provided XLSX and lists:
-  Name, Owner, Assign_to, Visible_to_Users.
-- No API calls are performed. Works per node, returns a flat table
-  enriched with 'siem' and 'node' columns for consistency with the
-  rest of the tooling.
-
-Design notes:
-- Fully aligned with the BaseImporter contract: returns ImportResult.
-- Robust sheet detection with aliases.
-- Case-insensitive column access with multiple fallbacks.
-- Verbose logging at INFO/DEBUG and explicit error reporting.
-"""
-
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from .base import BaseImporter, ImportContext, ImportResult
+from .base import BaseImporter, ImportResult
+from ..core.logging_utils import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
+
+
+def _norm_token(s: str) -> str:
+    """Normalize labels for matching (lowercase, strip, collapse separators)."""
+    return "".join(ch for ch in s.strip().lower().replace(" ", "_") if ch.isalnum() or ch == "_")
 
 
 @dataclass(frozen=True)
-class _ColMap:
-    """Holds canonical names and fallback column aliases (case-insensitive)."""
-
-    name: Tuple[str, ...] = ("name", "rule", "alert", "alert_name", "title")
-    owner: Tuple[str, ...] = ("owner", "owned_by")
-    assign_to: Tuple[str, ...] = ("assign_to", "assignto", "assigned_to", "assignee")
-    visible_to_users: Tuple[str, ...] = (
-        "visible_to_users",
-        "visible_for",
-        "visiblefor",
-        "visible_to",
-        "visibility",
-    )
+class ColumnAlias:
+    key: str                  # canonical key in our output (e.g. "name")
+    aliases: Tuple[str, ...]  # acceptable header names in the XLSX
 
 
 class AlertRulesXlsxLister(BaseImporter):
     """
-    Report-only importer that lists Alert Rules user dependencies from XLSX.
+    Read the XLSX and list Alert Rules user-related fields.
 
-    It adheres to the BaseImporter interface and returns ImportResult so
-    that main.py can handle it like any other importer.
+    This importer intentionally overrides :meth:`run_for_nodes` to avoid the
+    generic create/update pipeline, since it only produces a report.
     """
 
-    # Canonical sheet name and accepted aliases (case-insensitive)
-    CANONICAL_SHEET: str = "Alert"
-    SHEET_ALIASES: Mapping[str, str] = {
-        # key (lower) -> canonical
-        "alert": "Alert",
-        "alertrules": "Alert",
-        "alert rules": "Alert",
-        "alert_rules": "Alert",
-        "alertrule": "Alert",
-    }
+    resource_name: str = "alert_rules_report"
 
-    COLS = _ColMap()
+    # Accept multiple sheet titles (flexible matching)
+    SHEET_ALIASES: Tuple[str, ...] = (
+        "Alert",
+        "Alerts",
+        "AlertRules",
+        "Alert Rules",
+        "Alert_Rules",
+        "Alertrules",
+    )
 
-    # ------------------------ BaseImporter API -----------------------------
+    # Flexible column headers (case/spacing/underscore-insensitive)
+    COLS: Tuple[ColumnAlias, ...] = (
+        ColumnAlias("name", ("alert name", "rule name", "name", "alert", "rule")),
+        ColumnAlias("owner", ("owner", "alert_owner", "owner_user", "owner uuid", "owner_id")),
+        ColumnAlias("assign_to", ("assign_to", "assigned_to", "assignee", "assign to", "assignment")),
+        ColumnAlias(
+            "visible_to_users",
+            (
+                "visible_to_users",
+                "visible for",
+                "visible_for",
+                "visible_users",
+                "visible to",
+                "visible_for_users",
+            ),
+        ),
+    )
 
-    def run_for_nodes(self, ctx: ImportContext) -> ImportResult:
+    # What we will emit for missing data
+    MISSING: str = "—"
+
+    # --------------------------------------------------------------------- #
+    # Public API (BaseImporter)
+    # --------------------------------------------------------------------- #
+
+    def run_for_nodes(
+        self,
+        client: Any,
+        pool_uuid: str,
+        nodes: Iterable[Any],
+        xlsx_path: Path,
+        dry_run: bool = False,
+    ) -> ImportResult:
         """
-        Read the XLSX once, then emit rows for each target node.
-
-        Returns
-        -------
-        ImportResult
-            rows: list of flat dict rows
-            any_error: True if any non-fatal processing error occurred
+        Load the workbook once, extract the Alert Rules sheet, and emit
+        a row per rule per target node.
         """
-        xlsx_path = ctx.xlsx_path
-        nodes = list(ctx.nodes)
-        log.info(
-            "alert_rules_report: starting (xlsx=%s, nodes=%d)",
-            xlsx_path,
-            len(nodes),
-        )
-
-        any_error = False
         rows: List[Dict[str, Any]] = []
-
-        # Load the workbook and locate the sheet
-        try:
-            xl = pd.ExcelFile(xlsx_path)
-            sheet_name = self._resolve_sheet_name(xl.sheet_names)
-            if sheet_name is None:
-                msg = (
-                    "No sheet named 'Alert' (or aliases) found. "
-                    f"Available sheets: {xl.sheet_names}"
-                )
-                log.error("alert_rules_report: %s", msg)
-                return ImportResult(rows=[], any_error=True)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("alert_rules_report: failed to open XLSX: %s", exc)
-            return ImportResult(rows=[], any_error=True)
-
-        # Parse sheet content once
-        try:
-            df = pd.read_excel(
-                xlsx_path,
-                sheet_name=sheet_name,
-                dtype=str,
-                keep_default_na=False,
-                engine=None,  # let pandas pick available engine
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("alert_rules_report: failed to read sheet '%s': %s", sheet_name, exc)
-            return ImportResult(rows=[], any_error=True)
-
-        if df.empty:
-            log.info("alert_rules_report: sheet '%s' is empty.", sheet_name)
-            # Still return success (no rows), not an error
-            return ImportResult(rows=[], any_error=False)
-
-        # Normalize column names once (lower strip)
-        norm_cols = {c.lower().strip(): c for c in df.columns}
-        log.debug("alert_rules_report: detected columns: %s", list(df.columns))
-
-        # Resolve each needed column with fallbacks
-        try:
-            col_name = self._first_present(self.COLS.name, norm_cols)
-            col_owner = self._first_present(self.COLS.owner, norm_cols)
-            col_assign_to = self._first_present(self.COLS.assign_to, norm_cols)
-            col_visible = self._first_present(self.COLS.visible_to_users, norm_cols)
-        except KeyError as missing:
-            any_error = True
-            log.error("alert_rules_report: missing required column: %s", missing)
-            return ImportResult(rows=[], any_error=True)
-
-        # Build rows per node to preserve the common output shape
-        error_count = 0
-        for _, r in df.iterrows():
-            try:
-                base_row = {
-                    "name": self._normalize_text(r[norm_cols[col_name]]),
-                    "owner": self._normalize_text(r[norm_cols[col_owner]]),
-                    "assign_to": self._normalize_text(r[norm_cols[col_assign_to]]),
-                    "visible_to_users": self._normalize_text(r[norm_cols[col_visible]]),
-                }
-            except Exception as exc:  # noqa: BLE001
-                # Malformed row — record it and continue
-                error_count += 1
-                any_error = True
-                log.warning("alert_rules_report: bad row encountered: %s", exc, exc_info=True)
-                base_row = {
-                    "name": "",
-                    "owner": "",
-                    "assign_to": "",
-                    "visible_to_users": "",
-                    "error": f"Malformed row: {exc}",
-                }
-
-            # Duplicate the row for each node so the table keeps siem/node context
-            for node in nodes:
-                enriched = {
-                    "siem": getattr(node, "siem", getattr(node, "logpoint_identifier", "")),
-                    "node": getattr(node, "name", getattr(node, "node", "")),
-                    **base_row,
-                }
-                rows.append(enriched)
+        any_error = False
 
         log.info(
-            "alert_rules_report: produced %d row(s) from sheet '%s' for %d node(s).",
-            len(rows),
-            sheet_name,
-            len(nodes),
+            "%s: starting (xlsx=%s, nodes=%d)",
+            self.resource_name,
+            str(xlsx_path),
+            len(list(nodes)),
         )
-        if error_count:
-            log.warning("alert_rules_report: %d malformed row(s) were skipped/recorded.", error_count)
+
+        try:
+            sheet_name, df = self._load_alert_sheet(xlsx_path)
+            if df is None:
+                log.error(
+                    "%s: could not find an Alert Rules sheet (aliases=%s)",
+                    self.resource_name,
+                    ", ".join(self.SHEET_ALIASES),
+                )
+                return ImportResult(rows=[], any_error=True)
+
+            # Resolve columns using aliases
+            col_map = self._resolve_columns(df)
+            for key, col in col_map.items():
+                log.debug("Resolved column '%s' -> '%s'", key, col if col else "<missing>")
+
+            missing_keys = [k for k, v in col_map.items() if not v]
+            if missing_keys:
+                any_error = True
+                log.warning(
+                    "%s: some expected columns are missing in sheet '%s': %s",
+                    self.resource_name,
+                    sheet_name,
+                    ", ".join(missing_keys),
+                )
+
+            # Build normalized view
+            name_col = col_map.get("name")
+            owner_col = col_map.get("owner")
+            assign_col = col_map.get("assign_to")
+            visible_col = col_map.get("visible_to_users")
+
+            df_iter = df if name_col else pd.DataFrame()  # nothing to iterate if we don't have names
+
+            for _, r in df_iter.iterrows():
+                alert_name = self._safe_str(r.get(name_col)) if name_col else self.MISSING
+                owner = self._safe_str(r.get(owner_col)) if owner_col else self.MISSING
+                assign_to = self._safe_str(r.get(assign_col)) if assign_col else self.MISSING
+                visible_to_users = self._safe_str(r.get(visible_col)) if visible_col else self.MISSING
+
+                # Skip empty name lines (common in spreadsheets)
+                if not alert_name or alert_name == self.MISSING:
+                    continue
+
+                for n in nodes:
+                    rows.append(
+                        {
+                            "siem": getattr(n, "id", ""),
+                            "node": getattr(n, "name", ""),
+                            "sheet": sheet_name,
+                            "name": alert_name,
+                            "owner": owner,
+                            "assign_to": assign_to,
+                            "visible_to_users": visible_to_users,
+                            # Report-only cosmetics (kept to fit the common table)
+                            "result": "report",
+                            "action": "list",
+                            "status": self.MISSING,
+                            "monitor_ok": self.MISSING,
+                            "monitor_branch": self.MISSING,
+                            "error": self.MISSING,
+                        }
+                    )
+
+            log.info(
+                "%s: produced %d row(s) from sheet '%s' for %d node(s).",
+                self.resource_name,
+                len(rows),
+                sheet_name,
+                len(list(nodes)),
+            )
+
+        except FileNotFoundError:
+            any_error = True
+            log.exception("%s: XLSX not found at %s", self.resource_name, str(xlsx_path))
+        except Exception:
+            any_error = True
+            log.exception("%s: unexpected failure while reading XLSX", self.resource_name)
 
         return ImportResult(rows=rows, any_error=any_error)
 
-    # ------------------------ helpers -------------------------------------
+    # --------------------------------------------------------------------- #
+    # Helpers
+    # --------------------------------------------------------------------- #
+
+    def _load_alert_sheet(self, xlsx_path: Path) -> Tuple[str, Optional[pd.DataFrame]]:
+        """
+        Return (sheet_name, DataFrame) for the first sheet whose name matches
+        one of SHEET_ALIASES. Returns (\"\", None) if not found.
+        """
+        xlsx_path = Path(xlsx_path)
+        if not xlsx_path.exists():
+            raise FileNotFoundError(str(xlsx_path))
+
+        xl = pd.ExcelFile(xlsx_path)
+        available = xl.sheet_names
+
+        # Try exact/normalized match in order
+        target_norms = [_norm_token(s) for s in self.SHEET_ALIASES]
+        for sheet in available:
+            if _norm_token(sheet) in target_norms:
+                df = xl.parse(sheet)
+                log.debug("Selected sheet '%s' out of available: %s", sheet, ", ".join(available))
+                return sheet, df
+
+        # Not found
+        log.warning(
+            "%s: no matching alert sheet. Available sheets: %s",
+            self.resource_name,
+            ", ".join(available),
+        )
+        return "", None
+
+    def _resolve_columns(self, df: pd.DataFrame) -> Dict[str, Optional[str]]:
+        """
+        Find best-matching columns according to COLS. Matching is case/spacing
+        insensitive and tries multiple aliases.
+        """
+        header_norm_map = {_norm_token(c): str(c) for c in df.columns}
+
+        def pick(aliases: Iterable[str]) -> Optional[str]:
+            for alias in aliases:
+                norm = _norm_token(alias)
+                if norm in header_norm_map:
+                    return header_norm_map[norm]
+            return None
+
+        col_map: Dict[str, Optional[str]] = {}
+        for col in self.COLS:
+            col_map[col.key] = pick(col.aliases)
+
+        return col_map
 
     @staticmethod
-    def _normalize_text(value: Any) -> str:
-        """Return a clean string for cell content."""
+    def _safe_str(value: Any) -> str:
+        """Return a clean string for CSV-like outputs."""
         if value is None:
             return ""
         s = str(value).strip()
-        # Normalize common falsy literals
-        if s.lower() in {"nan", "none", "null", "-"}:
+        # Collapse Excel NaN-like strings
+        if s.lower() in {"nan", "nat", "none"}:
             return ""
         return s
-
-    @classmethod
-    def _resolve_sheet_name(cls, sheet_names: Iterable[str]) -> Optional[str]:
-        """
-        Given the list of sheet names, find the Alert sheet using aliases.
-
-        The match is case-insensitive. Returns the actual sheet name if found.
-        """
-        # Direct match first
-        for s in sheet_names:
-            if s.strip().lower() == cls.CANONICAL_SHEET.lower():
-                return s
-
-        # Alias match
-        lowered = {s.lower(): s for s in sheet_names}
-        for alias in cls.SHEET_ALIASES.keys():
-            if alias in lowered:
-                return lowered[alias]
-
-        return None
-
-    @staticmethod
-    def _first_present(candidates: Tuple[str, ...], norm_cols: Mapping[str, str]) -> str:
-        """
-        Return the *normalized* key of the first candidate present in norm_cols.
-
-        Parameters
-        ----------
-        candidates : Tuple[str, ...]
-            Candidate names to try (already lowercase).
-        norm_cols : Mapping[str, str]
-            Mapping normalized_name -> actual DataFrame column name.
-
-        Raises
-        ------
-        KeyError
-            If none of the candidates are present.
-        """
-        for c in candidates:
-            key = c.lower().strip()
-            if key in norm_cols:
-                return key
-        raise KeyError(f"none of {candidates} found")

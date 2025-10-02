@@ -1,0 +1,41 @@
+# config/tenants.yaml
+tenants:
+  core:
+    pool_uuid: "11111111-2222-3333-4444-555555555555"
+    siems:
+      search_heads:
+        - id: "sm-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"   # LogPoint Identifier
+          name: "lp-sm-core-1"
+      backends:
+        - id: "be-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          name: "lp-be-core-1"
+    defaults:
+      target:
+        # choose which SIEM role to use per entity
+        devices: backend
+        repos: backend
+        routing_policies: search_head
+        normalization_policies: search_head
+        processing_policies: search_head
+        enrichment_policies: search_head
+        enrichment_rules: search_head
+        enrichment_criteria: search_head
+        device_fetchers: backend
+        device_groups: search_head
+  esait:
+    pool_uuid: "22222222-3333-4444-5555-666666666666"
+    siems:
+      search_heads: [{ id: "sm-...", name: "lp-sm-esait-1" }]
+      backends:     [{ id: "be-...", name: "lp-be-esait-1" }]
+    defaults:
+      target:
+        devices: backend
+        repos: backend
+        routing_policies: search_head
+        normalization_policies: search_head
+        processing_policies: search_head
+        enrichment_policies: search_head
+        enrichment_rules: search_head
+        enrichment_criteria: search_head
+        device_fetchers: backend
+        device_groups: search_head

@@ -1,0 +1,396 @@
+# Rsyslog Load-Balancer (RHEL 8/9) — FIPS-Compatible (GnuTLS) — Final Procedure
+
+**Author**: Prepared for ESA by Gaetan De Dobbeleer (Logpoint)  
+
+**Goal**  
+Implement a robust rsyslog relay on **RHEL 8 and RHEL 9** that:  
+- Accepts **UDP 514**, **TCP 514**, and **TCP 6514 (TLS)** from sources  
+- **Load-balances** outgoing events to multiple Logpoint collectors/backends over **TCP/TLS (6514)** using the native **`omfwd` target pool** (round-robin)  
+- Uses the **GnuTLS** driver (`gtls`) and is **compatible with system FIPS** mode  
+- Can be installed **manually (RPMs)** or **via the Adiscon repo**  
+- Provides safe **buffering** (disk-assisted queues) and clean **auto-recovery**  
+- Enables **observability** with `impstats`  
+- Provides two **mutually exclusive egress options** with **identical parameters**: (1) **GnuTLS (default)** and (2) **CLEAR (optional for debugging)**  
+- **Optional filter** capability: **regex blacklist** drop-on-match before egress  
+
+> ⚠️ Enable **only one** egress action at a time (TLS by default). The CLEAR option is for troubleshooting in controlled environments.
+
+---
+
+## 1) Version & Design Decisions
+
+- Use **rsyslog v8.2502+ (recommended)**; **≥ 8.2408 required** for native `target=["ip1","ip2",...]` load-balancing in `omfwd`.  
+- Prefer **Adiscon builds** for up-to-date v8 on RHEL (consider daily-stable for fixes, Doc page 2).  
+- Transport/ports (by Logpoint policy): **UDP 514**, **TCP 514 (clear)**, **TCP 6514 (TLS)**.  
+- Listener on the relay: UDP 514, TCP 514, and TLS 6514.  
+- Egress: **TLS 6514** with **round-robin** to multiple backends (default). Optional **CLEAR 514/tcp** egress with the **same LB/queue** settings.  
+- **GnuTLS path**: Install **`rsyslog-gnutls`** and configure `StreamDriver="gtls"` and `defaultNetstreamDriver="gtls"`.  
+- **FIPS compatibility**: Enable **system FIPS mode** on RHEL (no custom cipher overrides; inherit system crypto policies, Doc page 9).  
+- **Failover Optimization**: Incorporate TCP keepalive and reduced retry intervals for faster detection of abrupt cuts (e.g., firewall drops) and balanced drain post-recovery, as detailed in Section 5.2.
+
+---
+
+## 2) Prerequisites
+
+- RHEL 8 or RHEL 9 (x86_64), root access.  
+- Network reachability to Logpoint backends on 6514/tcp (and 514/tcp if used).  
+- **TLS material** on the relay:  
+  - `/etc/rsyslog.d/tls/ca.crt`  
+  - `/etc/rsyslog.d/tls/server.crt`  
+  - `/etc/rsyslog.d/tls/server.key` (0600)  
+- Placeholders to replace with production targets: `<BACKEND_1>`, `<BACKEND_2>` (add more as needed).  
+- **Kernel Tuning**: Adjust TCP parameters for improved failover detection (see Section 12).  
+
+**Quick OS check**
+
+```bash
+source /etc/os-release 2>/dev/null; echo "$NAME $VERSION_ID"; rpm -E %rhel; uname -m
+```
+
+---
+
+## 3) Install Options (Choose One)
+
+### 3A. Repo-Based Installation (Adiscon)
+
+```bash
+cd /etc/yum.repos.d/
+sudo curl -O https://rpms.adiscon.com/v8-stable/rsyslog-rhel.repo
+# Optional: daily-stable for faster fixes
+sudo curl -O https://rpms.adiscon.com/v8-stable-daily/rsyslog-daily-rhel.repo
+
+# Security hygiene
+echo "Ensuring gpgcheck=1"; sudo sed -i 's/^gpgcheck=.*/gpgcheck=1/' /etc/yum.repos.d/rsyslog-*.repo
+
+sudo dnf clean all && sudo dnf makecache
+sudo dnf install -y rsyslog rsyslog-gnutls   # GnuTLS backend
+rsyslogd -v                                  # Verify v8.2502+ ideally
+```
+
+### 3B. Manual (RPM) Installation — Offline-Friendly
+
+> Use this when repos are not allowed. Pick the correct directory for your EL version.
+
+- **EL8**: `https://rpms.adiscon.com/v8-stable/epel-8/x86_64/RPMS/`  
+- **EL9**: `https://rpms.adiscon.com/v8-stable/epel-9/x86_64/RPMS/`
+
+**Required Packages**
+
+- Base daemon: `rsyslog-<version>-1.el8|el9.x86_64.rpm`  
+- **TLS (GnuTLS)**: `rsyslog-gnutls-<version>-1.el8|el9.x86_64.rpm`
+
+**Verify & Install**
+
+```bash
+sudo rpmkeys --import https://rpms.adiscon.com/RPM-GPG-KEY-Adiscon
+rpm -K rsyslog-*.rpm            # Should report a good signature
+sudo dnf install ./rsyslog-*.rpm
+
+# Offline bundle option on a connected box, then copy to the target:
+sudo dnf download --resolve rsyslog rsyslog-gnutls
+sudo dnf install ./*.rpm
+```
+
+**Dependencies** are normally satisfied by `dnf` from enabled RHEL repos (`libfastjson`, `libestr`, `openssl-libs`, etc.).
+
+---
+
+## 5) Configuration Layout
+
+**Files**
+
+- `/etc/rsyslog.conf` — Core, inputs, TLS defaults, `impstats`  
+- `/etc/rsyslog.d/05-pre-filter.conf` — **Optional** regex blacklist (drop-on-match)  
+- `/etc/rsyslog.d/blacklist.d/` — Directory of regex rules (one file per rule)  
+- `/etc/rsyslog.d/10-esa-lb.conf` — Outbound to Logpoint via **LB + buffering + failover** (TLS default / CLEAR optional)  
+- `/etc/rsyslog.d/tls/` — TLS material  
+
+### 5.0 Optional — Regex Filter (Blacklist) Explained
+
+This option **drops** messages matching **any** regex, forwarding the rest. Targets the **entire syslog packet** via `$rawmsg` or fields like `$hostname`, `$programname`, `$fromhost-ip`, etc.
+
+**Create** `/etc/rsyslog.d/05-pre-filter.conf`:
+
+```rsyslog
+# Pre-filter: drop-on-match, else forward
+ruleset(name="pre_filter") {
+  # Load all blacklist rules (each rule may 'stop' to drop)
+  $IncludeConfig /etc/rsyslog.d/blacklist.d/*.conf
+
+  # If no rule matched -> forward to egress
+  call to_logpoint
+}
+```
+
+**Examples** in `/etc/rsyslog.d/blacklist.d/`:
+
+- `10-drop-link-flaps.conf`
+  ```rsyslog
+  if re_match($rawmsg, "(?i)link (is )?(up|down)") then { stop }
+  ```
+- `20-drop-noisy-host.conf`
+  ```rsyslog
+  if ($hostname startswith "noisy-fw") then { stop }
+  ```
+- `30-drop-by-source-ip.conf`
+  ```rsyslog
+  if ($fromhost-ip startswith "10.10.20.") then { stop }
+  ```
+- `40-drop-debug-verbosity.conf`
+  ```rsyslog
+  if ($syslogseverity >= 6 and re_match($msg, "(?i)debug|trace")) then { stop }
+  ```
+
+> **Tip**: One pattern per file, prefix with numbers for ordering. Temporarily log dropped events to `/var/log/rsyslog_dropped_by_blacklist.log` for audit.
+
+### 5.1 `/etc/rsyslog.conf` (Excerpt, Inputs & TLS Defaults)
+
+```rsyslog
+# Work directory for persistent queues (disk-assisted)
+global(workDirectory="/var/spool/rsyslog")
+
+# Inputs
+module(load="imudp")
+module(load="imtcp")
+module(load="impstats" interval="60" format="cee" log.file="/var/log/rsyslog_stats.json" log.syslog="off")  # Stats/health, local only (Bruno’s tweak)
+
+# TLS defaults (used by listener on 6514 and egress)
+global(
+  defaultNetstreamDriver="gtls"
+  defaultNetstreamDriverCAFile="/etc/rsyslog.d/tls/ca.crt"
+  defaultNetstreamDriverCertFile="/etc/rsyslog.d/tls/server.crt"
+  defaultNetstreamDriverKeyFile="/etc/rsyslog.d/tls/server.key"
+)
+
+# === Choose ONE of the two wiring options below ===
+# A) WITHOUT filters (send inputs straight to egress)
+# input(type="imudp" port="514" ruleset="to_logpoint")
+# input(type="imtcp" port="514" ruleset="to_logpoint")
+# input(type="imtcp" port="6514" StreamDriver.name="gtls" StreamDriver.mode="1" StreamDriver.authmode="anon" ruleset="to_logpoint")
+
+# B) WITH filters (enable regex blacklist before egress)
+input(type="imudp" port="514" ruleset="pre_filter")
+input(type="imtcp" port="514" ruleset="pre_filter")
+input(type="imtcp" port="6514" StreamDriver.name="gtls" StreamDriver.mode="1" StreamDriver.authmode="anon" ruleset="pre_filter")
+
+# Include drop-ins
+$IncludeConfig /etc/rsyslog.d/*.conf
+```
+
+> Notes:
+> - `omfwd` is builtin; no need to load explicitly.
+> - Template: `RSYSLOG_SyslogProtocol23Format` (RFC5424-like).
+> - **Do not pin ciphers**; inherit **FIPS** policies (Doc page 9).
+
+### 5.2 `/etc/rsyslog.d/10-esa-lb.conf` — LB + Buffering + Failover
+
+```rsyslog
+# Keep impstats out of the forward stream (Bruno’s local logging)
+if ($syslogtag == 'impstats:') then {
+  action(type="omfile" file="/var/log/rsyslog_stats.json")
+  stop
+}
+
+# Main forwarding ruleset to Logpoint
+ruleset(name="to_logpoint") {
+  ########################################################################
+  # 5.2.A DEFAULT — GnuTLS (TLS) egress with round-robin LB (ENABLE THIS)
+  ########################################################################
+  action(
+    name="lp_tls_rr"
+    type="omfwd" protocol="tcp"
+    StreamDriver="gtls" StreamDriverMode="1" StreamDriverAuthMode="anon"
+    target=["<BACKEND_1>","<BACKEND_2>"]   # Round-robin pool
+    port="6514"
+    template="RSYSLOG_SyslogProtocol23Format"
+    StreamDriver.KeepAlive="on"  # Client tweak, if supported
+    KeepAlive="on"  # Fallback keepalive
+    KeepAlive.Time="10"  # Align with client’s 30s, test lower
+    KeepAlive.Interval="5"
+    KeepAlive.Probes="3"  # Total ~15-20s detection
+    pool.resumeinterval="5"  # Quick target retry for drain balance
+    action.resumeRetryCount="-1"  # Infinite retries
+    action.resumeInterval="10"  # Reduced for faster recovery
+    # --- Buffering (disk-assisted action queue)
+    queue.type="LinkedList"
+    queue.filename="q_logpoint_rr"
+    queue.maxdiskspace="10g"
+    queue.size="50000"
+    queue.highwatermark="40000"
+    queue.lowwatermark="10000"
+    queue.dequeuebatchsize="1024"  # Adjust if drain slow
+    queue.workerthreads="2"
+    queue.saveonshutdown="on"
+  )
+
+  # (Optional) Local fallback while the main action is suspended
+  action(
+    name="local_fallback" type="omfile"
+    file="/var/log/esa_fallback-buffer.log"
+    execOnlyWhenPreviousIsSuspended="on"
+  )
+
+  ########################################################################
+  # 5.2.B OPTIONAL — CLEAR egress with round-robin LB (DISABLE BY DEFAULT)
+  # Use ONLY for debugging in controlled environments (no TLS encryption)
+  ########################################################################
+  # action(
+  #   name="lp_clear_rr"
+  #   type="omfwd" protocol="tcp"
+  #   target=["<BACKEND_1>","<BACKEND_2>"]
+  #   port="514"
+  #   template="RSYSLOG_SyslogProtocol23Format"
+  #   # --- Buffering and retry identical to TLS
+  #   queue.type="LinkedList"
+  #   queue.filename="q_logpoint_rr"
+  #   queue.maxdiskspace="10g"
+  #   queue.size="50000"
+  #   queue.highwatermark="40000"
+  #   queue.lowwatermark="10000"
+  #   queue.dequeuebatchsize="1024"
+  #   queue.workerthreads="2"
+  #   queue.saveonshutdown="on"
+  #   action.resumeRetryCount="-1"
+  #   action.resumeInterval="10"
+  # )
+}
+```
+
+**Behavior**
+
+- **Filters (optional)**: Messages matching blacklist regex are **dropped**; others forwarded.
+- **TLS (default)** and **CLEAR (optional)** egress are identical except for driver/port.
+- If any backend is **down**, `omfwd` skips it (detected via keepalive, ~15-20s).
+- If **all** are down, action **suspends**; events buffer until a target returns, with drain distributed via `pool.resumeinterval=5`.
+
+---
+
+## 6) Customize Backends, Filters & Tests
+
+**Replace placeholders with production targets**
+
+```bash
+sudo sed -i 's/<BACKEND_1>/192.0.2.10/' /etc/rsyslog.d/10-esa-lb.conf
+sudo sed -i 's/<BACKEND_2>/192.0.2.11/' /etc/rsyslog.d/10-esa-lb.conf
+```
+
+**Create filter directory & sample rules**
+
+```bash
+sudo install -d -m 755 /etc/rsyslog.d/blacklist.d
+cat <<'EOF' | sudo tee /etc/rsyslog.d/blacklist.d/10-drop-link-flaps.conf
+if re_match($rawmsg, "(?i)link (is )?(up|down)") then { stop }
+EOF
+```
+
+**Connectivity smoke (TLS 6514)**
+
+```bash
+timeout 3 bash -c 'cat < /dev/null > /dev/tcp/<BACKEND_1>/6514' && echo "OK" || echo "FAIL"
+timeout 3 bash -c 'cat < /dev/null > /dev/tcp/<BACKEND_2>/6514' && echo "OK" || echo "FAIL"
+```
+
+---
+
+## 7) Enable & Verify
+
+```bash
+# Syntax check
+sudo rsyslogd -N1
+
+# Enable & start
+sudo systemctl enable --now rsyslog
+sudo systemctl status rsyslog --no-pager
+
+# Send test events
+HOSTNAME=client1.example.com logger -n 127.0.0.1 -P 514 -t ESA_SMOKE "rsyslog LB end-to-end OK"; unset HOSTNAME
+HOSTNAME=client1.example.com logger -n 127.0.0.1 -P 514 -t test "Link is Down on sw-01"; unset HOSTNAME  # Should be DROPPED by blacklist
+```
+
+**Operational Checks**
+
+- **Round-robin**: Stop one backend; confirm flow continues; restore and observe alternation.
+- **Buffering**: Stop **both** backends; generate traffic; verify spool growth under `/var/spool/rsyslog/` and `impstats` queue metrics; restore and confirm automatic, balanced drain.
+- **Filters**: Verify blacklisted patterns are dropped; tune/add rules in `blacklist.d`.
+
+---
+
+## 8) Monitoring / Operations with `impstats`
+
+Impstats (JSON/CEE) emitted every 60s to `/var/log/rsyslog_stats.json` (Bruno’s local logging).
+
+- **Latest 20 lines**:
+  ```bash
+  tail -n 20 /var/log/rsyslog_stats.json
+  ```
+- **Follow live**:
+  ```bash
+  tail -f /var/log/rsyslog_stats.json
+  ```
+- **Summarize action/queue health (requires `jq`)**:
+  ```bash
+  sed 's/^@cee: //' /var/log/rsyslog_stats.json | \
+    jq -r 'select(.name=="action" and .actionName=="lp_tls_rr") | "\(.timegenerated) submitted=\(.submitted) failed=\(.failed) suspended=\(.suspended) queuesize=\(.queuesize)"'
+  ```
+
+**What to Watch**
+
+- `submitted` rising; `failed` ≈ 0 in normal conditions.
+- `suspended=true` when all targets unavailable.
+- `queuesize` and `/var/spool/rsyslog` growth during outage, then **balanced drain** after recovery.
+
+---
+
+## 9) RHEL 8 vs RHEL 9 Notes (GnuTLS + FIPS)
+
+- Both EL8 and EL9 inherit **system crypto policies** in FIPS mode; avoid pinning ciphers.
+- EL9 uses OpenSSL 3; EL8 uses OpenSSL 1.1, but **GnuTLS** remains FIPS-compatible.
+- For **mTLS**, switch `StreamDriverAuthMode` to `x509/name` with client certs (Doc page 9).
+
+---
+
+## 10) Rollback / Change Control
+
+- To **pause LB**: Replace `target=[...]` with a single backend.
+- To **revert packages**: Disable Adiscon repo; `dnf downgrade` or remove `rsyslog-gnutls`.
+- Backup `/etc/rsyslog*` before changes.
+
+---
+
+## 11) Quick Checklist (Copy/Paste)
+
+1. Install (repo or manual) `rsyslog` + `rsyslog-gnutls` (v8.2502+).
+2. Enable **FIPS** (if required) and reboot.
+3. Create TLS dir + certs under `/etc/rsyslog.d/tls/`.
+4. **(Optional)** Enable regex blacklist: Create `05-pre-filter.conf`, `blacklist.d/`, wire to `pre_filter`.
+5. Apply configs in §5.1 and §5.2.
+6. Open firewalld ports 514/tcp, 514/udp, 6514/tcp.
+7. `rsyslogd -N1` → fix errors.
+8. `systemctl enable --now rsyslog`.
+9. Replace `<BACKEND_1/2>`; run smoke tests with hostname.
+10. Validate **round-robin**, **buffering** (balanced drain), and **filters**.
+
+---
+
+## 12) Kernel Tuning for Failover Detection
+
+**Adjust TCP Parameters** (Client’s successful tweaks, permanent via `/etc/sysctl.conf`):
+- `net.ipv4.tcp_syn_retries = 3`  # Initial SYN retries (~7-8s)
+- `net.ipv4.tcp_retries2 = 8`     # Established retries (~60-80s)
+- `net.ipv4.tcp_keepalive_time = 30`  # Idle time before probes (30s)
+- `net.ipv4.tcp_keepalive_intvl = 10`  # Probe interval (10s)
+- `net.ipv4.tcp_keepalive_probes = 3`  # Probes before dead (~30-40s)
+
+**Apply and Verify**:
+```bash
+sudo sysctl -w net.ipv4.tcp_syn_retries=3
+sudo sysctl -w net.ipv4.tcp_retries2=8
+sudo sysctl -w net.ipv4.tcp_keepalive_time=30
+sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10
+sudo sysctl -w net.ipv4.tcp_keepalive_probes=3
+sudo sysctl -p  # Load from /etc/sysctl.conf
+sysctl -a | grep tcp_keepalive  # Confirm values
+```
+
+> **Note**: These settings enhance abrupt cut detection but may affect latency-tolerant apps (e.g., Postfix). Monitor post-deployment.
+

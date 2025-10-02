@@ -1,0 +1,3 @@
+{
+  "cmd": "\"{python}\" \"{script}\" --input \"{input}\" --input-sh \"{input_sh}\" --config-dir config --output-dir \"{out_dir}\""
+}

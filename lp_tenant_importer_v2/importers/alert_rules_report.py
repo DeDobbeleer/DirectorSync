@@ -49,7 +49,7 @@ class AlertRulesXlsxLister(BaseImporter):
         "name": ("name", "alert_name", "rule_name", "alert", "rule"),
         "owner": ("settings_user", "owner", "owner_login", "owner_user", "owner_name"),
         "assign_to": (
-            "settings_assign_to",
+            "settings_assigned_to",
             "assign_to",
             "assigned_to",
             "assign",

@@ -58,6 +58,8 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     ),
     "owner": (
         "owner",
+        "owner name",
+        "owner_name",
         "owner_user",
         "owner id",
         "owner_id",
@@ -71,6 +73,7 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "assigned_to",
         "assignee",
         "assign to",
+        "assigned to",
         "settings.assign_to",
         "settings.assigned_to",
     ),
@@ -81,6 +84,7 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "visible users",
         "visible_users",
         "visible to",
+        "visible to users",
         "settings.visible_to_users",
         "settings.visible_to",  # some sheets use a shorter name
     ),
@@ -88,8 +92,9 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 
 def _normalize(s: str) -> str:
-    """Normalize header strings for alias matching."""
-    return s.strip().lower().replace("__", "_").replace("  ", " ")
+    """Normalize header strings for alias matching (case/space tolerant)."""
+    # collapse all runs of whitespace to single spaces, lowercase
+    return " ".join(s.strip().lower().split())
 
 
 def _best_header(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
@@ -124,11 +129,20 @@ class AlertRulesXlsxLister(BaseImporter):
     importer_key = "alert_rules_report"  # for logs / consistency
     element_key = "AlertRules"           # reuse generic naming in outputs
 
-    def run_for_nodes(self) -> ImportResult:
+    def run_for_nodes(self, *args, **kwargs) -> ImportResult:
         """
         Scan the XLSX, resolve sheet/columns, and produce a list-only report.
         The ImportResult has any_error=False even if some columns are missing.
         """
+
+        # keep backward compatibility with the generic main.py dispatcher
+        if args or kwargs:
+            logger.debug(
+                "%s: run_for_nodes called with extra args by framework; ignored. "
+                "args=%s kwargs=%s",
+                self.importer_key, args, kwargs
+            )        
+
         nodes = list(self.ctx.nodes or [])
         if not nodes:
             # Keep parity with other importers: read nodes from ctx

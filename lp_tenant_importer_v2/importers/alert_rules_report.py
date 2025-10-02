@@ -1,306 +1,272 @@
-# SPDX-License-Identifier: MIT
-"""
-AlertRules XLSX lister (report-only importer).
-
-This importer does not call any Director API. It reads the Alert rules sheet
-from the provided XLSX and produces a report table with:
-  - name
-  - owner
-  - assign_to
-  - visible_to_users
-
-Design goals:
-- PEP8 compliant, self-documented, robust logging.
-- Sheet alias support (e.g., "Alert", "AlertRules", "Alert Rules", ...).
-- Column alias support, including nested headers like "settings.assigned_to".
-- Never mark the run as failed; this is a read-only report. Warnings are fine.
-
-Usage (example):
-  python -m lp_tenant_importer_v2.main \
-    --tenant core \
-    --tenants-file ../tenants.yml \
-    --xlsx samples/core_config.xlsx \
-    --no-verify \
-    list-alert-users
-"""
-
+# lp_tenant_importer_v2/importers/alert_rules_report.py
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
 from .base import BaseImporter, ImportResult
+from ..core.config import NodeRef
+from ..core.director_client import DirectorClient
 
 logger = logging.getLogger(__name__)
 
 
-# Sheet aliases for Alert rules definition
-SHEET_ALIASES: Tuple[str, ...] = (
-    "Alert",
-    "AlertRules",
-    "Alert Rules",
-    "alerts",
-    "alert_rules",
-    "Alert rules",
-)
-
-# Column alias map. All keys are our normalized target field names.
-# All entries are matched against case-insensitive, trimmed column headers.
-COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "name": (
-        "name",
-        "rule_name",
-        "title",
-        "alert_name",
-    ),
-    "owner": (
-        "owner",
-        "owner name",
-        "owner_name",
-        "owner_user",
-        "owner id",
-        "owner_id",
-        "owner uuid",
-        "owner_uuid",
-        "settings.owner",
-        "settings.owner_id",
-    ),
-    "assign_to": (
-        "assign_to",
-        "assigned_to",
-        "assignee",
-        "assign to",
-        "assigned to",
-        "settings.assign_to",
-        "settings.assigned_to",
-    ),
-    "visible_to_users": (
-        "visible_to_users",
-        "visible for",
-        "visible_for",
-        "visible users",
-        "visible_users",
-        "visible to",
-        "visible to users",
-        "settings.visible_to_users",
-        "settings.visible_to",  # some sheets use a shorter name
-    ),
-}
-
-
-def _normalize(s: str) -> str:
-    """Normalize header strings for alias matching (case/space tolerant)."""
-    # collapse all runs of whitespace to single spaces, lowercase
-    return " ".join(s.strip().lower().split())
-
-
-def _best_header(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
-    """
-    Find the first present header in the dataframe among candidate aliases.
-    Matching is case-insensitive on normalized header names.
-    Returns the *actual* header in df.columns if found.
-    """
-    norm_map = { _normalize(col): col for col in df.columns }
-    for cand in candidates:
-        key = _normalize(cand)
-        if key in norm_map:
-            return norm_map[key]
-    return None
-
-
-@dataclass
-class _ResolvedColumns:
-    name: Optional[str]
-    owner: Optional[str]
-    assign_to: Optional[str]
-    visible_to_users: Optional[str]
-
-
 class AlertRulesXlsxLister(BaseImporter):
     """
-    Report-only importer to list AlertRules user-related fields from XLSX.
+    Lightweight report importer that reads Alert Rules from an XLSX workbook
+    and outputs a table with: name, owner, assign_to, visible_to_users.
 
-    It overrides run_for_nodes to avoid the regular API import pipeline.
+    This importer does NOT call any Director API endpoint; it runs locally
+    and just emits "report/list" rows compatible with the global reporting
+    table.
+
+    Design notes:
+      - We intentionally override `run_for_nodes` instead of using the generic
+        diff/apply pipeline from BaseImporter. This keeps the code simple and
+        fast for a read-only report.
+      - We do NOT rely on `self.ctx`; the framework passes everything via the
+        `run_for_nodes` parameters (client, pool_uuid, nodes, xlsx_path, dry_run).
     """
 
-    importer_key = "alert_rules_report"  # for logs / consistency
-    element_key = "AlertRules"           # reuse generic naming in outputs
+    # Human-friendly resource name (only used for logs).
+    resource_name: str = "alert_rules_report"
 
-    def run_for_nodes(self, *args, **kwargs) -> ImportResult:
+    # Accept multiple possible sheet names (aliases) to be resilient across files.
+    SHEET_ALIASES: Tuple[str, ...] = (
+        "Alert",
+        "MyAlertRules",
+        "SharedAlertRules",
+        "VendorAlertRules",
+        "AlertRules",
+        "Alerts",
+    )
+
+    # Column aliases, normalized to "lower snake case" during parsing.
+    # We only *require* `name`; other fields are optional.
+    COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+        "name": ("name", "alert_name", "rule_name", "alert", "rule"),
+        "owner": ("owner", "owner_login", "owner_user", "owner_name"),
+        "assign_to": (
+            "assign_to",
+            "assigned_to",
+            "assign",
+            "assignee",
+            "assignto",
+            "assign_to_user",
+        ),
+        "visible_to_users": (
+            "visible_to_users",
+            "visible_for",
+            "visible_to",
+            "visibles",
+            "visibility_users",
+            "users_visibility",
+        ),
+    }
+
+    # ------------------------ helpers ---------------------------------
+
+    @staticmethod
+    def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Scan the XLSX, resolve sheet/columns, and produce a list-only report.
-        The ImportResult has any_error=False even if some columns are missing.
+        Make columns case/space-insensitive by converting to lower_snake_case.
         """
+        def norm(s: str) -> str:
+            return str(s).strip().lower().replace(" ", "_").replace("-", "_")
 
-        # keep backward compatibility with the generic main.py dispatcher
-        if args or kwargs:
-            logger.debug(
-                "%s: run_for_nodes called with extra args by framework; ignored. "
-                "args=%s kwargs=%s",
-                self.importer_key, args, kwargs
-            )        
+        df = df.copy()
+        df.columns = [norm(c) for c in df.columns]
+        return df
 
-        nodes = list(self.ctx.nodes or [])
-        if not nodes:
-            # Keep parity with other importers: read nodes from ctx
-            nodes = [self.ctx.node]
+    def _resolve_colmap(self, df: pd.DataFrame) -> Dict[str, Optional[str]]:
+        """
+        Resolve actual column names present in the DataFrame for each canonical key.
+        Returns a mapping: canonical -> actual_column_name_or_None.
+        """
+        cols = set(df.columns)
+        colmap: Dict[str, Optional[str]] = {}
 
-        logger.info(
-            "%s: starting (xlsx=%s, nodes=%d)",
-            self.importer_key,
-            self.ctx.xlsx_path,
-            len(nodes),
-        )
+        for canonical, aliases in self.COLUMN_ALIASES.items():
+            found = next((a for a in aliases if a in cols), None)
+            colmap[canonical] = found
 
-        try:
-            xls = pd.ExcelFile(self.ctx.xlsx_path)
-        except Exception as exc:  # pragma: no cover
-            logger.exception("Failed to open XLSX '%s'", self.ctx.xlsx_path)
-            # For a report-only command, still return a result but flag the error.
-            rows = [
-                self._format_row(
-                    node=n, name="<xlsx open failed>", error=str(exc)
-                )
-                for n in nodes
-            ]
-            return ImportResult(rows=rows, any_error=True)
-
-        # Pick the first matching sheet alias that exists.
-        present_sheets = set(xls.sheet_names)
-        sheet_name = next((s for s in SHEET_ALIASES if s in present_sheets), None)
-        if sheet_name is None:
-            logger.error(
-                "%s: none of the expected sheets %s found in %s",
-                self.importer_key, SHEET_ALIASES, self.ctx.xlsx_path
+        # name must exist; others are optional
+        if not colmap["name"]:
+            raise ValueError(
+                "Required column 'name' not found (checked aliases: "
+                f"{', '.join(self.COLUMN_ALIASES['name'])})."
             )
-            rows = [
-                self._format_row(
-                    node=n, name="<sheet not found>",
-                    error=f"Expected one of {SHEET_ALIASES}"
-                )
-                for n in nodes
-            ]
-            return ImportResult(rows=rows, any_error=True)
 
-        try:
-            df = xls.parse(sheet_name=sheet_name)
-        except Exception as exc:  # pragma: no cover
-            logger.exception("Failed to parse sheet '%s'", sheet_name)
-            rows = [
-                self._format_row(node=n, name="<read failed>", error=str(exc))
-                for n in nodes
-            ]
-            return ImportResult(rows=rows, any_error=True)
-
-        # Resolve the interesting columns with aliasing (including nested names).
-        resolved = _ResolvedColumns(
-            name=_best_header(df, COLUMN_ALIASES["name"]),
-            owner=_best_header(df, COLUMN_ALIASES["owner"]),
-            assign_to=_best_header(df, COLUMN_ALIASES["assign_to"]),
-            visible_to_users=_best_header(df, COLUMN_ALIASES["visible_to_users"]),
-        )
-
-        missing = [
-            key for key, val in resolved.__dict__.items() if key != "name" and not val
+        missing_optional = [
+            key for key in ("owner", "assign_to", "visible_to_users")
+            if colmap.get(key) is None
         ]
-        if missing:
+        if missing_optional:
             logger.warning(
-                "%s: some expected columns are missing in sheet '%s': %s",
-                self.importer_key, sheet_name, ", ".join(missing)
+                "alert_rules_report: some optional columns are missing in sheet: %s",
+                ", ".join(missing_optional),
             )
+        logger.debug("alert_rules_report: column resolution map: %s", colmap)
+        return colmap
 
-        # Prepare rows for each rule, and duplicate across nodes (1:1 looks nicer).
-        rows: List[Dict[str, str]] = []
-        count_rules = 0
+    @staticmethod
+    def _pick_sheet(xl: Dict[str, pd.DataFrame], aliases: Iterable[str]) -> Tuple[str, pd.DataFrame]:
+        """
+        Pick the first available sheet among the provided aliases.
+        """
+        for name in aliases:
+            if name in xl:
+                return name, xl[name]
+        raise KeyError(f"None of the expected sheets are present: {', '.join(aliases)}")
 
-        for _, raw in df.iterrows():
-            name_val = self._cell(raw, resolved.name)
-            if not name_val:
-                # skip empty lines or rules without a name
+    @staticmethod
+    def _parse_visible(value: object) -> Optional[str]:
+        """
+        Convert a cell into a normalized, comma-separated list string.
+        Accepts lists, sets, tuples, or delimited strings; returns None if empty.
+        """
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+
+        if isinstance(value, (list, tuple, set)):
+            items = [str(v).strip() for v in value if str(v).strip()]
+            return ", ".join(items) if items else None
+
+        s = str(value).strip()
+        if not s:
+            return None
+        # Split on common delimiters and normalize
+        parts: List[str] = []
+        for piece in [p.strip() for d in (",", ";", "|") for p in s.split(d)]:
+            if piece:
+                parts.append(piece)
+        return ", ".join(parts) if parts else None
+
+    # ------------------------ main entry --------------------------------
+
+    def run_for_nodes(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        nodes: List[NodeRef],
+        xlsx_path: str,
+        dry_run: bool,
+    ) -> ImportResult:
+        """
+        Read the workbook once, then produce one report row per (node x alert).
+        No API calls are executed.
+        """
+        node_count = len(nodes) if nodes else 0
+        logger.info(
+            "%s: starting (xlsx=%s, nodes=%s)",
+            self.resource_name,
+            xlsx_path,
+            node_count,
+        )
+
+        # Load workbook
+        try:
+            xl = self.load_xlsx(xlsx_path)
+        except Exception as exc:
+            logger.error("Failed to read Excel file: %s", exc, exc_info=True)
+            # Keep the contract: return a result object with a single error row per node
+            rows: List[Dict[str, object]] = []
+            for node in nodes or []:
+                rows.append({
+                    "siem": node.id if isinstance(node, NodeRef) else "",
+                    "node": node.name if isinstance(node, NodeRef) else "",
+                    "name": "<load_error>",
+                    "result": "error",
+                    "action": "load",
+                    "status": "Failed",
+                    "error": str(exc),
+                })
+            return ImportResult(rows=rows, any_error=True)
+
+        # Pick sheet
+        try:
+            sheet_name, df = self._pick_sheet(xl, self.SHEET_ALIASES)
+        except Exception as exc:
+            logger.error("Sheet selection failed: %s", exc, exc_info=True)
+            rows: List[Dict[str, object]] = []
+            for node in nodes or []:
+                rows.append({
+                    "siem": node.id if isinstance(node, NodeRef) else "",
+                    "node": node.name if isinstance(node, NodeRef) else "",
+                    "name": "<sheet_error>",
+                    "result": "error",
+                    "action": "sheet",
+                    "status": "Failed",
+                    "error": str(exc),
+                })
+            return ImportResult(rows=rows, any_error=True)
+
+        # Normalize columns and resolve alias mapping
+        df = self._normalize_columns(df)
+        try:
+            colmap = self._resolve_colmap(df)
+        except Exception as exc:
+            logger.error("Column resolution failed: %s", exc, exc_info=True)
+            rows: List[Dict[str, object]] = []
+            for node in nodes or []:
+                rows.append({
+                    "siem": node.id if isinstance(node, NodeRef) else "",
+                    "node": node.name if isinstance(node, NodeRef) else "",
+                    "name": "<columns_error>",
+                    "result": "error",
+                    "action": "columns",
+                    "status": "Failed",
+                    "error": str(exc),
+                })
+            return ImportResult(rows=rows, any_error=True)
+
+        # Build report rows
+        out_rows: List[Dict[str, object]] = []
+        alerts_count = 0
+
+        name_col = colmap["name"]
+        owner_col = colmap.get("owner")
+        assign_col = colmap.get("assign_to")
+        visible_col = colmap.get("visible_to_users")
+
+        for rec in df.itertuples(index=False):
+            # Extract required name
+            name = getattr(rec, name_col) if name_col else None
+            if name is None or (isinstance(name, float) and pd.isna(name)) or str(name).strip() == "":
+                logger.debug("Skipping row with empty 'name'")
                 continue
 
-            owner_val = self._cell(raw, resolved.owner)
-            assign_val = self._cell(raw, resolved.assign_to)
-            visible_val = self._cell(raw, resolved.visible_to_users)
+            # Optional fields
+            owner = getattr(rec, owner_col) if owner_col else None
+            assign_to = getattr(rec, assign_col) if assign_col else None
+            visible = getattr(rec, visible_col) if visible_col else None
+            visible = self._parse_visible(visible)
 
-            for node in nodes:
-                rows.append(
-                    self._format_row(
-                        node=node,
-                        name=str(name_val),
-                        owner=self._pretty(owner_val),
-                        assign_to=self._pretty(assign_val),
-                        visible_to_users=self._pretty(visible_val),
-                    )
-                )
-            count_rules += 1
+            alerts_count += 1
+
+            # Emit one row per node for this alert
+            for node in nodes or []:
+                row = {
+                    "siem": node.id,
+                    "node": node.name,
+                    "name": str(name).strip(),
+                    "owner": None if owner is None or (isinstance(owner, float) and pd.isna(owner)) else str(owner).strip(),
+                    "assign_to": None if assign_to is None or (isinstance(assign_to, float) and pd.isna(assign_to)) else str(assign_to).strip(),
+                    "visible_to_users": visible,
+                    "result": "report",
+                    "action": "list",
+                }
+                out_rows.append(row)
 
         logger.info(
             "%s: produced %d row(s) from sheet '%s' for %d node(s).",
-            self.importer_key, count_rules, sheet_name, len(nodes)
+            self.resource_name,
+            len(out_rows),
+            sheet_name,
+            node_count,
         )
 
-        # This is a report-only command -> never fail the run.
-        return ImportResult(rows=rows, any_error=False)
-
-    # --------------------------------------------------------------------- #
-    # Helpers
-    # --------------------------------------------------------------------- #
-
-    @staticmethod
-    def _cell(raw: pd.Series, col: Optional[str]) -> Optional[str]:
-        """Safely extract a cell value as string if the column exists."""
-        if not col:
-            return None
-        try:
-            val = raw.get(col, None)
-        except Exception:  # pragma: no cover
-            return None
-        return None if pd.isna(val) else str(val)
-
-    @staticmethod
-    def _pretty(val: Optional[str]) -> str:
-        """Normalize/pretty print multi-values while staying lossless."""
-        if val is None:
-            return ""
-        # keep as-is; if it's a JSON-ish string or comma list, let the user see it
-        return val.strip()
-
-    def _format_row(
-        self,
-        node,
-        name: str,
-        owner: str = "",
-        assign_to: str = "",
-        visible_to_users: str = "",
-        error: Optional[str] = None,
-    ) -> Dict[str, str]:
-        """
-        Produce a reporting row consistent with the framework's table renderer.
-        We keep 'result'='report' and 'action'='list'. No API monitor columns.
-        """
-        # Framework expects node to expose .siem and .node (like other importers).
-        siem = getattr(node, "siem", getattr(node, "logpoint_identifier", ""))
-        node_name = getattr(node, "name", getattr(node, "node", ""))
-
-        row = {
-            "siem": siem,
-            "node": node_name,
-            "name": name,
-            "result": "report",
-            "action": "list",
-            "status": "—",
-            "monitor_ok": "—",
-            "monitor_branch": "—",
-            "error": error or "—",
-            "corr": "—",
-            # Extra informational fields (not part of the standard table header)
-            "owner": owner or "",
-            "assign_to": assign_to or "",
-            "visible_to_users": visible_to_users or "",
-        }
-        logger.debug("row: %s", row)
-        return row
+        # No API errors possible here; if we reached this point, it's all good.
+        return ImportResult(rows=out_rows, any_error=False)

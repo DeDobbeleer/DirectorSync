@@ -280,6 +280,44 @@ def extract_device_groups(sync_data: Dict) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+def extract_users(sync_data: Dict) -> pd.DataFrame:
+    """
+    Extract users as a flat DataFrame. Dashboards are intentionally ignored.
+    The function is non-opinionated (no tenant routing); replication is handled later.
+    """
+    users = sync_data.get("User", [])
+    rows = []
+    for user in users:
+        rows.append({
+            "user_id": user.get("_id", ""),
+            "username": user.get("username", ""),
+            "fullname": user.get("fullname", ""),
+            "email": user.get("email", ""),
+            "active": user.get("active", ""),
+            "usergroup_id": user.get("usergroup_id", ""),
+            # nested fields are JSON-encoded to preserve fidelity
+            "preferences": json.dumps(user.get("preferences", {}), ensure_ascii=False),
+            "tags": " | ".join(user.get("tags", [])) if isinstance(user.get("tags", []), list) else user.get("tags", ""),
+            # NOTE: user dashboards are intentionally skipped
+        })
+    return pd.DataFrame(rows)
+
+def extract_user_groups(sync_data: Dict) -> pd.DataFrame:
+    """Extract user groups as a flat DataFrame (global, no tenant routing)."""
+    groups = sync_data.get("UserGroup", [])
+    rows = []
+    for group in groups:
+        rows.append({
+            "group_id": group.get("_id", ""),
+            "name": group.get("name", ""),
+            "description": group.get("description", ""),
+            "active": group.get("active", ""),
+            "permission_group": json.dumps(group.get("permission_group", {}), ensure_ascii=False),
+            "object_permission": json.dumps(group.get("object_permission", {}), ensure_ascii=False),
+            "tags": " | ".join(group.get("tags", [])) if isinstance(group.get("tags", []), list) else group.get("tags", ""),
+        })
+    return pd.DataFrame(rows)
+
 def load_tenant_list(config_dir: str) -> List[str]:
     config_path = os.path.join(config_dir, DEFAULT_CONFIG_NAME)
     try:
@@ -353,7 +391,8 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
         with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:  # engine identique à l’original
             for entity_name, df in entities.items():
                 # Entités exportées complètes (inchangées)
-                if entity_name in {"NormalizationPolicy", "EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria", "DeviceGroups"}:
+                if entity_name in {"NormalizationPolicy", "EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria", 
+                                   "DeviceGroups", "User", "UserGroup"}:
                     df.to_excel(writer, sheet_name=entity_name, index=False)
                     continue
 
@@ -485,6 +524,8 @@ def main():
         **enrichment_entities,
         **device_entities,
         "DeviceGroups": extract_device_groups(json_data["Sync"]),
+        "User": extract_users(json_data["Sync"]),
+        "UserGroup": extract_user_groups(json_data["Sync"]),
     }
 
     # <= signature mise à jour (on passe la config complète + alerts_df)

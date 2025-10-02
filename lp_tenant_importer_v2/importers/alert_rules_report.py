@@ -47,9 +47,9 @@ class AlertRulesXlsxLister(BaseImporter):
     # We only *require* `name`; other fields are optional.
     COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "name": ("name", "alert_name", "rule_name", "alert", "rule"),
-        "owner": ("settings.user", "owner", "owner_login", "owner_user", "owner_name"),
+        "owner": ("settings_user", "owner", "owner_login", "owner_user", "owner_name"),
         "assign_to": (
-            "settings.assign_to",
+            "settings_assign_to",
             "assign_to",
             "assigned_to",
             "assign",
@@ -58,7 +58,7 @@ class AlertRulesXlsxLister(BaseImporter):
             "assign_to_user",
         ),
         "visible_to_users": (
-            "settings.visible_to"
+            "settings_visible_to"
             "visible_to_users",
             "visible_for",
             "visible_to",
@@ -73,10 +73,18 @@ class AlertRulesXlsxLister(BaseImporter):
     @staticmethod
     def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Make columns case/space-insensitive by converting to lower_snake_case.
+        Make columns case/space-insensitive by converting to lower_snake_case and
+        replacing punctuation that breaks attribute access ('.', '/', '-').
         """
         def norm(s: str) -> str:
-            return str(s).strip().lower().replace(" ", "_").replace("-", "_")
+            name = str(s).strip().lower()
+            # normalize common separators to underscore
+            for ch in (" ", "-", ".", "/"):
+                name = name.replace(ch, "_")
+            # collapse multiple underscores
+            while "__" in name:
+                name = name.replace("__", "_")
+            return name
 
         df = df.copy()
         df.columns = [norm(c) for c in df.columns]
@@ -234,8 +242,10 @@ class AlertRulesXlsxLister(BaseImporter):
         visible_col = colmap.get("visible_to_users")
 
         for rec in df.itertuples(index=False):
+            rowd = rec._asdict() # safer access by normalized column name
+
             # Extract required name
-            name = getattr(rec, name_col) if name_col else None
+            name = rowd.get(name_col)
             if name is None or (isinstance(name, float) and pd.isna(name)) or str(name).strip() == "":
                 logger.debug("Skipping row with empty 'name'")
                 continue

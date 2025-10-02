@@ -22,7 +22,7 @@ class AlertRulesXlsxLister(BaseImporter):
     resource_name: str = "alert_rules_report"
 
     # On lit la feuille des alertes (comme les autres importers d'alert rules)
-    sheet_names: Tuple[str, ...] = ("AlertRules",)
+    sheet_names: Tuple[str, ...] = ("AlertRules", "Alert")
 
     # On ne force pas de colonnes obligatoires ici: c'est un rapport tolérant
     required_columns: Tuple[str, ...] = tuple()

@@ -58,7 +58,7 @@ class AlertRulesXlsxLister(BaseImporter):
             "assign_to_user",
         ),
         "visible_to_users": (
-            "settings_visible_to"
+            "settings_visible_to",
             "visible_to_users",
             "visible_for",
             "visible_to",

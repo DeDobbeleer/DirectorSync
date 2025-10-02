@@ -14,8 +14,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 
 from .base import BaseImporter, NodeRef
+from ..core.director_client import DirectorClient
 from ..utils.validators import ValidationError  # reused from trunk
-from lp_tenant_importer_v2.core.director_client import DirectorClient
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def _int_or_none(v: Any) -> int | None:
         return None
 
 
-def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", "")) -> List[str]:
+def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", "\n")) -> List[str]:
     raw = _s(cell)
     if not raw:
         return []
@@ -193,6 +193,15 @@ class AlertRulesImporter(BaseImporter):
                 "timerange_day": _int_or_none(row.get("settings.livesearch_data.timerange_day")),
                 "timerange_second": _int_or_none(row.get("settings.livesearch_data.timerange_second") or row.get("settings.time_range_seconds")),
             }
+            log.debug(
+                "XLSX row parsed name=%s repos=%d timerange=(min=%s,hour=%s,day=%s,sec=%s)",
+                name,
+                len(desired["repos_norm"]),
+                desired.get("timerange_minute"),
+                desired.get("timerange_hour"),
+                desired.get("timerange_day"),
+                desired.get("timerange_second"),
+            )
             yield desired
 
     # ------------------------ canonicalization (diff) ------------------------
@@ -268,14 +277,26 @@ class AlertRulesImporter(BaseImporter):
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef,
     ) -> Dict[str, Dict[str, Any]]:
-        """Return {searchname -> object} using MyRules fetch (tolerate shapes)."""
+        """Return {searchname -> object} from MyAlertRules/fetch, tolerant to shapes.
+        No exceptions are raised; on error returns an empty dict and logs at WARNING.
+        """
         path = client.configapi(pool_uuid, node.id, f"{RESOURCE}/MyAlertRules/fetch")
-        data = client.post_json(path, {"data": {}}) or []
-        if isinstance(data, dict):
-            items = data.get("items") or data.get("data") or data.get("results") or []
-        elif isinstance(data, list):
-            items = data
-        else:
+        items: List[Dict[str, Any]] = []
+        try:
+            data = client.post_json(path, {"data": {}}) or []
+            if isinstance(data, dict):
+                items = (
+                    data.get("items")
+                    or data.get("data")
+                    or data.get("results")
+                    or []
+                )
+                if not isinstance(items, list):
+                    items = []
+            elif isinstance(data, list):
+                items = data  # already a list
+        except Exception as exc:
+            log.warning("fetch_existing failed [node=%s]: %s", node.name, exc)
             items = []
         out: Dict[str, Dict[str, Any]] = {}
         for it in items:
@@ -301,18 +322,21 @@ class AlertRulesImporter(BaseImporter):
         # 0) If desired already has an owner (future-proof), honor it
         ov = desired_row.get("owner")
         if isinstance(ov, str) and ov.strip():
+            log.debug("owner resolved from desired row: %s", ov)
             return ov.strip()
         # 1) profiles.yml option
         try:
             owner_from_profile = self._get_profile_option_default_owner()
             if owner_from_profile:
+                log.debug("owner resolved from profiles.yml: %s", owner_from_profile)
                 return owner_from_profile
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("profiles.yml lookup failed: %s", e)
         # 2) environment override
         import os
         env_owner = os.getenv("LP_ALERT_OWNER", "").strip()
         if env_owner:
+            log.debug("owner resolved from env LP_ALERT_OWNER: %s", env_owner)
             return env_owner
         # 3) context fallback
         ctx = getattr(self, "ctx", None)
@@ -320,17 +344,33 @@ class AlertRulesImporter(BaseImporter):
             for attr in ("owner_id", "user_id", "username"):
                 v = getattr(ctx, attr, None)
                 if isinstance(v, str) and v.strip():
+                    log.debug("owner resolved from context %s: %s", attr, v)
                     return v.strip()
+        log.debug("owner could not be resolved from any source")
         return ""
 
     def _get_profile_option_default_owner(self) -> str:
         """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
         import os
-        import yaml
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return ""
         # Locate profiles.yml packaged with the module
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # lp_tenant_importer_v2/
         res_path = os.path.join(base_dir, "resources", "profiles.yml")
         if not os.path.exists(res_path):
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
             return ""
         try:
             with open(res_path, "r", encoding="utf-8") as fh:
@@ -405,7 +445,7 @@ class AlertRulesImporter(BaseImporter):
                 try:
                     payload = self.build_payload_create(desired)
                 except ValidationError as ve:
-                    log.warning("SKIP CREATE alert=%s [node=%s] reason=%s", name, node.name, ve)
+                    log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
                     return {"status": "Skipped", "reason": str(ve)}
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
@@ -414,7 +454,7 @@ class AlertRulesImporter(BaseImporter):
                 try:
                     payload = self.build_payload_update(desired, {"id": existing_id})
                 except ValidationError as ve:
-                    log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s", name, existing_id, node.name, ve)
+                    log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s (no API call)", name, existing_id, node.name, ve)
                     return {"status": "Skipped", "reason": str(ve)}
                 log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
                 log.debug("UPDATE payload=%s", payload)

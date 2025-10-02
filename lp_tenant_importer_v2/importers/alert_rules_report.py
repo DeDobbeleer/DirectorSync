@@ -1,7 +1,8 @@
 # lp_tenant_importer_v2/importers/alert_rules_report.py
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 import pandas as pd
 
 from .base import BaseImporter
@@ -13,91 +14,177 @@ log = get_logger(__name__)
 
 class AlertRulesXlsxLister(BaseImporter):
     """
-    Report-only importer that reads the 'AlertRules' sheet in the XLSX and
-    emits rows showing Name / Owner / Assign_to / Visible_to_Users.
-    No API calls are made; this class simply formats a report.
+    Read an XLSX sheet containing Alert Rules and produce a report-only table
+    with the following columns per node:
+      - name, owner, assign_to, visible_to_users
+    No Director API calls are executed; this importer only emits rows for the
+    standard reporting pipeline (utils.reporting.print_rows).
+
+    Design goals:
+      * English, PEP8, self-documented.
+      * Error-safe: never crash the run because of missing sheet/columns;
+        instead, log and skip rows that cannot be processed.
+      * Full logging at DEBUG/INFO/WARNING/ERROR.
+      * Tolerant header matching via column aliases.
+      * Tolerant sheet selection via sheet aliases.
     """
 
-    # Nom logique de la ressource (juste pour les logs)
     resource_name: str = "alert_rules_report"
 
-    # On lit la feuille des alertes (comme les autres importers d'alert rules)
-    sheet_names: Tuple[str, ...] = ("AlertRules", "Alert")
+    # Sheet aliases (first match wins, case-sensitive on dict keys that come from openpyxl)
+    # Add/remove aliases here if your workbooks vary.
+    sheet_names: Tuple[str, ...] = (
+        "AlertRules",
+        "Alert_Rules",
+        "Alert",          # legacy
+        "Alerts",         # legacy
+        "Rules",          # if someone exported a trimmed view
+    )
 
-    # On ne force pas de colonnes obligatoires ici: c'est un rapport tolérant
+    # This is a reporting tool; we don't enforce required columns hard.
     required_columns: Tuple[str, ...] = tuple()
 
-    def run_for_nodes(
+    # Column aliases (normalized compare: lowercase + spaces→underscore)
+    _COL_ALIASES: Dict[str, Tuple[str, ...]] = {
+        "name": (
+            "name", "alert_name", "rule", "rule_name",
+        ),
+        "owner": (
+            "owner", "owners",
+        ),
+        "assign_to": (
+            "assign_to", "assigned_to", "assignee", "assign to",
+        ),
+        "visible_to_users": (
+            "visible_to_users", "visible_to_users_list", "visible_to", "visible_for", "visible to users",
+        ),
+    }
+
+    # --------------------- helpers ---------------------
+
+    @staticmethod
+    def _normalize_header(h: str) -> str:
+        """Normalize a header for tolerant matching."""
+        return str(h).strip().lower().replace(" ", "_")
+
+    def _pick_col(self, df: pd.DataFrame, logical: str) -> Optional[str]:
+        """
+        Pick the first matching real column name for a logical field,
+        using _COL_ALIASES and normalized comparison.
+        """
+        want = tuple(self._normalize_header(x) for x in self._COL_ALIASES.get(logical, (logical,)))
+        for real in df.columns:
+            if self._normalize_header(real) in want:
+                return str(real)
+        return None
+
+    @staticmethod
+    def _as_str(cell: Any) -> str:
+        """Best-effort normalization of a scalar cell to a trimmed string."""
+        if isinstance(cell, float):
+            try:
+                if pd.isna(cell):
+                    return ""
+            except Exception:
+                pass
+        if cell is None:
+            return ""
+        return str(cell).strip()
+
+    @staticmethod
+    def _flatten_visible(cell: Any) -> str:
+        """
+        Convert a 'visible_to_users' cell to a canonical ';' joined string.
+        Accepts list/tuple, scalar, or NaN.
+        """
+        if isinstance(cell, float):
+            try:
+                if pd.isna(cell):
+                    return ""
+            except Exception:
+                pass
+        if cell is None:
+            return ""
+        if isinstance(cell, (list, tuple, set)):
+            return ";".join(str(x).strip() for x in cell if str(x).strip())
+        return str(cell).strip()
+
+    # --------------------- main pipeline ---------------------
+
+    def run_for_nodes(  # type: ignore[override]
         self,
-        client: Any,
-        pool_uuid: str,
+        client: Any,              # unused (report-only)
+        pool_uuid: str,           # unused (report-only)
         nodes: Iterable[NodeRef],
-        xlsx_path,
+        xlsx_path: str,
         dry_run: bool = True,
     ) -> List[Dict[str, Any]]:
         """
-        Contrairement aux importers « CRUD », on ne contacte pas le Director.
-        On lit l'XLSX et on génère des lignes prêtes pour utils.reporting.print_rows.
+        Read the workbook once, select the first existing alias sheet,
+        and emit a row per alert rule, per node.
         """
-        # Charge toutes les feuilles via le helper de BaseImporter
-        sheets = self.load_xlsx(xlsx_path)
-        sheet_name = self.sheet_names[0]
-        if sheet_name not in sheets:
-            raise ValueError(f"Sheet '{sheet_name}' not found in {xlsx_path}")
+        log.info("alert_rules_report: starting (xlsx=%s, nodes=%d)", xlsx_path, len(list(nodes)))
 
-        df = sheets[sheet_name].copy()
+        try:
+            sheets = self.load_xlsx(xlsx_path)
+        except Exception as exc:  # pragma: no cover
+            log.error("alert_rules_report: failed to load XLSX '%s': %s", xlsx_path, exc)
+            return []
+
+        # Choose first sheet that exists in the workbook
+        chosen: Optional[str] = None
+        for s in self.sheet_names:
+            if s in sheets:
+                chosen = s
+                break
+
+        if not chosen:
+            log.warning(
+                "alert_rules_report: no AlertRules sheet found among aliases %s in '%s' — nothing to report.",
+                self.sheet_names, xlsx_path,
+            )
+            return []
+
+        df = sheets[chosen].copy()
         df.columns = [str(c).strip() for c in df.columns]
+        log.debug("alert_rules_report: using sheet '%s' with columns=%s", chosen, list(df.columns))
 
-        # Alias tolérants aux variations de casse / espaces / underscores
-        aliases = {
-            "name": ["Name", "Alert Name", "Rule", "Rule Name"],
-            "owner": ["Owner"],
-            "assign_to": ["Assign_to", "Assigned_to", "Assign To"],
-            "visible_to_users": ["Visible_to_users", "Visible_to_Users", "Visible To Users", "Visible_for", "visible_for"],
-        }
+        # Resolve headers using aliases
+        c_name = self._pick_col(df, "name")
+        c_owner = self._pick_col(df, "owner")
+        c_assign = self._pick_col(df, "assign_to")
+        c_vis = self._pick_col(df, "visible_to_users")
 
-        def pick_col(logical: str) -> str | None:
-            want = [s.lower().replace(" ", "_") for s in aliases.get(logical, [])]
-            for real in df.columns:
-                norm = real.lower().replace(" ", "_")
-                if norm in want:
-                    return real
-            return None
-
-        c_name = pick_col("name")
-        c_owner = pick_col("owner")
-        c_assign = pick_col("assign_to")
-        c_vis = pick_col("visible_to_users")
+        if not c_name:
+            log.warning("alert_rules_report: no 'Name' column alias found on sheet '%s' — all rows skipped.", chosen)
 
         rows: List[Dict[str, Any]] = []
         nodes_list = list(nodes)
+
         for node in nodes_list:
-            node_tag = f"{node.name}|{node.id}"
+            node_tag = f"{getattr(node, 'name', '')}|{getattr(node, 'id', '')}"
+
             for _, r in df.iterrows():
-                name = str(r.get(c_name, "")).strip() if c_name else ""
+                name = self._as_str(r.get(c_name, "")) if c_name else ""
                 if not name:
-                    continue  # skip lignes vides
+                    # The row does not represent a valid alert rule → skip silently.
+                    continue
 
-                owner = (str(r.get(c_owner, "")).strip() if c_owner else "")
-                assign_to = (str(r.get(c_assign, "")).strip() if c_assign else "")
-
-                raw_vis = r.get(c_vis, "")
-                if isinstance(raw_vis, float) and pd.isna(raw_vis):
-                    visible = ""
-                elif isinstance(raw_vis, list):
-                    visible = ";".join(map(str, raw_vis))
-                else:
-                    visible = str(raw_vis).strip()
+                owner = self._as_str(r.get(c_owner, "")) if c_owner else ""
+                assign_to = self._as_str(r.get(c_assign, "")) if c_assign else ""
+                visible = self._flatten_visible(r.get(c_vis, "")) if c_vis else ""
 
                 rows.append(
                     {
-                        "siem": node.id,
+                        # report identity
+                        "siem": getattr(node, "id", ""),
                         "node": node_tag,
+                        # business fields
                         "name": name,
                         "owner": owner or "—",
                         "assign_to": assign_to or "—",
                         "visible_to_users": visible or "—",
-                        # Champs classiques de la table (pas de pipeline API ici)
+                        # standard report columns (no API pipeline here)
                         "result": "report",
                         "action": "list",
                         "status": "—",
@@ -109,8 +196,8 @@ class AlertRulesXlsxLister(BaseImporter):
                 )
 
         log.info(
-            "alert_rules_report: produced %d rows for %d node(s)",
-            len(rows),
-            len(nodes_list),
+            "alert_rules_report: produced %d row(s) from sheet '%s' for %d node(s).",
+            len(rows), chosen, len(nodes_list),
         )
+        log.debug("alert_rules_report: first 3 rows preview: %s", rows[:3])
         return rows

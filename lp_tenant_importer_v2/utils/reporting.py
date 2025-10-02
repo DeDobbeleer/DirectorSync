@@ -101,6 +101,10 @@ def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
         "corr",
     ]
     mandatory = {"siem", "node", "result", "action"}
+    
+    # If this is a 'report' (like list-alert-users), force-show user-related columns
+    if any(r.get("result") == "report" for r in norm_rows):
+        mandatory |= {"owner", "assign_to", "visible_to_users"}
 
     if fmt == "json":
         print(json.dumps(norm_rows, indent=2))

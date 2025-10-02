@@ -168,10 +168,9 @@ class AlertRulesImporter(BaseImporter):
     def _load_alert_sheet(self) -> pd.DataFrame:
         """Load the Alert sheet as a DataFrame via BaseImporter helpers.
 
-        This method uses BaseImporter.load_sheet if available; otherwise, it
-        falls back to self.xlsx_reader which is what other importers already use.
+        This method uses the shared XLSX reader (self.xlsx_reader.read), same as the other importers in v2.
         """
-        df = self.load_sheet(self.SHEET_NAME)
+        df = self.xlsx_reader.read(self.SHEET_NAME)
         # Normalize columns that are sometimes missing in sample files
         for col in self.EXPECTED_COLUMNS:
             if col not in df.columns:
@@ -227,7 +226,7 @@ class AlertRulesImporter(BaseImporter):
     def _load_repo_clean_map(self) -> Dict[str, str]:
         """Load old→cleaned repo name map from the `Repo` sheet (XLSX)."""
         try:
-            repo_df = self.load_sheet("Repo")
+            repo_df = self.xlsx_reader.read("Repo")
         except Exception as exc:  # pragma: no cover - guardrail
             LOG.warning("alert_rules: Repo sheet not found: %s", exc)
             return {}

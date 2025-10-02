@@ -41,7 +41,7 @@ python -m lp_tenant_importer_v2.main \
   --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
-  list-alert-users
+  import-alert-rules
 ```
 
 ### Vérif rapide

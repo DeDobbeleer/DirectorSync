@@ -15,6 +15,7 @@ import pandas as pd
 
 from .base import BaseImporter, NodeRef
 from ..utils.validators import ValidationError  # reused from trunk
+from lp_tenant_importer_v2.core.director_client import DirectorClient
 
 log = logging.getLogger(__name__)
 
@@ -292,26 +293,28 @@ class AlertRulesImporter(BaseImporter):
         return k, v
 
     def _resolve_owner_id(self, desired_row: Dict[str, Any]) -> str:
-        """Resolve owner id using existing project hooks/context, no reinvention.
-        Order (first hit wins):
-          1) desired_row['owner'] if provided (already resolved upstream)
-          2) self.resolve_user_id(desired_row) if the trunk exposes it
-          3) getattr(self, 'ctx').owner_id / username if available
-          4) empty string (treated as missing)
+        """Resolve owner using profiles.yml (preferred), then env, then context.
+        - profiles.yml: profiles.AlertRules.options.default_owner (string)
+        - env: LP_ALERT_OWNER
+        - ctx: owner_id / user_id / username
         """
-        # 1) Already present
+        # 0) If desired already has an owner (future-proof), honor it
         ov = desired_row.get("owner")
         if isinstance(ov, str) and ov.strip():
             return ov.strip()
-        # 2) Trunk-provided resolver
+        # 1) profiles.yml option
         try:
-            if hasattr(self, "resolve_user_id") and callable(getattr(self, "resolve_user_id")):
-                rid = self.resolve_user_id(desired_row)  # type: ignore[attr-defined]
-                if rid:
-                    return str(rid)
+            owner_from_profile = self._get_profile_option_default_owner()
+            if owner_from_profile:
+                return owner_from_profile
         except Exception:
             pass
-        # 3) Context fallback
+        # 2) environment override
+        import os
+        env_owner = os.getenv("LP_ALERT_OWNER", "").strip()
+        if env_owner:
+            return env_owner
+        # 3) context fallback
         ctx = getattr(self, "ctx", None)
         if ctx is not None:
             for attr in ("owner_id", "user_id", "username"):
@@ -319,6 +322,27 @@ class AlertRulesImporter(BaseImporter):
                 if isinstance(v, str) and v.strip():
                     return v.strip()
         return ""
+
+    def _get_profile_option_default_owner(self) -> str:
+        """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
+        import os
+        import yaml
+        # Locate profiles.yml packaged with the module
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # lp_tenant_importer_v2/
+        res_path = os.path.join(base_dir, "resources", "profiles.yml")
+        if not os.path.exists(res_path):
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
+            return ""
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         # Resolve and validate owner

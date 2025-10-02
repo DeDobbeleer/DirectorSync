@@ -14,8 +14,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 
 from .base import BaseImporter, NodeRef
-from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError
+from ..utils.validators import ValidationError  # reused from trunk
 
 log = logging.getLogger(__name__)
 
@@ -292,13 +291,51 @@ class AlertRulesImporter(BaseImporter):
         k, v = self._canon_timerange(d)
         return k, v
 
+    def _resolve_owner_id(self, desired_row: Dict[str, Any]) -> str:
+        """Resolve owner id using existing project hooks/context, no reinvention.
+        Order (first hit wins):
+          1) desired_row['owner'] if provided (already resolved upstream)
+          2) self.resolve_user_id(desired_row) if the trunk exposes it
+          3) getattr(self, 'ctx').owner_id / username if available
+          4) empty string (treated as missing)
+        """
+        # 1) Already present
+        ov = desired_row.get("owner")
+        if isinstance(ov, str) and ov.strip():
+            return ov.strip()
+        # 2) Trunk-provided resolver
+        try:
+            if hasattr(self, "resolve_user_id") and callable(getattr(self, "resolve_user_id")):
+                rid = self.resolve_user_id(desired_row)  # type: ignore[attr-defined]
+                if rid:
+                    return str(rid)
+        except Exception:
+            pass
+        # 3) Context fallback
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            for attr in ("owner_id", "user_id", "username"):
+                v = getattr(ctx, attr, None)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        # Resolve and validate owner
+        owner_id = self._resolve_owner_id(desired_row)
+        if not owner_id:
+            raise ValidationError("owner is required and could not be resolved from context")
+        # Validate repos
+        repos = desired_row.get("repos_norm", [])
+        if not isinstance(repos, list) or not repos or not all(isinstance(x, str) and x.strip() for x in repos):
+            raise ValidationError("repos must be a non-empty list of strings")
+        # Timerange
         k, v = self._timerange_kv(desired_row)
         payload: Dict[str, Any] = {
             "searchname": _s(desired_row.get("name")),
-            "owner": _s(desired_row.get("owner") or ""),  # owner resolution may be handled elsewhere
+            "owner": owner_id,
             "risk": _s(desired_row.get("risk")),
-            "repos": desired_row.get("repos_norm", []),
+            "repos": repos,
             "aggregate": _s(desired_row.get("aggregate")),
             "condition_option": _s(desired_row.get("condition_option")),
             "condition_value": int(desired_row.get("condition_value") or 0),
@@ -341,20 +378,30 @@ class AlertRulesImporter(BaseImporter):
         name = _s(desired.get("name")) or "(unnamed)"
         try:
             if decision.op == "CREATE":
-                payload = self.build_payload_create(desired)
+                try:
+                    payload = self.build_payload_create(desired)
+                except ValidationError as ve:
+                    log.warning("SKIP CREATE alert=%s [node=%s] reason=%s", name, node.name, ve)
+                    return {"status": "Skipped", "reason": str(ve)}
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
                 return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
             if decision.op == "UPDATE" and existing_id:
-                payload = self.build_payload_update(desired, {"id": existing_id})
+                try:
+                    payload = self.build_payload_update(desired, {"id": existing_id})
+                except ValidationError as ve:
+                    log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s", name, existing_id, node.name, ve)
+                    return {"status": "Skipped", "reason": str(ve)}
                 log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
                 log.debug("UPDATE payload=%s", payload)
                 return client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
             log.info("NOOP alert=%s [node=%s]", name, node.name)
             return {"status": "Success"}
-        except Exception:
-            log.exception("API error for alert=%s [node=%s]", name, node.name)
-            raise
+        except Exception as exc:
+            # Convert HTTP/errors to a clean per-row result without stacktrace propagation
+            msg = str(exc)
+            log.error("APPLY FAILED alert=%s [node=%s]: %s", name, node.name, msg)
+            return {"status": "Failed", "error": msg}
 
 
 __all__ = ["AlertRulesImporter"]

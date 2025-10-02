@@ -47,8 +47,9 @@ class AlertRulesXlsxLister(BaseImporter):
     # We only *require* `name`; other fields are optional.
     COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "name": ("name", "alert_name", "rule_name", "alert", "rule"),
-        "owner": ("owner", "owner_login", "owner_user", "owner_name"),
+        "owner": ("settings.user", "owner", "owner_login", "owner_user", "owner_name"),
         "assign_to": (
+            "settings.assign_to",
             "assign_to",
             "assigned_to",
             "assign",
@@ -57,6 +58,7 @@ class AlertRulesXlsxLister(BaseImporter):
             "assign_to_user",
         ),
         "visible_to_users": (
+            "settings.visible_to"
             "visible_to_users",
             "visible_for",
             "visible_to",

@@ -320,7 +320,7 @@ class AlertRulesImporter(BaseImporter):
         - ctx: owner_id / user_id / username
         """
         # 0) If desired already has an owner (future-proof), honor it
-        ov = desired_row.get("owner")
+        ov = desired_row.get("settings.user")
         if isinstance(ov, str) and ov.strip():
             log.debug("owner resolved from desired row: %s", ov)
             return ov.strip()

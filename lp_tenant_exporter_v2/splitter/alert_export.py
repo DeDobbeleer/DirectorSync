@@ -97,6 +97,7 @@ def load_alerts_df(source_json: str | Path) -> pd.DataFrame:
     # settings.visible_to_user, settings.visible_to_users, settings.visible_to
     priority_first = [
         "name",
+        "settings.repos",
         "settings.user",
         "settings.assigned_to",
         "settings.visible_to_user",

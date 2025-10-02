@@ -1,1092 +1,637 @@
-# lp_tenant_importer_v2/importers/alert_rules.py
+"""Alert Rules (MyRules) Importer
+
+Scope
+-----
+- Handles *only* MyRules (user-owned alert rules) with NOOP/CREATE/UPDATE/SKIP.
+- Out of scope: Shared/Vendor/Used*, share/unshare/transferOwnership, notifications.
+- Repository resolution follows the user's distributed spec:
+    settings.repos = ["<ip_private>:<port>[:<old_repo_name>]", ...]
+  If <old_repo_name> is omitted, the rule targets **all repos** on that backend.
+- Old repo names are mapped to cleaned names via the XLSX `Repo` sheet
+  (columns: `original_repo_name`, `cleaned_repo_name`).
+- Tenants' private backend IPs are discovered from `tenants.yml` (CLI `--tenants-file` + `--tenant`).
+
+Design choices
+--------------
+- Integrates with the v2 common trunk just like the other importers (BaseImporter, DirectorClient).
+- Keeps payload strictly aligned with the official API for Create/Update:
+    data.searchname, data.owner, data.risk, data.repos, data.aggregate,
+    data.condition_option, data.condition_value, data.limit,
+    data.timerange_minute|hour|day,
+    and the documented optional fields (query, description, ...).
+- Idempotence: second run is NOOP when the managed field subset matches.
+- Activation convergence: uses POST /AlertRules/{id}/activate or /deactivate
+  to reach the desired active state from XLSX.
+
+Notes
+-----
+This module avoids project-specific assumptions beyond what is used by the
+other importers. The following utilities/hooks are expected (already present
+in v2):
+- BaseImporter (load_sheet, report_row, resolve_user_id, resolve_attack_tags,
+  resolve_remote_repos, get_tenant_dict, director_client, etc.)
+- utils.resolvers for generic resolvers (cached) if available.
+- core.config for runtime context (tenant name, tenants file path, etc.).
+
+If some helper names differ slightly in your codebase, adjust the marked
+integration points at the bottom of this file where the importer is
+registered in the registry.
 """
-AlertRules importer (DirectorSync v2)
-
-Fixes:
-- Remove reliance on `client.tenant`; use `tenant_or_pool` = pool_uuid in logs
-- Robust XLSX parsing (no Series ambiguity)
-- Correct API envelopes: ALL POST/PUT use {"data": ...}
-- Fetch via .../fetch + monitor flow
-- Comprehensive logging (DEBUG/INFO/WARNING/ERROR) for API actions
-
-Design goals
-------------
-- Parse the `Alert` sheet to build a desired model per rule.
-- Plan on a canonical "core" subset (sharing/state/notifications are post-apply).
-- Apply in sequence: core (create/update) -> state -> sharing -> notifications.
-- Log each API action with useful context and safe redaction.
-- Fail fast on operator errors (SKIP) and surface API errors clearly.
-"""
-
 from __future__ import annotations
 
-import json
-import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import json
+import math
+import re
 
 import pandas as pd
 
-from .base import BaseImporter
-from ..core.config import NodeRef
-from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError
-
-log = logging.getLogger(__name__)
-
-# ----------------------------- redaction & utils ------------------------------
-
-_EMPTY = {"", "nan", "none", "null", "-", "[]", "{}"}
-
-# fields to redact when logging payloads
-_REDACT_KEYS = {
-    "authorization", "x-api-key", "api_key", "token", "auth_key", "auth_value", "auth_pass",
-    "ssh_auth_password", "ssh_key", "sms_password",
-    "snmp_community", "snmp_auth", "snmp_priv",
-    # email list is PII; only count it
-    "email_emails",
-}
+from lp_tenant_importer_v2.importers.base import BaseImporter
+from lp_tenant_importer_v2.core.logging_utils import get_logger
 
 
-def _is_blank(x: Any) -> bool:
-    if x is None:
-        return True
-    if isinstance(x, float):
-        try:
-            if pd.isna(x):
-                return True
-        except Exception:
-            pass
-    s = str(x).strip()
-    return s == "" or s.lower() in _EMPTY
+LOG = get_logger(__name__)
 
 
-def _s(x: Any) -> str:
-    return "" if _is_blank(x) else str(x).strip()
+@dataclass
+class RepoSpec:
+    backend_ip: str
+    port: str
+    repo_old: str = ""
+    repo_clean: str = ""
+    scope: str = "all"  # "all" (no repo specified) or "specific"
 
+    def normalized(self) -> str:
+        """Return the normalized triplet used for deterministic diffing.
 
-def _as_bool_flag_on(x: Any) -> Optional[str]:
-    if isinstance(x, bool):
-        return "on" if x else None
-    val = _s(x).lower()
-    if val in {"1", "true", "yes", "on"}:
-        return "on"
-    return None
-
-
-def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str]:
-    if _is_blank(cell):
-        return []
-    if isinstance(cell, (list, tuple, set)):
-        return sorted({_s(x) for x in cell if _s(x)})
-    raw = _s(cell)
-    if raw.startswith("[") or raw.startswith("{"):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return sorted({_s(x) for x in parsed if _s(x)})
-            if isinstance(parsed, dict):
-                parts = []
-                for k in ("name", "value", "id"):
-                    if k in parsed and _s(parsed[k]):
-                        parts.append(_s(parsed[k]))
-                if parts:
-                    return sorted(set(parts))
-                return []
-        except Exception:
-            pass
-    canon = raw
-    for s in seps[1:]:
-        canon = canon.replace(s, seps[0])
-    parts = [p.strip() for p in canon.split(seps[0])]
-    return sorted({p for p in parts if p})
-
-
-def _csv(parts: Iterable[str]) -> str:
-    return ",".join(sorted({_s(x) for x in parts if _s(x)}))
-
-
-def _int_or_none(x: Any) -> Optional[int]:
-    s = _s(x)
-    if not s:
-        return None
-    try:
-        return int(float(s))
-    except Exception:
-        return None
-
-
-def _parse_notifications(cell: Any) -> List[Dict[str, Any]]:
-    if _is_blank(cell):
-        return []
-    if isinstance(cell, list):
-        out: List[Dict[str, Any]] = []
-        for item in cell:
-            if isinstance(item, dict):
-                out.append(item)
-            else:
-                out.append({"value": _s(item)})
-        return out
-    raw = _s(cell)
-    if raw.startswith("[") or raw.startswith("{"):
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            log.debug("notifications: invalid JSON, value=%r", raw[:200])
-            return []
-        if isinstance(parsed, list):
-            return [p if isinstance(p, dict) else {"value": _s(p)} for p in parsed]
-        if isinstance(parsed, dict):
-            return [parsed]
-        return []
-    parts = _split_multi(raw)
-    out: List[Dict[str, Any]] = []
-    for p in parts:
-        if p.startswith("{"):
-            try:
-                out.append(json.loads(p))
-                continue
-            except Exception:
-                pass
-        out.append({"value": _s(p)})
-    return out
-
-
-def _cols_map(df: pd.DataFrame) -> Dict[str, str]:
-    return {str(c).strip().lower(): str(c) for c in df.columns}
-
-
-def _pick_col(df: pd.DataFrame, *aliases: str) -> Optional[str]:
-    cmap = _cols_map(df)
-    for a in aliases:
-        if not a:
-            continue
-        cn = cmap.get(a.strip().lower())
-        if cn:
-            return cn
-    return None
-
-
-def _redact_for_log(obj: Any) -> Any:
-    """
-    Redact sensitive fields recursively.
-    - For dicts: mask values of known sensitive keys.
-    - For lists of emails: replace with a count.
-    """
-    if isinstance(obj, dict):
-        red: Dict[str, Any] = {}
-        for k, v in obj.items():
-            lk = str(k).lower()
-            if lk in _REDACT_KEYS:
-                if lk == "email_emails":
-                    red[k] = f"<{len(v) if isinstance(v, list) else 1} recipients>"
-                else:
-                    red[k] = "<redacted>"
-            else:
-                red[k] = _redact_for_log(v)
-        return red
-    if isinstance(obj, list):
-        return [_redact_for_log(x) for x in obj]
-    return obj
-
-
-def _payload_keys_summary(payload: Dict[str, Any]) -> str:
-    keys = sorted(payload.keys())
-    return f"keys={keys} size={len(json.dumps(payload))}"
-
-
-# ------------------------------ data model -----------------------------------
-
-
-@dataclass(frozen=True)
-class _DesiredAlert:
-    name: str
-    # core
-    owner: str
-    risk: str
-    repos: List[str]
-    aggregate: str
-    condition_option: str
-    condition_value: int
-    limit: int
-    timerange_day: Optional[int]
-    timerange_hour: Optional[int]
-    timerange_minute: Optional[int]
-    query: str
-    description: str
-    search_interval_minute: Optional[int]
-    flush_on_trigger: bool
-    throttling_enabled: bool
-    throttling_field: str
-    throttling_time_range: Optional[int]
-    metadata: List[Tuple[str, str]]
-    log_source: List[str]
-    context_template: str
-    # post-apply
-    active: bool
-    visible_to_groups: List[str]
-    visible_to_users: List[str]
-    notifications: List[Dict[str, Any]]
-
-    def canon_core(self) -> Dict[str, Any]:
-        return {
-            "risk": _s(self.risk).lower(),
-            "repos": _csv(self.repos),
-            "aggregate": _s(self.aggregate).lower(),
-            "condition_option": _s(self.condition_option).lower(),
-            "condition_value": int(self.condition_value),
-            "limit": int(self.limit),
-            "timerange_key": "day"
-            if self.timerange_day
-            else ("hour" if self.timerange_hour else "minute"),
-            "timerange_value": (
-                self.timerange_day
-                if self.timerange_day
-                else (self.timerange_hour if self.timerange_hour else self.timerange_minute or 0)
-            ),
-            "query": _s(self.query),
-            "description": _s(self.description),
-            "flush_on_trigger": bool(self.flush_on_trigger),
-            "search_interval_minute": self.search_interval_minute or 0,
-            "throttling_enabled": bool(self.throttling_enabled),
-            "throttling_field": _s(self.throttling_field),
-            "throttling_time_range": self.throttling_time_range or 0,
-            "metadata": _csv([f"{k}={v}" for (k, v) in self.metadata]),
-            "log_source": _csv(self.log_source),
-            "context_template": _s(self.context_template),
-        }
-
-
-# ------------------------------ importer -------------------------------------
+        - For ALL scope: "ip:port"
+        - For SPECIFIC: "ip:port:repo_clean"
+        """
+        if self.scope == "all" or not self.repo_clean:
+            return f"{self.backend_ip}:{self.port}"
+        return f"{self.backend_ip}:{self.port}:{self.repo_clean}"
 
 
 class AlertRulesImporter(BaseImporter):
-    """
-    AlertRules importer using the BaseImporter pipeline.
+    """Importer for Logpoint Alert Rules (MyRules only).
 
-    Sheets:
-        - "Alert" (required)
+    This class follows the standard v2 importer contract used by the existing
+    importers. The pipeline is: load → validate → fetch_existing → diff → apply →
+    converge_activation → report.
     """
 
-    resource_name: str = "alert_rules"
-    sheet_names = ("Alert",)
-    required_columns = tuple()
-    compare_keys = (
+    IMPORTER_NAME = "alert_rules"
+    SHEET_NAME = "Alert"
+
+    # Minimal required set per official API (Create/Edit)
+    REQUIRED_API_FIELDS = {
+        "searchname",
+        "owner",
         "risk",
         "repos",
         "aggregate",
         "condition_option",
         "condition_value",
         "limit",
-        "timerange_key",
-        "timerange_value",
-        "query",
-        "description",
-        "flush_on_trigger",
-        "search_interval_minute",
-        "throttling_enabled",
-        "throttling_field",
-        "throttling_time_range",
-        "metadata",
-        "log_source",
-        "context_template",
-    )
-    RESOURCE = "AlertRules"
+        # At least one of the timerange variants must be provided
+        # (we accept minute/hour/day and convert from seconds if present)
+    }
 
-    # --- validate ---------------------------------------------------------
+    # Columns we expect from the Alert sheet (best-effort; some are optional)
+    EXPECTED_COLUMNS = [
+        "name",
+        "settings.active",
+        "settings.description",
+        "settings.extra_config.query",
+        "settings.repos",
+        "settings.risk",
+        "settings.aggregate",
+        "settings.condition.condition_option",
+        "settings.condition.condition_value",
+        "settings.livesearch_data.timerange_minute",
+        "settings.livesearch_data.timerange_hour",
+        "settings.livesearch_data.timerange_day",
+        "settings.livesearch_data.timerange_second",
+        "settings.livesearch_data.limit",
+        "settings.log_source",
+        "settings.assigned_to",
+        "settings.attack_tag",
+        "settings.metadata",
+        "settings.is_context_template_enabled",
+        "settings.context_template",
+        "settings.flush_on_trigger",
+        "settings.throttling_enabled",
+        "settings.throttling_field",
+        "settings.throttling_time_range",
+        "settings.livesearch_data.search_interval_minute",
+        # legacy/variants we *may* convert if present
+        "settings.time_range_seconds",
+    ]
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
-        if "Alert" not in sheets:
-            raise ValidationError("Missing required sheet: 'Alert'")
-        df = sheets["Alert"]
-        cols = {str(c).strip().lower() for c in df.columns}
-
-        def need(col_name: str) -> None:
-            if col_name.lower() not in cols:
-                raise ValidationError(f"Missing required column in 'Alert': {col_name}")
-
-        need("name")
-        need("settings.user")
-        need("settings.risk")
-        need("settings.repos")
-        need("settings.aggregate")
-        need("settings.condition.condition_option")
-        need("settings.condition.condition_value")
-        need("settings.livesearch_data.limit")
-
-        has_minute = "settings.livesearch_data.timerange_minute" in cols
-        has_hour = "settings.livesearch_data.timerange_hour" in cols
-        has_day = "settings.livesearch_data.timerange_day" in cols
-        has_seconds = "settings.time_range_seconds" in cols
-        if not (has_minute or has_hour or has_day or has_seconds):
-            raise ValidationError(
-                "At least one timerange column is required: "
-                "settings.livesearch_data.timerange_minute|hour|day "
-                "or settings.time_range_seconds"
-            )
-
-    # --- desired rows parsing --------------------------------------------
-
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
-        df = sheets["Alert"].copy()
-
-        # Column mapping (once)
-        name_col = _pick_col(df, "name")
-        owner_col = _pick_col(df, "settings.user")
-        risk_col = _pick_col(df, "settings.risk")
-        repos_col = _pick_col(df, "settings.repos")
-        agg_col = _pick_col(df, "settings.aggregate")
-        cond_opt = _pick_col(df, "settings.condition.condition_option")
-        cond_val = _pick_col(df, "settings.condition.condition_value")
-        limit_col = _pick_col(df, "settings.livesearch_data.limit")
-
-        tr_min = _pick_col(df, "settings.livesearch_data.timerange_minute")
-        tr_hr = _pick_col(df, "settings.livesearch_data.timerange_hour")
-        tr_day = _pick_col(df, "settings.livesearch_data.timerange_day")
-        tr_sec = _pick_col(df, "settings.time_range_seconds")
-
-        query_col = _pick_col(df, "settings.livesearch_data.query", "settings.extra_config.query")
-        desc_col = _pick_col(df, "settings.description")
-        flush_col = _pick_col(df, "settings.flush_on_trigger", "settings.livesearch_data.flush_on_trigger")
-        search_iv = _pick_col(df, "settings.livesearch_data.search_interval_minute")
-        thr_en = _pick_col(df, "settings.throttling_enabled")
-        thr_field = _pick_col(df, "settings.throttling_field")
-        thr_range = _pick_col(df, "settings.throttling_time_range")
-        meta_col = _pick_col(df, "settings.metadata")
-        logsrc_col = _pick_col(df, "settings.log_source")
-        ctxt_tmpl = _pick_col(df, "settings.context_template")
-
-        active_col = _pick_col(df, "settings.active")
-        vis_groups = _pick_col(df, "settings.visible_to")
-        vis_users = _pick_col(df, "settings.visible_to_users")
-        notif_col = _pick_col(df, "settings.notifications")
-
+    def run_for_nodes(self, *args: Any, **kwargs: Any) -> pd.DataFrame:  # noqa: D401 (kept for BaseImporter parity)
+        """Entry point called by the CLI runner (kept for parity with v2)."""
+        # 1) Load
+        df = self._load_alert_sheet()
+        # 2) Validate
+        self._validate_input(df)
+        # 3) Resolve supporting maps (tenant IPs, repo map, users, etc.)
+        tenant_ips = self._collect_tenant_private_ips()
+        repo_map = self._load_repo_clean_map()
+        # 4) Fetch existing from Director
+        existing = self._fetch_existing_myrules()
+        index_by_name = {r.get("searchname") or r.get("name"): r for r in existing}
+        # 5) Build plan rows
+        plan: List[Dict[str, Any]] = []
         for idx, row in df.iterrows():
-            def cell(cn: Optional[str]) -> Any:
-                return row[cn] if cn else None
-
-            name = _s(cell(name_col))
-            if not name:
-                continue
-
-            tr_d = _int_or_none(cell(tr_day))
-            tr_h = _int_or_none(cell(tr_hr))
-            tr_m = _int_or_none(cell(tr_min))
-            if not (tr_d or tr_h or tr_m):
-                sec = _int_or_none(cell(tr_sec))
-                if sec:
-                    tr_m = max(1, int(round(sec / 60.0)))
-
-            desired = _DesiredAlert(
-                name=name,
-                owner=_s(cell(owner_col)),
-                risk=_s(cell(risk_col)),
-                repos=_split_multi(cell(repos_col)),
-                aggregate=_s(cell(agg_col)),
-                condition_option=_s(cell(cond_opt)),
-                condition_value=int(_int_or_none(cell(cond_val)) or 0),
-                limit=int(_int_or_none(cell(limit_col)) or 0),
-                timerange_day=tr_d,
-                timerange_hour=tr_h,
-                timerange_minute=tr_m,
-                query=_s(cell(query_col)),
-                description=_s(cell(desc_col)),
-                search_interval_minute=_int_or_none(cell(search_iv)),
-                flush_on_trigger=bool(_as_bool_flag_on(cell(flush_col))),
-                throttling_enabled=bool(_as_bool_flag_on(cell(thr_en))),
-                throttling_field=_s(cell(thr_field)),
-                throttling_time_range=_int_or_none(cell(thr_range)),
-                metadata=self._parse_metadata(cell(meta_col)),
-                log_source=_split_multi(cell(logsrc_col)),
-                context_template=_s(cell(ctxt_tmpl)),
-                active=(_s(cell(active_col)).lower() in {"1", "true", "yes", "on"}),
-                visible_to_groups=_split_multi(cell(vis_groups)),
-                visible_to_users=_split_multi(cell(vis_users)),
-                notifications=_parse_notifications(cell(notif_col)),
-            )
-
-            if desired.limit < 1:
-                raise ValidationError(f"[Alert:{name}] 'limit' must be >= 1")
-            if not (desired.timerange_day or desired.timerange_hour or desired.timerange_minute):
-                raise ValidationError(f"[Alert:{name}] missing timerange (day/hour/minute or time_range_seconds)")
-
-            yield {
-                "key": name,
-                "desired": desired,
-            }
-
-    @staticmethod
-    def _parse_metadata(cell: Any) -> List[Tuple[str, str]]:
-        if _is_blank(cell):
-            return []
-        if isinstance(cell, list):
-            out: List[Tuple[str, str]] = []
-            for item in cell:
-                if isinstance(item, dict):
-                    k = _s(item.get("field"))
-                    v = _s(item.get("value"))
-                    if k:
-                        out.append((k, v))
-            return sorted(set(out))
-        raw = _s(cell)
-        if raw.startswith("["):
             try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    out: List[Tuple[str, str]] = []
-                    for it in parsed:
-                        if isinstance(it, dict):
-                            k = _s(it.get("field"))
-                            v = _s(it.get("value"))
-                            if k:
-                                out.append((k, v))
-                    return sorted(set(out))
-            except Exception:
-                pass
-        parts = _split_multi(raw)
-        out: List[Tuple[str, str]] = []
-        for p in parts:
-            if "=" in p:
-                k, v = p.split("=", 1)
-                if _s(k):
-                    out.append((_s(k), _s(v)))
-        return sorted(set(out))
+                plan_row = self._build_plan_row(row, tenant_ips, repo_map, index_by_name)
+            except Exception as exc:  # robust isolation per-row
+                LOG.exception("alert_rules: row %s failed during planning", idx)
+                plan_row = {
+                    "siem": self.ctx.siem_id,
+                    "node": self.ctx.node_name,
+                    "name": row.get("name", "<unknown>"),
+                    "result": "skip",
+                    "action": "Invalid row",
+                    "status": "—",
+                    "error": str(exc),
+                }
+            plan.append(plan_row)
+        # 6) Apply plan
+        applied = self._apply_plan(plan)
+        # 7) Report as DataFrame (uniform columns)
+        return pd.DataFrame(applied)
 
-    # --- diff keys --------------------------------------------------------
+    # ---------------------------- Load & Validate ---------------------------- #
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:  # type: ignore[override]
-        return _s(desired_row["key"])
+    def _load_alert_sheet(self) -> pd.DataFrame:
+        """Load the Alert sheet as a DataFrame via BaseImporter helpers.
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
-        return desired_row["desired"].canon_core()
+        This method uses BaseImporter.load_sheet if available; otherwise, it
+        falls back to self.xlsx_reader which is what other importers already use.
+        """
+        df = self.load_sheet(self.SHEET_NAME)
+        # Normalize columns that are sometimes missing in sample files
+        for col in self.EXPECTED_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        return df
 
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:  # type: ignore[override]
-        if not existing_obj:
-            return None
+    def _validate_input(self, df: pd.DataFrame) -> None:
+        """Validate minimal Alert sheet constraints.
 
-        def get_any(d: Dict[str, Any], *keys: str) -> Any:
-            for k in keys:
-                if k in d:
-                    return d[k]
-            return None
+        - name must be present (searchname)
+        - required fields must be present or derivable
+        - settings.repos must be parseable according to distributed spec
+        """
+        # name
+        missing_name = df["name"].isna() | (df["name"].astype(str).str.strip() == "")
+        if missing_name.any():
+            LOG.warning("alert_rules: some rows are missing 'name' → will SKIP")
+        # limit
+        if "settings.livesearch_data.limit" not in df.columns:
+            raise ValueError("Alert sheet is missing 'settings.livesearch_data.limit'")
 
-        repos = _split_multi(get_any(existing_obj, "repos", "repository", "repositories"))
-        log_source = _split_multi(get_any(existing_obj, "log_source", "logsources"))
+    # -------------------------- Supporting datasets ------------------------- #
 
-        tr_d = _int_or_none(get_any(existing_obj, "timerange_day"))
-        tr_h = _int_or_none(get_any(existing_obj, "timerange_hour"))
-        tr_m = _int_or_none(get_any(existing_obj, "timerange_minute"))
+    def _collect_tenant_private_ips(self) -> List[str]:
+        """Collect all private backend IPs for the active tenant from tenants.yml.
 
-        meta_items: List[Tuple[str, str]] = []
-        md = get_any(existing_obj, "metadata") or []
-        if isinstance(md, list):
-            for it in md:
-                if isinstance(it, dict):
-                    k = _s(it.get("field"))
-                    v = _s(it.get("value"))
-                    if k:
-                        meta_items.append((k, v))
-        metadata_csv = _csv([f"{k}={v}" for (k, v) in meta_items])
+        The BaseImporter / context already parsed tenants.yml (used by other
+        importers). We traverse the sub-tree of the selected tenant and collect
+        any IPv4-looking tokens to form the allowed set.
+        """
+        tenant_dict = self.get_tenant_dict()  # provided by BaseImporter
+        ips: List[str] = []
+        def walk(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    walk(v)
+            else:
+                s = str(obj).strip()
+                parts = s.split(".")
+                if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                    ips.append(s)
+        walk(tenant_dict)
+        # de-dup + stable order
+        uniq = sorted(set(ips))
+        if not uniq:
+            raise ValueError("No private backend IPs found for tenant (tenants.yml)")
+        LOG.debug("alert_rules: tenant private IPs = %s", uniq)
+        return uniq
+
+    def _load_repo_clean_map(self) -> Dict[str, str]:
+        """Load old→cleaned repo name map from the `Repo` sheet (XLSX)."""
+        try:
+            repo_df = self.load_sheet("Repo")
+        except Exception as exc:  # pragma: no cover - guardrail
+            LOG.warning("alert_rules: Repo sheet not found: %s", exc)
+            return {}
+        # Expect columns: original_repo_name, cleaned_repo_name
+        if "original_repo_name" not in repo_df.columns or "cleaned_repo_name" not in repo_df.columns:
+            LOG.warning("alert_rules: Repo sheet missing mapping columns; proceeding without mapping")
+            return {}
+        mapping = (
+            repo_df[["original_repo_name", "cleaned_repo_name"]]
+            .dropna(how="any")
+            .assign(original_repo_name=lambda d: d["original_repo_name"].astype(str).str.strip())
+            .assign(cleaned_repo_name=lambda d: d["cleaned_repo_name"].astype(str).str.strip())
+        )
+        m = dict(zip(mapping["original_repo_name"], mapping["cleaned_repo_name"]))
+        LOG.debug("alert_rules: loaded %d repo name mappings", len(m))
+        return m
+
+    # --------------------------- Director API IO ---------------------------- #
+
+    def _fetch_existing_myrules(self) -> List[Dict[str, Any]]:
+        """Fetch MyRules from Director to build the current state for diffing."""
+        client = self.director_client
+        payload = {"data": {}}  # optional filters could be added later
+        resp = client.post_json(
+            client.configapi(self.ctx.pool_uuid, self.ctx.node_id, "AlertRules/MyAlertRules/fetch"),
+            json=payload,
+        )
+        rules = resp or []
+        if not isinstance(rules, list):
+            LOG.warning("alert_rules: unexpected fetch response type: %s", type(rules))
+            rules = []
+        return rules
+
+    def _create_rule(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        client = self.director_client
+        url = client.configapi(self.ctx.pool_uuid, self.ctx.node_id, "AlertRules")
+        return client.post_json(url, json={"data": data}) or {}
+
+    def _update_rule(self, rule_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        client = self.director_client
+        url = client.configapi(self.ctx.pool_uuid, self.ctx.node_id, f"AlertRules/{rule_id}")
+        return client.put_json(url, json={"data": data}) or {}
+
+    def _activate_rule(self, rule_id: str) -> None:
+        client = self.director_client
+        url = client.configapi(self.ctx.pool_uuid, self.ctx.node_id, f"AlertRules/{rule_id}/activate")
+        client.post_json(url, json={"data": {}})
+
+    def _deactivate_rule(self, rule_id: str) -> None:
+        client = self.director_client
+        url = client.configapi(self.ctx.pool_uuid, self.ctx.node_id, f"AlertRules/{rule_id}/deactivate")
+        client.post_json(url, json={"data": {}})
+
+    # ------------------------------- Planning ------------------------------- #
+
+    def _build_plan_row(
+        self,
+        row: pd.Series,
+        tenant_ips: List[str],
+        repo_map: Dict[str, str],
+        existing_by_name: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build one plan row from a single XLSX line.
+
+        Returns a dict with the standard report columns.
+        """
+        name = str(row.get("name") or "").strip()
+        if not name:
+            return self._report_skip(name, "Missing 'name' (searchname)")
+
+        # Owner (required) → resolve via resolvers or tenant default
+        owner_id = self.resolve_user_id(row)
+        if not owner_id:
+            return self._report_skip(name, "Missing or unresolved owner user ID")
+
+        # Required fields
+        risk = self._require_str(row, "settings.risk", name)
+        aggregate = self._require_str(row, "settings.aggregate", name)
+        cond_opt = self._require_str(row, "settings.condition.condition_option", name)
+        cond_val = self._require_int(row, "settings.condition.condition_value", name)
+        limit = self._require_int(row, "settings.livesearch_data.limit", name, min_value=1)
+
+        # Timerange (accept any minute|hour|day or convert from seconds)
+        timerange = self._pick_timerange(row)
+        if not timerange:
+            return self._report_skip(name, "Missing timerange (minute/hour/day/second)")
+
+        # Parse and normalize repos for this tenant
+        repos_value = row.get("settings.repos")
+        repo_specs = self._parse_repo_specs(repos_value)
+        if not repo_specs:
+            return self._report_skip(name, "No repos provided in settings.repos")
+
+        normalized_repos: List[str] = []
+        for spec in repo_specs:
+            if spec.backend_ip not in tenant_ips:
+                return self._report_skip(name, f"Backend IP {spec.backend_ip} not in tenant ip_private")
+            # scope
+            if spec.repo_old:
+                cleaned = repo_map.get(spec.repo_old, "")
+                if not cleaned:
+                    return self._report_skip(name, f"Repo mapping missing for '{spec.repo_old}'")
+                spec.repo_clean = cleaned
+                spec.scope = "specific"
+            else:
+                spec.scope = "all"
+            normalized_repos.append(spec.normalized())
+
+        # Optional fields
+        data: Dict[str, Any] = {
+            "searchname": name,
+            "owner": owner_id,
+            "risk": risk,
+            "aggregate": aggregate,
+            "condition_option": cond_opt,
+            "condition_value": cond_val,
+            "limit": limit,
+            "repos": normalized_repos,
+        }
+        data.update(timerange)
+
+        # Optional mapping helpers
+        q = (row.get("settings.extra_config.query") or row.get("settings.livesearch_data.query") or "").strip()
+        if q:
+            data["query"] = q
+        desc = (row.get("settings.description") or "").strip()
+        if desc:
+            data["description"] = desc
+        log_src = row.get("settings.log_source")
+        if isinstance(log_src, (list, tuple)):
+            data["log_source"] = list(log_src)
+        assigned = self.resolve_assigned_user_id(row)
+        if assigned:
+            data["assigned_to"] = assigned
+        attack_ids = self.resolve_attack_tags(row)
+        if attack_ids:
+            data["attack_tag"] = attack_ids
+        meta = row.get("settings.metadata")
+        if isinstance(meta, list):
+            data["metadata"] = meta
+        if self._truthy(row.get("settings.is_context_template_enabled")):
+            data["apply_jinja_template"] = "on"
+        ctx_tpl = (row.get("settings.context_template") or "").strip()
+        if ctx_tpl:
+            data["alert_context_template"] = ctx_tpl
+        if self._truthy(row.get("settings.flush_on_trigger")):
+            data["flush_on_trigger"] = "on"
+        if self._truthy(row.get("settings.throttling_enabled")):
+            data["throttling_enabled"] = "on"
+            field = (row.get("settings.throttling_field") or "").strip()
+            trange = row.get("settings.throttling_time_range")
+            if not field or not isinstance(trange, (int, float)):
+                return self._report_skip(name, "Throttling enabled but field/time_range missing")
+            data["throttling_field"] = field
+            data["throttling_time_range"] = int(trange)
+        s_int = row.get("settings.livesearch_data.search_interval_minute")
+        if isinstance(s_int, (int, float)) and s_int > 0:
+            data["search_interval_minute"] = int(s_int)
+
+        # Activation desired state
+        active_target = self._truthy(row.get("settings.active"))
+
+        # Diff against existing
+        ex = existing_by_name.get(name)
+        if not ex:
+            action = "create"
+            rule_id = None
+        else:
+            rule_id = ex.get("id") or ex.get("_id") or ex.get("uuid")
+            if self._is_identical(ex, data):
+                return self._report_result(name, "noop", "Identical subset", status="—")
+            action = "update"
 
         return {
-            "risk": _s(get_any(existing_obj, "risk")).lower(),
-            "repos": _csv(repos),
-            "aggregate": _s(get_any(existing_obj, "aggregate")).lower(),
-            "condition_option": _s(get_any(existing_obj, "condition_option")).lower(),
-            "condition_value": int(_int_or_none(get_any(existing_obj, "condition_value")) or 0),
-            "limit": int(_int_or_none(get_any(existing_obj, "limit")) or 0),
-            "timerange_key": "day" if tr_d else ("hour" if tr_h else "minute"),
-            "timerange_value": tr_d if tr_d else (tr_h if tr_h else tr_m or 0),
-            "query": _s(get_any(existing_obj, "query")),
-            "description": _s(get_any(existing_obj, "description")),
-            "flush_on_trigger": bool(get_any(existing_obj, "flush_on_trigger") in {"on", True}),
-            "search_interval_minute": _int_or_none(get_any(existing_obj, "search_interval_minute")) or 0,
-            "throttling_enabled": bool(get_any(existing_obj, "throttling_enabled") in {"on", True}),
-            "throttling_field": _s(get_any(existing_obj, "throttling_field")),
-            "throttling_time_range": _int_or_none(get_any(existing_obj, "throttling_time_range")) or 0,
-            "metadata": metadata_csv,
-            "log_source": _csv(log_source),
-            "context_template": _s(get_any(existing_obj, "alert_context_template", "context_template")),
+            "siem": self.ctx.siem_id,
+            "node": self.ctx.node_name,
+            "name": name,
+            "payload": data,
+            "active_target": active_target,
+            "existing_id": rule_id,
+            "result": action,  # provisional: create/update
+            "action": "Not applied yet",
+            "status": "Pending",
+            "error": "—",
         }
 
-    # --- logging helpers for API/monitor ----------------------------------
+    # ----------------------------- Apply & Report --------------------------- #
 
-    def _log_api_start(self, method: str, path: str, action: str, tenant_or_pool: str, node: NodeRef, rule: str, payload: Dict[str, Any]) -> None:
-        log.info("event=http.request method=%s path=%s action=%s tenant_or_pool=%s node=%s|%s rule=%s %s",
-                 method, path, action, tenant_or_pool, getattr(node, "name", node.id), node.id, rule, _payload_keys_summary(_redact_for_log(payload)))
-        log.debug("payload=%s", json.dumps(_redact_for_log(payload))[:1024])
-
-    def _log_api_ok(self, method: str, path: str, action: str, tenant_or_pool: str, node: NodeRef, rule: str) -> None:
-        log.info("event=http.ok method=%s path=%s action=%s tenant_or_pool=%s node=%s|%s rule=%s",
-                 method, path, action, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
-
-    def _log_monitor_start(self, request_id: str, url: str, tenant_or_pool: str, node: NodeRef, rule: str) -> None:
-        log.info("event=monitor.start request_id=%s url=%s tenant_or_pool=%s node=%s|%s rule=%s",
-                 request_id, url, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
-
-    def _log_monitor_done(self, request_id: str, tenant_or_pool: str, node: NodeRef, rule: str, items: Optional[int] = None) -> None:
-        log.info("event=monitor.done request_id=%s items=%s tenant_or_pool=%s node=%s|%s rule=%s",
-                 request_id, (items if items is not None else "-"), tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
-
-    def _log_monitor_fail(self, request_id: str, tenant_or_pool: str, node: NodeRef, rule: str, reason: str) -> None:
-        log.warning("event=monitor.fail request_id=%s reason=%s tenant_or_pool=%s node=%s|%s rule=%s",
-                    request_id, reason, tenant_or_pool, getattr(node, "name", node.id), node.id, rule)
-
-    # --- fetch existing ---------------------------------------------------
-
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:  # type: ignore[override]
-        """
-        List existing rules for a node via Fetch* endpoints (monitorized),
-        returning {searchname -> obj}. AlertRules do not offer a direct GET list.
-        """
-        def _adapt_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-            if not isinstance(payload, dict):
-                return []
-            for key in ("result", "results", "data", "rules", "items", "list"):
-                val = payload.get(key)
-                if isinstance(val, list):
-                    return [x for x in val if isinstance(x, dict)]
-                if isinstance(val, dict) and isinstance(val.get("items"), list):
-                    return [x for x in val["items"] if isinstance(x, dict)]
-            resp = payload.get("response")
-            if isinstance(resp, dict):
-                val = resp.get("result") or resp.get("results")
-                if isinstance(val, list):
-                    return [x for x in val if isinstance(x, dict)]
-            return []
-
-        def _monitorize(res: Dict[str, Any], tenant_or_pool: str) -> Dict[str, Any]:
-            job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
-            mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
-            if isinstance(job_id, str) and job_id:
-                self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, "<fetch>")
-                ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                if ok:
-                    self._log_monitor_done(job_id, tenant_or_pool, node, "<fetch>")
-                    return data
-                self._log_monitor_fail(job_id, tenant_or_pool, node, "<fetch>", "job monitor failed")
-                return {}
-            if isinstance(mon_path, str) and mon_path:
-                self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, "<fetch>")
-                ok, data = client.monitor_job_url(mon_path)
-                if ok:
-                    self._log_monitor_done("<url>", tenant_or_pool, node, "<fetch>")
-                    return data
-                self._log_monitor_fail("<url>", tenant_or_pool, node, "<fetch>", "url monitor failed")
-                return {}
-            return res
-
-        out: Dict[str, Dict[str, Any]] = {}
-        node_t = f"{getattr(node, 'name', node.id)}|{node.id}"
-
-        for sub in (
-            f"{self.RESOURCE}/MyAlertRules/fetch",
-            f"{self.RESOURCE}/SharedAlertRules/fetch",
-            f"{self.RESOURCE}/VendorAlertRules/fetch",
-        ):
-            path = client.configapi(pool_uuid, node.id, sub)
+    def _apply_plan(self, plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for item in plan:
+            if item.get("result") in {"noop", "skip"}:
+                out.append(item)
+                continue
+            name = item["name"]
+            data = item["payload"]
+            active_target: bool = bool(item.get("active_target"))
             try:
-                self._log_api_start("POST", path, "fetch", pool_uuid, node, "<fetch>", {"data": {}})
-                res = client.post_json(path, {"data": {}})
-                self._log_api_ok("POST", path, "fetch", pool_uuid, node, "<fetch>")
-                data = _monitorize(res, pool_uuid)
-                items = _adapt_list(data)
-                for it in items:
-                    key = _s(it.get("searchname") or it.get("name"))
-                    if key:
-                        out[key] = {"id": _s(it.get("id") or it.get("_id")), **it}
+                if item.get("result") == "create":
+                    resp = self._create_rule(data)
+                    rule_id = resp.get("id") or resp.get("_id") or resp.get("uuid")
+                    item["existing_id"] = rule_id
+                    item["action"] = "Created"
+                else:
+                    rule_id = item.get("existing_id")
+                    if not rule_id:
+                        raise RuntimeError("Missing existing rule id for update")
+                    self._update_rule(rule_id, data)
+                    item["action"] = "Updated"
+                # converge activation
+                if rule_id:
+                    self._converge_activation(rule_id, active_target)
+                item["status"] = "OK"
+                item["result"] = item["result"]  # keep create/update
             except Exception as exc:
-                log.warning("fetch_existing: POST %s failed on %s: %s", sub, node_t, exc)
-
-        log.info("fetch_existing: found %d alert rules [node=%s]", len(out), node_t)
+                LOG.exception("alert_rules: apply failed for '%s'", name)
+                item["status"] = "Failed"
+                item["error"] = str(exc)
+                item["result"] = "error"
+            out.append(item)
         return out
 
-    # --- payload builders --------------------------------------------------
+    def _converge_activation(self, rule_id: str, target_active: bool) -> None:
+        if target_active is None:
+            return
+        # We use fire-and-forget; if idempotence is needed, fetch-or-passively ignore errors
+        try:
+            if target_active:
+                self._activate_rule(rule_id)
+            else:
+                self._deactivate_rule(rule_id)
+        except Exception:
+            LOG.warning("alert_rules: activation convergence failed for id=%s", rule_id)
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
-        d: _DesiredAlert = desired_row["desired"]
-        payload: Dict[str, Any] = {
-            "searchname": d.name,
-            "owner": d.owner,
-            "risk": d.risk,
-            "repos": d.repos,
-            "aggregate": d.aggregate,
-            "condition_option": d.condition_option,
-            "condition_value": d.condition_value,
-            "limit": d.limit,
-            "query": d.query,
-            "description": d.description,
+    # ------------------------------ Utilities ------------------------------- #
+
+    def _report_skip(self, name: str, reason: str) -> Dict[str, Any]:
+        return {
+            "siem": self.ctx.siem_id,
+            "node": self.ctx.node_name,
+            "name": name,
+            "result": "skip",
+            "action": reason,
+            "status": "—",
+            "error": "—",
         }
-        if d.timerange_day:
-            payload["timerange_day"] = d.timerange_day
-        elif d.timerange_hour:
-            payload["timerange_hour"] = d.timerange_hour
-        else:
-            payload["timerange_minute"] = d.timerange_minute or 1
-        if d.search_interval_minute:
-            payload["search_interval_minute"] = d.search_interval_minute
-        if d.flush_on_trigger:
-            payload["flush_on_trigger"] = "on"
-        if d.throttling_enabled:
-            payload["throttling_enabled"] = "on"
-            if d.throttling_field:
-                payload["throttling_field"] = d.throttling_field
-            if d.throttling_time_range:
-                payload["throttling_time_range"] = d.throttling_time_range
-        if d.metadata:
-            payload["metadata"] = [{"field": k, "value": v} for (k, v) in d.metadata]
-        if d.log_source:
-            payload["log_source"] = d.log_source
-        if d.context_template:
-            payload["alert_context_template"] = d.context_template
-        return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:  # type: ignore[override]
-        return self.build_payload_create(desired_row)
-
-    # --- apply ------------------------------------------------------------
-
-    def apply(  # type: ignore[override]
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-        decision,
-        existing_id: Optional[str],
-    ) -> Dict[str, Any]:
-        """
-        Execute CREATE/UPDATE and then post-apply:
-        - state (activate/deactivate),
-        - sharing (share/unshare),
-        - notifications (per type).
-        All API calls are logged; all POST/PUT bodies are wrapped in {"data": ...}.
-        """
-        desired: _DesiredAlert = decision.desired["desired"]
-        monitor_branch = None
-        rule_name = desired.name
-        tenant_or_pool = pool_uuid  # label used in logs
-
-        # ------------ core create/update
-        try:
-            if decision.op == "CREATE":
-                path = client.configapi(pool_uuid, node.id, self.RESOURCE)
-                body = {"data": self.build_payload_create(decision.desired)}
-                self._log_api_start("POST", path, "create", tenant_or_pool, node, rule_name, body)
-                res = client.post_json(path, body)
-                self._log_api_ok("POST", path, "create", tenant_or_pool, node, rule_name)
-                job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
-                mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
-                if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-                    ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                    monitor_branch = f"job:{job_id}"
-                    if not ok:
-                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "create monitor failed")
-                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": f"Create failed: {data.get('message')}"}
-                    self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-                    created = data.get("response", {}).get("result") or data.get("result") or {}
-                elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-                    ok, data = client.monitor_job_url(mon_path)
-                    monitor_branch = "<url>"
-                    if not ok:
-                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "create monitor failed")
-                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": "Create failed via monitor url"}
-                    self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-                    created = data.get("response", {}).get("result") or data.get("result") or {}
-                else:
-                    created = res.get("result") or res
-
-                rule_id = _s(created.get("id") or created.get("_id"))
-                if not rule_id:
-                    # fallback: re-fetch by name
-                    exist_map = self.fetch_existing(client, pool_uuid, node)
-                    rule = exist_map.get(rule_name)
-                    rule_id = rule and _s(rule.get("id"))
-                    if not rule_id:
-                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": "Create succeeded but rule id missing"}
-
-            elif decision.op == "UPDATE":
-                if not existing_id:
-                    return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                            "error": "Update planned but no existing id"}
-                path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{existing_id}")
-                body = {"data": self.build_payload_update(decision.desired, decision.existing or {})}
-                self._log_api_start("PUT", path, "update", tenant_or_pool, node, rule_name, body)
-                res = client.put_json(path, body)
-                self._log_api_ok("PUT", path, "update", tenant_or_pool, node, rule_name)
-                job_id = client._extract_job_id(res)  # type: ignore[attr-defined]
-                mon_path = client._extract_monitor_path(res)  # type: ignore[attr-defined]
-                if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-                    ok, data = client.monitor_job(pool_uuid, node.id, job_id)
-                    monitor_branch = f"job:{job_id}"
-                    if not ok:
-                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "update monitor failed")
-                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": f"Update failed: {data.get('message')}"}
-                    self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-                elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-                    ok, _data = client.monitor_job_url(mon_path)
-                    monitor_branch = "<url>"
-                    if not ok:
-                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "update monitor failed")
-                        return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch,
-                                "error": "Update failed via monitor url"}
-                rule_id = existing_id
-
-            elif decision.op in ("NOOP", "SKIP"):
-                return {"status": "Skipped", "monitor_ok": True, "monitor_branch": monitor_branch}
-
-            else:
-                return {"status": "Failed", "error": f"Unknown decision {decision.op}"}
-
-        except Exception as exc:
-            log.error("apply core %s failed: %s", decision.op, exc)
-            return {"status": "Failed", "monitor_ok": False, "monitor_branch": monitor_branch, "error": str(exc)}
-
-        # ----------- post-apply (state, sharing, notifications)
-
-        # 1) state (activate/deactivate)
-        try:
-            state_action = "activate" if desired.active else "deactivate"
-            state_path = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/{state_action}")
-            self._log_api_start("POST", state_path, f"state.{state_action}", tenant_or_pool, node, rule_name, {"data": {}})
-            resp = client.post_json(state_path, {"data": {}})
-            self._log_api_ok("POST", state_path, f"state.{state_action}", tenant_or_pool, node, rule_name)
-            job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-            mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-            if job_id:
-                self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-                ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
-                if not ok:
-                    self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "state monitor failed")
-            elif mon_path:
-                self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-                ok, _data = client.monitor_job_url(mon_path)
-                if not ok:
-                    self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "state monitor failed")
-            log.info("event=state.%s rule_id=%s node=%s|%s", state_action, rule_id, getattr(node, "name", node.id), node.id)
-        except Exception as exc:
-            log.warning("state sync failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
-
-        # 2) sharing (RBAC)
-        try:
-            rbac_cfg = self._make_rbac_config(desired.visible_to_groups, desired.visible_to_users)
-            if rbac_cfg:
-                spath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/share")
-                body = {"data": {"rbac_config": rbac_cfg}}
-                self._log_api_start("POST", spath, "share", tenant_or_pool, node, rule_name, body)
-                resp = client.post_json(spath, body)
-                self._log_api_ok("POST", spath, "share", tenant_or_pool, node, rule_name)
-                job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-                mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-                if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-                    ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
-                    if not ok:
-                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "share monitor failed")
-                elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-                    ok, _data = client.monitor_job_url(mon_path)
-                    if not ok:
-                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "share monitor failed")
-                log.info("event=share.apply rule_id=%s groups=%d users=%d", rule_id, len(desired.visible_to_groups), len(desired.visible_to_users))
-            else:
-                upath = client.configapi(pool_uuid, node.id, f"{self.RESOURCE}/{rule_id}/unshare")
-                self._log_api_start("POST", upath, "unshare", tenant_or_pool, node, rule_name, {"data": {}})
-                resp = client.post_json(upath, {"data": {}})
-                self._log_api_ok("POST", upath, "unshare", tenant_or_pool, node, rule_name)
-                job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-                mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-                if job_id:
-                    self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-                    ok, _data = client.monitor_job(pool_uuid, node.id, job_id)
-                    if not ok:
-                        self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "unshare monitor failed")
-                elif mon_path:
-                    self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-                    ok, _data = client.monitor_job_url(mon_path)
-                    if not ok:
-                        self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "unshare monitor failed")
-                log.info("event=unshare.apply rule_id=%s", rule_id)
-        except Exception as exc:
-            log.warning("share/unshare failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
-
-        # 3) notifications (per type)
-        try:
-            self._apply_notifications(client, pool_uuid, node, rule_id, desired.notifications, rule_name, tenant_or_pool)
-        except Exception as exc:
-            log.warning("notifications apply failed: rule=%s id=%s err=%s", rule_name, rule_id, exc)
-
-        return {"status": "Success", "monitor_ok": True, "monitor_branch": monitor_branch}
-
-    # --- RBAC -------------------------------------------------------------
+    def _report_result(self, name: str, result: str, action: str, status: str = "—") -> Dict[str, Any]:
+        return {
+            "siem": self.ctx.siem_id,
+            "node": self.ctx.node_name,
+            "name": name,
+            "result": result,
+            "action": action,
+            "status": status,
+            "error": "—",
+        }
 
     @staticmethod
-    def _make_rbac_config(groups: List[str], users: List[str]) -> Dict[str, Any]:
-        cfg: Dict[str, Any] = {}
-        if groups:
-            cfg["group_permissions"] = [{"group_id": g, "permission": "READ"} for g in groups]
-        if users:
-            cfg["user_permissions"] = [{"user_id": u, "permission": "READ"} for u in users]
-        return cfg
+    def _require_str(row: pd.Series, col: str, name: str) -> str:
+        val = (row.get(col) or "").strip()
+        if not val:
+            raise ValueError(f"Row '{name}': missing required column '{col}'")
+        return val
 
-    # --- notifications ----------------------------------------------------
+    @staticmethod
+    def _require_int(row: pd.Series, col: str, name: str, min_value: Optional[int] = None) -> int:
+        raw = row.get(col)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            raise ValueError(f"Row '{name}': missing required integer '{col}'")
+        try:
+            val = int(raw)
+        except Exception as exc:  # pragma: no cover
+            raise ValueError(f"Row '{name}': invalid integer in '{col}': {raw}") from exc
+        if min_value is not None and val < min_value:
+            raise ValueError(f"Row '{name}': '{col}' must be >= {min_value}")
+        return val
 
-    def _apply_notifications(
-        self,
-        client: DirectorClient,
-        pool: str,
-        node: NodeRef,
-        rule_id: str,
-        items: List[Dict[str, Any]],
-        rule_name: str,
-        tenant_or_pool: str,
-    ) -> None:
-        for item in items or []:
-            typ = _s(item.get("type")).lower()
-            if not typ:
-                continue
-            if typ == "email":
-                self._post_email_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            elif typ == "syslog":
-                self._post_syslog_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            elif typ == "http":
-                self._post_http_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            elif typ == "sms":
-                self._post_sms_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            elif typ == "snmp":
-                self._post_snmp_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            elif typ == "ssh":
-                self._post_ssh_notification(client, pool, node, rule_id, item, rule_name, tenant_or_pool)
-            else:
-                log.warning("Unknown notification type: %s (rule=%s id=%s)", typ, rule_name, rule_id)
+    @staticmethod
+    def _truthy(v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        return s in {"1", "true", "on", "yes", "y"}
 
-    def _post_email_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_email": _as_bool_flag_on(d.get("notify_email")) or "on",
-            "email_emails": d.get("email_emails") or d.get("emails") or [],
-        }
-        for k in (
-            "subject", "email_template", "email_threshold_option", "email_threshold_value",
-            "dispatch_option", "simple_view", "logo_enable", "b64_logo", "link_disable",
-        ):
-            if k in d and not _is_blank(d[k]):
-                payload[k] = d[k]
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/EmailNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.email", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.email", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify email monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify email monitor failed")
+    def _pick_timerange(self, row: pd.Series) -> Dict[str, int]:
+        # prefer explicit minute/hour/day
+        minute = row.get("settings.livesearch_data.timerange_minute")
+        hour = row.get("settings.livesearch_data.timerange_hour")
+        day = row.get("settings.livesearch_data.timerange_day")
+        if isinstance(minute, (int, float)) and minute > 0:
+            return {"timerange_minute": int(minute)}
+        if isinstance(hour, (int, float)) and hour > 0:
+            return {"timerange_hour": int(hour)}
+        if isinstance(day, (int, float)) and day > 0:
+            return {"timerange_day": int(day)}
+        # fallback: seconds → minutes (ceil)
+        sec = row.get("settings.livesearch_data.timerange_second") or row.get("settings.time_range_seconds")
+        if isinstance(sec, (int, float)) and sec > 0:
+            minutes = math.ceil(float(sec) / 60.0)
+            return {"timerange_minute": int(minutes)}
+        return {}
 
-    def _post_syslog_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_syslog": _as_bool_flag_on(d.get("notify_syslog")) or "on",
-            "server": d.get("server"),
-            "port": _int_or_none(d.get("port")) or 514,
-            "protocol": d.get("protocol") or "UDP",
-            "facility": _int_or_none(d.get("facility")) or 13,
-            "severity": _int_or_none(d.get("severity")) or 5,
-            "message": d.get("message") or "",
-            "split_rows": bool(d.get("split_rows")),
-        }
-        if d.get("threshold_option"):
-            payload["threshold_option"] = d["threshold_option"]
-        if d.get("threshold_value") is not None:
-            payload["threshold_value"] = _int_or_none(d.get("threshold_value")) or 0
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SyslogNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.syslog", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.syslog", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify syslog monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify syslog monitor failed")
+    def _parse_repo_specs(self, value: Any) -> List[RepoSpec]:
+        """Parse settings.repos according to the distributed spec.
 
-    def _post_http_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_http": _as_bool_flag_on(d.get("notify_http")) or "on",
-            "http_url": d.get("http_url"),
-            "http_request_type": d.get("http_request_type") or "POST",
-            "http_body": d.get("http_body") or "",
-            "http_header": d.get("http_header") or {},
-            "http_querystring": d.get("http_querystring") or "",
-        }
-        if d.get("http_threshold_option"):
-            payload["http_threshold_option"] = d["http_threshold_option"]
-        if d.get("http_threshold_value") is not None:
-            payload["http_threshold_value"] = _int_or_none(d.get("http_threshold_value")) or 0
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/HTTPNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.http", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.http", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify http monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify http monitor failed")
-
-    def _post_sms_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_sms": _as_bool_flag_on(d.get("notify_sms")) or "on",
-            "sms_server": d.get("sms_server"),
-            "sms_port": _int_or_none(d.get("sms_port")) or 25,
-            "sms_sender": d.get("sms_sender") or "",
-            "sms_password": d.get("sms_password") or "",
-            "sms_receivers": d.get("sms_receivers") or [],
-            "sms_body": d.get("sms_body") or "",
-        }
-        if d.get("sms_threshold_option"):
-            payload["sms_threshold_option"] = d["sms_threshold_option"]
-        if d.get("sms_threshold_value") is not None:
-            payload["sms_threshold_value"] = _int_or_none(d.get("sms_threshold_value")) or 0
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SMSNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.sms", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.sms", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify sms monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify sms monitor failed")
-
-    def _post_snmp_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_snmp": _as_bool_flag_on(d.get("notify_snmp")) or "on",
-            "snmp_agent": d.get("snmp_agent"),
-        }
-        for k in ("snmp_version", "snmp_security", "snmp_community", "snmp_user", "snmp_auth", "snmp_priv"):
-            if k in d and not _is_blank(d[k]):
-                payload[k] = d[k]
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SNMPNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.snmp", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.snmp", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify snmp monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify snmp monitor failed")
-
-    def _post_ssh_notification(
-        self, client: DirectorClient, pool: str, node: NodeRef, rule_id: str, d: Dict[str, Any], rule_name: str, tenant_or_pool: str
-    ) -> None:
-        payload: Dict[str, Any] = {
-            "notify_ssh": _as_bool_flag_on(d.get("notify_ssh")) or "on",
-            "ssh_server": d.get("ssh_server"),
-            "ssh_port": _int_or_none(d.get("ssh_port")) or 22,
-            "ssh_auth_type": d.get("ssh_auth_type") or "password",
-            "ssh_username": d.get("ssh_username") or "",
-        }
-        if payload["ssh_auth_type"] == "password":
-            payload["ssh_auth_password"] = d.get("ssh_auth_password") or d.get("ssh_password") or ""
+        Accepts JSON array string, Python list, or delimited string with ',', ';', '|', or newlines.
+        Items are in the form "ip:port[:old_repo_name]".
+        """
+        if value is None:
+            return []
+        items: List[str]
+        if isinstance(value, list):
+            items = [str(x).strip() for x in value if str(x).strip()]
         else:
-            payload["ssh_key"] = d.get("ssh_key") or ""
-        if d.get("ssh_command"):
-            payload["ssh_command"] = d["ssh_command"]
-        if d.get("ssh_threshold_option"):
-            payload["ssh_threshold_option"] = d["ssh_threshold_option"]
-        if d.get("ssh_threshold_value") is not None:
-            payload["ssh_threshold_value"] = _int_or_none(d.get("ssh_threshold_value")) or 0
+            s = str(value).strip()
+            # Try JSON array first
+            try:
+                maybe = json.loads(s)
+                if isinstance(maybe, list):
+                    items = [str(x).strip() for x in maybe if str(x).strip()]
+                else:
+                    items = [s]
+            except Exception:
+                # Fallback: split
+                for sep in ["\n", "|", ";", ","]:
+                    if sep in s:
+                        items = [p.strip() for p in s.split(sep) if p.strip()]
+                        break
+                else:
+                    items = [s]
+        specs: List[RepoSpec] = []
+        for it in items:
+            ip, port, repo_old = self._split_repo_token(it)
+            specs.append(RepoSpec(backend_ip=ip, port=port, repo_old=repo_old))
+        return specs
 
-        path = client.configapi(pool, node.id, f"{self.RESOURCE}/{rule_id}/SSHNotification")
-        body = {"data": payload}
-        self._log_api_start("POST", path, "notify.ssh", tenant_or_pool, node, rule_name, body)
-        resp = client.post_json(path, body)
-        self._log_api_ok("POST", path, "notify.ssh", tenant_or_pool, node, rule_name)
-        job_id = client._extract_job_id(resp)  # type: ignore[attr-defined]
-        mon_path = client._extract_monitor_path(resp)  # type: ignore[attr-defined]
-        if job_id:
-            self._log_monitor_start(job_id, f"(job:{job_id})", tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job(pool, node.id, job_id)
-            if ok:
-                self._log_monitor_done(job_id, tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail(job_id, tenant_or_pool, node, rule_name, "notify ssh monitor failed")
-        elif mon_path:
-            self._log_monitor_start("<url>", mon_path, tenant_or_pool, node, rule_name)
-            ok, _ = client.monitor_job_url(mon_path)
-            if ok:
-                self._log_monitor_done("<url>", tenant_or_pool, node, rule_name)
-            else:
-                self._log_monitor_fail("<url>", tenant_or_pool, node, rule_name, "notify ssh monitor failed")
+    @staticmethod
+    def _split_repo_token(token: str) -> Tuple[str, str, str]:
+        # Accept either ip:port:repo or ip:port/repo (legacy)
+        tok = token.strip()
+        if "/" in tok and tok.count(":") == 1:
+            left, repo = tok.split("/", 1)
+            ip, port = left.split(":", 1)
+            return ip.strip(), port.strip(), repo.strip()
+        parts = tok.split(":")
+        if len(parts) >= 3:
+            return parts[0].strip(), parts[1].strip(), parts[2].strip()
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip(), ""
+        if len(parts) == 1:
+            return parts[0].strip(), "", ""
+        return "", "", ""
+
+    def _is_identical(self, existing: Dict[str, Any], desired: Dict[str, Any]) -> bool:
+        """Compare only the managed subset of fields for idempotence.
+
+        We ignore system-managed fields and anything out-of-scope (e.g., sharing, notifications).
+        """
+        # Build comparable dicts
+        def pick(d: Dict[str, Any]) -> Dict[str, Any]:
+            keys = {
+                "searchname",
+                "owner",
+                "risk",
+                "repos",
+                "aggregate",
+                "condition_option",
+                "condition_value",
+                "limit",
+                "timerange_minute",
+                "timerange_hour",
+                "timerange_day",
+                "query",
+                "description",
+                "log_source",
+                "assigned_to",
+                "attack_tag",
+                "metadata",
+                "apply_jinja_template",
+                "alert_context_template",
+                "flush_on_trigger",
+                "throttling_enabled",
+                "throttling_field",
+                "throttling_time_range",
+                "search_interval_minute",
+            }
+            return {k: d.get(k) for k in keys if k in d}
+
+        a = pick(existing)
+        b = pick(desired)
+        # repos can be returned unsorted; compare as sets while keeping determinism for other fields
+        def normalize_repos(x: Any) -> List[str]:
+            if isinstance(x, list):
+                return sorted(str(i) for i in x)
+            return []
+        a_repos = normalize_repos(a.pop("repos", None))
+        b_repos = normalize_repos(b.pop("repos", None))
+        return a == b and a_repos == b_repos
+
+
+# ------------------------------ Registry hook ------------------------------ #
+# If your project uses an automatic registry, ensure this class is exposed.
+# For example, lp_tenant_importer_v2/importers/__init__.py should import this
+# symbol or register it in the dynamic registry.
+
+__all__ = ["AlertRulesImporter"]

@@ -26,6 +26,7 @@ python -m lp_tenant_importer_v2.main \
 - import-devices
 - import-syslog-collectors
 - import-alert-rules
+- list-alert-users
   
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
@@ -40,7 +41,7 @@ python -m lp_tenant_importer_v2.main \
   --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
-  import-alert-rules
+  list-alert-users
 ```
 
 ### Vérif rapide

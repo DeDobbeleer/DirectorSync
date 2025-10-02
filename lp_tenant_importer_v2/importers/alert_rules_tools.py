@@ -1,137 +1,116 @@
-# lp_tenant_importer_v2/importers/alert_rules_tools.py
+# lp_tenant_importer_v2/importers/alert_rules_report.py
 from __future__ import annotations
 
-import argparse
-import json
-import sys
-from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
-
+from typing import Any, Dict, Iterable, List, Tuple
 import pandas as pd
 
-from lp_tenant_importer_v2.core.logging_utils import get_logger
+from .base import BaseImporter
+from ..core.config import NodeRef
+from ..core.logging_utils import get_logger
 
-LOG = get_logger(__name__)
-
-# ---- helpers ---------------------------------------------------------------
-
-def _pick_sheet(xlsx: Path) -> str:
-    """Pick the AlertRules sheet (robust to naming variants)."""
-    xf = pd.ExcelFile(xlsx)
-    # perfect matches first
-    candidates = [s for s in xf.sheet_names if s.strip().lower() in {
-        "alertrules", "alert_rules", "alert rules"
-    }]
-    if candidates:
-        return candidates[0]
-    # fuzzy: any sheet that contains 'alert' and 'rule'
-    low = [(s, s.lower()) for s in xf.sheet_names]
-    for s, ls in low:
-        if "alert" in ls and "rule" in ls:
-            return s
-    # fallback: first sheet
-    return xf.sheet_names[0]
+log = get_logger(__name__)
 
 
-_COL_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "name": ("name", "alert name", "rule name", "alert_name", "rule"),
-    "owner": ("owner", "owned by", "rule_owner"),
-    "assign_to": ("assign_to", "assign to", "assigned_to", "assigned to", "assignto"),
-    "visible_to_users": (
-        "visible_to_users",
-        "visible for users",
-        "visible_for_users",
-        "visible users",
-        "visible",
-        "visibility",
-    ),
-}
-
-def _resolve_columns(df: pd.DataFrame) -> Dict[str, str]:
-    """Map canonical -> actual dataframe column names (case/space/underscore insensitive)."""
-    cols_norm = {c: c.strip().lower().replace(" ", "_") for c in df.columns}
-    by_norm = {v: k for k, v in cols_norm.items()}
-    resolved: Dict[str, str] = {}
-    for canon, aliases in _COL_ALIASES.items():
-        for alias in aliases:
-            if alias in by_norm:
-                resolved[canon] = by_norm[alias]
-                break
-    missing = [k for k in ("name", "owner", "assign_to", "visible_to_users") if k not in resolved]
-    if missing:
-        raise KeyError(
-            f"Missing required columns in sheet: {', '.join(missing)}. "
-            f"Present columns={list(df.columns)}"
-        )
-    return resolved
-
-
-def _to_markdown(rows: List[Dict[str, str]]) -> str:
-    headers = ["Alert Name", "Owner", "Assign_to", "Visible_to_Users"]
-    out = ["| " + " | ".join(headers) + " |",
-           "| " + " | ".join(["---"] * len(headers)) + " |"]
-    for r in rows:
-        out.append("| " + " | ".join([
-            str(r.get("name", "")) or "",
-            str(r.get("owner", "")) or "",
-            str(r.get("assign_to", "")) or "",
-            str(r.get("visible_to_users", "")) or "",
-        ]) + " |")
-    return "\n".join(out)
-
-
-# ---- command ---------------------------------------------------------------
-
-def cmd_list_alert_user_visibility(args: argparse.Namespace, env: dict, cfg: dict) -> int:
+class AlertRulesXlsxLister(BaseImporter):
     """
-    List AlertRules [Name, Owner, Assign_to, Visible_to_Users] from the XLSX only.
-    - No Director API calls
-    - Output: table (stdout) | md | csv | json (stdout or --output)
+    Report-only importer that reads the 'AlertRules' sheet in the XLSX and
+    emits rows showing Name / Owner / Assign_to / Visible_to_Users.
+    No API calls are made; this class simply formats a report.
     """
-    xlsx_path = Path(args.xlsx).expanduser()
-    if not xlsx_path.exists():
-        LOG.error("XLSX not found: %s", xlsx_path)
-        return 2
 
-    fmt = (getattr(args, "format", None) or "table").lower()
-    out_file = getattr(args, "output", None)
-    sheet = getattr(args, "sheet", None) or _pick_sheet(xlsx_path)
+    # Nom logique de la ressource (juste pour les logs)
+    resource_name: str = "alert_rules_report"
 
-    LOG.info("listing.alert_rules.start xlsx=%s sheet=%s format=%s", xlsx_path, sheet, fmt)
+    # On lit la feuille des alertes (comme les autres importers d'alert rules)
+    sheet_names: Tuple[str, ...] = ("AlertRules",)
 
-    df = pd.read_excel(xlsx_path, sheet_name=sheet, dtype=str).fillna("")
-    colmap = _resolve_columns(df)
+    # On ne force pas de colonnes obligatoires ici: c'est un rapport tolérant
+    required_columns: Tuple[str, ...] = tuple()
 
-    # Normalize output rows
-    rows: List[Dict[str, str]] = []
-    for _, r in df.iterrows():
-        rows.append({
-            "name": r[colmap["name"]].strip(),
-            "owner": r[colmap["owner"]].strip(),
-            "assign_to": r[colmap["assign_to"]].strip(),
-            "visible_to_users": r[colmap["visible_to_users"]].strip(),
-        })
+    def run_for_nodes(
+        self,
+        client: Any,
+        pool_uuid: str,
+        nodes: Iterable[NodeRef],
+        xlsx_path,
+        dry_run: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Contrairement aux importers « CRUD », on ne contacte pas le Director.
+        On lit l'XLSX et on génère des lignes prêtes pour utils.reporting.print_rows.
+        """
+        # Charge toutes les feuilles via le helper de BaseImporter
+        sheets = self.load_xlsx(xlsx_path)
+        sheet_name = self.sheet_names[0]
+        if sheet_name not in sheets:
+            raise ValueError(f"Sheet '{sheet_name}' not found in {xlsx_path}")
 
-    # emit
-    payload = None
-    if fmt in ("md", "markdown", "table"):
-        payload = _to_markdown(rows)
-    elif fmt == "csv":
-        payload = "Alert Name,Owner,Assign_to,Visible_to_Users\n" + "\n".join(
-            f'{r["name"]},{r["owner"]},{r["assign_to"]},{r["visible_to_users"]}' for r in rows
+        df = sheets[sheet_name].copy()
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Alias tolérants aux variations de casse / espaces / underscores
+        aliases = {
+            "name": ["Name", "Alert Name", "Rule", "Rule Name"],
+            "owner": ["Owner"],
+            "assign_to": ["Assign_to", "Assigned_to", "Assign To"],
+            "visible_to_users": ["Visible_to_users", "Visible_to_Users", "Visible To Users", "Visible_for", "visible_for"],
+        }
+
+        def pick_col(logical: str) -> str | None:
+            want = [s.lower().replace(" ", "_") for s in aliases.get(logical, [])]
+            for real in df.columns:
+                norm = real.lower().replace(" ", "_")
+                if norm in want:
+                    return real
+            return None
+
+        c_name = pick_col("name")
+        c_owner = pick_col("owner")
+        c_assign = pick_col("assign_to")
+        c_vis = pick_col("visible_to_users")
+
+        rows: List[Dict[str, Any]] = []
+        nodes_list = list(nodes)
+        for node in nodes_list:
+            node_tag = f"{node.name}|{node.id}"
+            for _, r in df.iterrows():
+                name = str(r.get(c_name, "")).strip() if c_name else ""
+                if not name:
+                    continue  # skip lignes vides
+
+                owner = (str(r.get(c_owner, "")).strip() if c_owner else "")
+                assign_to = (str(r.get(c_assign, "")).strip() if c_assign else "")
+
+                raw_vis = r.get(c_vis, "")
+                if isinstance(raw_vis, float) and pd.isna(raw_vis):
+                    visible = ""
+                elif isinstance(raw_vis, list):
+                    visible = ";".join(map(str, raw_vis))
+                else:
+                    visible = str(raw_vis).strip()
+
+                rows.append(
+                    {
+                        "siem": node.id,
+                        "node": node_tag,
+                        "name": name,
+                        "owner": owner or "—",
+                        "assign_to": assign_to or "—",
+                        "visible_to_users": visible or "—",
+                        # Champs classiques de la table (pas de pipeline API ici)
+                        "result": "report",
+                        "action": "list",
+                        "status": "—",
+                        "monitor_ok": "—",
+                        "monitor_branch": "—",
+                        "error": "",
+                        "corr": "—",
+                    }
+                )
+
+        log.info(
+            "alert_rules_report: produced %d rows for %d node(s)",
+            len(rows),
+            len(nodes_list),
         )
-    elif fmt == "json":
-        payload = json.dumps(rows, ensure_ascii=False, indent=2)
-    else:
-        LOG.error("Unknown --format: %s", fmt)
-        return 2
-
-    if out_file:
-        Path(out_file).write_text(payload, encoding="utf-8")
-        LOG.info("listing.alert_rules.written file=%s", out_file)
-    else:
-        # stdout
-        sys.stdout.write(payload + ("\n" if not payload.endswith("\n") else ""))
-
-    LOG.info("listing.alert_rules.done count=%d", len(rows))
-    return 0
+        return rows

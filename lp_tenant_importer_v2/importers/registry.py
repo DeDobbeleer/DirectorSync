@@ -103,14 +103,15 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         class_name="AlertRulesImporter",
         element_key="alert_rules",
     ),
-    # Alert Rules Reports
+    # Alert Rules - Report-only XLSX lister
     "alert_rules_report": ImporterSpec(
         key="alert_rules_report",
-        element_key="AlertRules",  # pour réutiliser la résolution de cibles si un jour nécessaire
-        cli="list-alert-users",    # => sous-commande CLI
+        element_key="alert_rules",
+        cli="list-alert-users",
         help="List AlertRules Name/Owner/Assign_to/Visible_for from XLSX",
-        class_path="lp_tenant_importer_v2.importers.alert_rules_report:AlertRulesXlsxLister",
-    )
+        module="lp_tenant_importer_v2.importers.alert_rules_report",
+        class_name="AlertRulesXlsxLister",
+    ),
     
 }
 

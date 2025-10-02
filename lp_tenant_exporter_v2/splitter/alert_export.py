@@ -91,14 +91,23 @@ def load_alerts_df(source_json: str | Path) -> pd.DataFrame:
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    # Colonnes clés en premier si présentes
-    first = [c for c in [
-        "alert_index", "name",
-        "settings.active", "settings.description", "settings.severity",
-        "settings.time_range_seconds",
-        "settings.extra_config.query", "settings.repos"
-    ] if c in df.columns]
-    return df[first + [c for c in df.columns if c not in first]]
+
+    # === Réordonnancement demandé ===
+    # On force en tête (si présentes) : name, owner, settings.assigned_to,
+    # settings.visible_to_user, settings.visible_to_users, settings.visible_to
+    priority_first = [
+        "name",
+        "settings.user",
+        "settings.assigned_to",
+        "settings.visible_to_user",
+        "settings.visible_to_users",
+        "settings.visible_to",
+    ]
+    first = [c for c in priority_first if c in df.columns]
+
+    # Le reste des colonnes, dans l'ordre d'origine
+    remaining = [c for c in df.columns if c not in first]
+    return df[first + remaining]
 
 def route_alert_to_tenants(
     repos_json: str | list | None,

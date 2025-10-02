@@ -444,7 +444,8 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
 
     # After processing all tenants: warn for unmatched records
     for entity_name, df in entities.items():
-        if entity_name in {"NormalizationPolicy", "EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria", "DeviceGroups", "Alert"}:
+        if entity_name in {"NormalizationPolicy", "EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria", 
+                           "DeviceGroups", "Alert", "User", "UserGroup"}:
             continue
 
         # NEW: détection des Devices non assignés

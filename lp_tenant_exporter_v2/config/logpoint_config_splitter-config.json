@@ -1,13 +1,13 @@
 {
   "tenant_list": ["core", "esait", "moi", "sccoe", "tia", "esrin"],
   "collector_to_tenant": {
-    "dcol_id": "core",
-    "dcol_id": "esait",
-    "dcol_id": "moi",
-    "dcol_id": "sccoe",
-    "dcol_id": "sccoe",
-    "dcol_id": "tia",
-    "dcol_id": "esrin"
+    "64f9287e8e8df427ea06b3d1": "core",
+    "65ddcf9fbc253dd6610452a5": "esait",
+    "64f985fa8e8df427ea06b3d2": "moi",
+    "64f986708e8df427ea06b3d3": "sccoe",
+    "65ddcfe099d694932e8cf2ab": "sccoe",
+    "65deff86f0ef5f0d914bb1a1": "tia",
+    "65a10dae2b54a0ac74025d96": "esrin"
   },
   "collector_field_column": "distributed_collector",
   "collector_field_split_regex": "[,;|\\s]+",

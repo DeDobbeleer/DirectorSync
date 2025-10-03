@@ -203,7 +203,7 @@ class AlertRulesImporter(BaseImporter):
 
     def __init__(self) -> None:
         super().__init__()
-        # If needed, BaseImporter provides: self.xlsx_reader and self.ctx
+        # If needed, BaseImporter may set: self.ctx and self.xlsx_reader
 
     # ------------------------------ Lifecycle ------------------------------ #
     @property
@@ -343,13 +343,13 @@ class AlertRulesImporter(BaseImporter):
                 "timerange_day": t_day,
             }
 
-            # Normalize repos using the shared resolver (same as other modules).
+            # Normalize repos (safe access to optional attributes).
             desired["repos"] = normalize_repo_list_for_tenant(
                 desired.get("repos", []),
-                tenant_ctx=getattr(self, "ctx", None),  # <-- SECURISÉ: pas d'attribut manquant
+                tenant_ctx=getattr(self, "ctx", None),
                 use_tenant_ip=True,
                 enable_repo_sheet_mapping=True,
-                xlsx_reader=self.xlsx_reader,  # provided by BaseImporter
+                xlsx_reader=getattr(self, "xlsx_reader", None),  # <-- FIX: safe getattr
                 repo_map_df=repo_map_df,
             )
 

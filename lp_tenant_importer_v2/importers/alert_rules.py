@@ -167,7 +167,9 @@ class AlertRulesImporter(BaseImporter):
             "condition_option": _s(desired_row.get("condition_option")).lower(),
             "condition_value": _to_int(desired_row.get("condition_value")),
             "limit": _to_int(desired_row.get("limit")),
-            f"timerange_{key}": val,
+            "timerange_day":  _to_int(desired_row.get("timerange_day")),
+            "timerange_hour":  _to_int(desired_row.get("timerange_hour")),
+            "timerange_minute":  _to_int(desired_row.get("timerange_minute")),
             "searchname": _s(desired_row.get("searchname")),
         }
 

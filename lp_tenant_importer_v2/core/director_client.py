@@ -475,5 +475,95 @@ class DirectorClient:
         log.info("DELETE[%s] no monitor info, treating as synchronous", corr)
         return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "sync", "corr": corr}
 
+    def invoke_action(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        action: str,
+        payload: Optional[Dict[str, Any]] = None,
+        monitor: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        POST an action under configapi:  {base}/{resource}/{action}
+        This is the canonical way to call endpoints like:
+            AlertRules/fetchmyrules
+        The method follows the same monitoring branches as create/update/delete.
 
+        Returns a dict:
+            {
+              "status": "Success"|"Failed",
+              "result": <immediate POST response>,
+              "monitor_ok": True|False|None,
+              "monitor_branch": "url"|"job"|"sync"|"disabled",
+              "monitor_payload": <final payload from monitor when available>,
+              "corr": "<short id>"
+            }
+        """
+        corr = uuid.uuid4().hex[:8]
+        base = self.configapi(pool_uuid, node_id, resource)
+        path = f"{base}/{action.lstrip('/')}"
+        safe_payload = _redact({"data": payload or {}})
 
+        log.info(
+            "ACTION[%s] POST %s pool=%s node=%s resource=%s action=%s",
+            corr, path, pool_uuid, node_id, resource, action,
+        )
+        log.debug("ACTION[%s] payload=%s", corr, _short_json(safe_payload))
+
+        try:
+            res = self.post_json(path, safe_payload)
+            log.debug("ACTION[%s] response=%s", corr, _short_json(_redact(res)))
+        except Exception:
+            log.exception("ACTION[%s] HTTP POST failed", corr)
+            raise
+
+        # Monitoring disabled or not desired -> return immediately
+        if not monitor or not self.options.monitor_enabled:
+            return {
+                "status": "Success",
+                "result": res,
+                "monitor_ok": None,
+                "monitor_branch": "disabled",
+                "monitor_payload": None,
+                "corr": corr,
+            }
+
+        # 1) Preferred: monitor URL in immediate response
+        mon_path = self._extract_monitor_path(res)
+        if mon_path:
+            log.info("ACTION[%s] monitor via URL: %s", corr, mon_path)
+            ok, mon_payload = self.monitor_job_url(mon_path)
+            return {
+                "status": "Success" if ok else "Failed",
+                "result": res,
+                "monitor_ok": ok,
+                "monitor_branch": "url",
+                "monitor_payload": mon_payload,
+                "corr": corr,
+            }
+
+        # 2) Fallback: job id
+        job = self._extract_job_id(res)
+        if job:
+            log.info("ACTION[%s] monitor via job id: %s", corr, job)
+            ok, mon_payload = self.monitor_job(pool_uuid, node_id, job)
+            return {
+                "status": "Success" if ok else "Failed",
+                "result": res,
+                "monitor_ok": ok,
+                "monitor_branch": "job",
+                "monitor_payload": mon_payload,
+                "corr": corr,
+            }
+
+        # 3) No monitor info -> treat as sync
+        log.info("ACTION[%s] no monitor info, treating as synchronous", corr)
+        return {
+            "status": "Success",
+            "result": res,
+            "monitor_ok": None,
+            "monitor_branch": "sync",
+            "monitor_payload": None,
+            "corr": corr,
+        }

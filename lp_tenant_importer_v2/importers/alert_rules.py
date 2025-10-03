@@ -126,6 +126,16 @@ class AlertRulesImporter(BaseImporter):
     resource_name: str = "alert_rules"
     sheet_names = ("Alert",)
     required_columns = tuple()  # custom validation below
+ 
+ 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Users cache: node_id -> { lookup_key_lower: user_id }
+        self._users_cache: dict[str, dict[str, str]] = {}
+        self._users_loaded: set[str] = set()
+        # Node-level cache: { node_name: {rule_id: rule_obj, ...} }
+        self._rules_cache: dict[str, dict[str, dict]] = {}
+ 
 
     # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
@@ -240,11 +250,7 @@ class AlertRulesImporter(BaseImporter):
         }
 
     # ------------------------------ users cache ------------------------------
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Users cache: node_id -> { lookup_key_lower: user_id }
-        self._users_cache: dict[str, dict[str, str]] = {}
-        self._users_loaded: set[str] = set()
+
 
     def _get_profile_option_default_owner(self) -> str:
         """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
@@ -308,67 +314,84 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------------ fetching ------------------------------
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef,) -> Dict[str, Dict[str, Any]]:
-        
+    def _index_rules_by_id(self, items: list[dict]) -> dict[str, dict]:
         """
-        Fetch all existing AlertRules using POST /AlertRules/fetchMyRules,
-        then build a map keyed by rule name.
-
-        Also dumps each raw rule payload at DEBUG level for troubleshooting.
+        Build a dict keyed by rule id for fast lookups and diffing.
+        Safely handles missing keys; logs in DEBUG the raw payload.
         """
-       
-        payload= {}
-        log.debug(f"fetchAlerts on node: {node.name}: {client.create_resource(pool_uuid, node.id, FETCHARLERT, payload)}")
-        return {}
-        # # Default page size chosen to avoid multiple roundtrips on typical setups.
-        # page = 1
-        # limit = 500
-        # all_items: List[Dict[str, Any]] = []
+        indexed: dict[str, dict] = {}
+        for it in items or []:
+            rid = str(it.get("_id") or it.get("id") or "").strip()
+            if rid:
+                indexed[rid] = it
+        return indexed
 
-        # try:
-        #     while True:
-        #         # Most Logpoint endpoints expect the JSON body wrapped into {"data": {...}}
-        #         body = {"data": {"filters": {}, "page": page, "limit": limit}}
-        #         resp = self.client._req("POST", endpoint, json=body)
+    def fetch_existing(self, node: dict) -> dict[str, dict]:
+        """
+        Fetch and cache existing AlertRules for a node using the official
+        'AlertRules/fetchmyrules' POST + monitor flow.
 
-        #         # Be tolerant about response shape across Director versions.
-        #         items = []
-        #         if isinstance(resp, dict):
-        #             # Common shapes observed: {"status":"Success","data":[...]} or {"data":{"list":[...]}}
-        #             if isinstance(resp.get("data"), list):
-        #                 items = resp["data"]
-        #             elif isinstance(resp.get("data"), dict) and isinstance(resp["data"].get("list"), list):
-        #                 items = resp["data"]["list"]
-        #             elif isinstance(resp.get("list"), list):
-        #                 items = resp["list"]
+        Returns:
+            Mapping {rule_id: rule_payload}
+        """
+        node_name = node.get("name") or node.get("display_name") or "unknown"
+        if node_name in self._rules_cache:
+            return self._rules_cache[node_name]
 
-        #         if not items:
-        #             break
+        pool_uuid = self.ctx.pool_uuid
+        node_id = node["id"]
 
-        #         # Debug-dump each rule payload (truncated for safety).
-        #         for it in items:
-        #             try:
-        #                 dump = json.dumps(it, ensure_ascii=False)
-        #             except Exception:
-        #                 dump = str(it)
-        #             log.debug("fetchMyRules item [node=%s]: %s", node_name, dump)
+        # Call the generic POST action: AlertRules/fetchmyrules
+        # No payload required by the API, keep {} to be explicit.
+        action = self.client.invoke_action(
+            pool_uuid=pool_uuid,
+            node_id=node_id,
+            resource="AlertRules",
+            action="fetchmyrules",
+            payload={},        # API expects no body; empty dict is OK
+            monitor=True,
+        )
 
-        #         all_items.extend(items)
+        ok = action.get("monitor_ok")
+        mon = action.get("monitor_payload") or {}
+        if not ok:
+            # Keep the exact behavior the framework uses: log, return empty.
+            self.log.warning(
+                "fetch_existing failed [node=%s]: %s",
+                node_name,
+                self._short_json(mon) if hasattr(self, "_short_json") else str(mon)[:600],
+            )
+            self._rules_cache[node_name] = {}
+            return self._rules_cache[node_name]
 
-        #         # Stop if fewer items than requested => last page.
-        #         if len(items) < limit:
-        #             break
-        #         page += 1
-        # except Exception as exc:
-        #     log.warning("fetch_existing failed [node=%s]: %s", node_name, exc)
+        # Debug-dump of the raw payload from monitor (requested)
+        self.log.debug(
+            "fetch_existing monitor payload [node=%s]: %s",
+            node_name,
+            self._short_json(mon) if hasattr(self, "_short_json") else str(mon)[:1200],
+        )
 
-        # by_name: Dict[str, Dict[str, Any]] = {}
-        # for r in all_items:
-        #     if isinstance(r, dict) and r.get("name"):
-        #         by_name[r["name"]] = r
+        # The monitor payload can vary; prefer 'response.result' then 'result' then 'data'
+        items = []
+        resp = mon.get("response")
+        if isinstance(resp, dict) and isinstance(resp.get("result"), list):
+            items = resp["result"]
+        elif isinstance(mon.get("result"), list):
+            items = mon["result"]
+        elif isinstance(mon.get("data"), list):
+            items = mon["data"]
+        else:
+            # If schema is different, log and keep empty (do not crash)
+            self.log.warning(
+                "fetch_existing: no list payload detected [node=%s] keys=%s",
+                node_name,
+                list(mon.keys())[:10],
+            )
 
-        # log.info("fetch_existing: %d rules [node=%s]", len(by_name), node_name)
-        # return by_name
+        indexed = self._index_rules_by_id(items)
+        self._rules_cache[node_name] = indexed
+        self.log.info("fetch_existing: %d rules [node=%s]", len(indexed), node_name)
+        return indexed
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

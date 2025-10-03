@@ -351,7 +351,7 @@ class AlertRulesImporter(BaseImporter):
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         # Resolve and validate owner
-        owner_id = _s(desired_row.get("owner")),
+        owner_id = _s(desired_row.get("owner"))
         if not owner_id:
             raise ValidationError("owner is required and could not be resolved from context")
         # Validate repos

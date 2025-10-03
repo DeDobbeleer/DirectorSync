@@ -318,7 +318,7 @@ class AlertRulesImporter(BaseImporter):
         """
        
         payload= {}
-        log.debug(f"fetchAlerts on node: {node.name}: {client.update_resource(pool_uuid, node.id, FETCHARLERT, payload)}")
+        log.debug(f"fetchAlerts on node: {node.name}: {client.create_resource(pool_uuid, node.id, FETCHARLERT, payload)}")
         return {}
         # # Default page size chosen to avoid multiple roundtrips on typical setups.
         # page = 1

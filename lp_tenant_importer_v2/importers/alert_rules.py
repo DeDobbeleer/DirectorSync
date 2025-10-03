@@ -315,7 +315,8 @@ class AlertRulesImporter(BaseImporter):
         # optional query passthrough (prevents empty query validation on some setups)
         if _s(desired_row.get("query")):
             payload["query"] = _s(desired_row.get("query"))
-
+            
+        log.debug(f"new collected and normalized payload: {payload}")
         return payload
 
     def build_payload_update(self, desired_row: Dict[str, Any], existing_row: Dict[str, Any]) -> Dict[str, Any]:

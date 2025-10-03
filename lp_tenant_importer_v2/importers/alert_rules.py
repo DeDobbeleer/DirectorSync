@@ -124,7 +124,7 @@ class AlertRulesImporter(BaseImporter):
                 "search_interval_minute": _s(r.get("settings.search_interval_minute")),
                 "context_template": _s(r.get("settings.alert_context_template")) or _s(r.get("settings.context_template")),
                 # optional query passthrough if present in sheet (prevents Monitor "Query cannot be empty")
-                "query": _s(r.get("settings.query")),
+                "query": _s(r.get("settings.extra_config.query")),
             }
             # Normalizations
             d["repos_norm"] = [x for x in d["repos"] if x]

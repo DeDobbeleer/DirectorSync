@@ -14,6 +14,7 @@ import logging
 import math
 import json
 import pandas as pd
+import re
 
 from .base import BaseImporter, NodeRef, ValidationError
 from ..core.director_client import DirectorClient
@@ -135,7 +136,11 @@ class AlertRulesImporter(BaseImporter):
         self._users_loaded: set[str] = set()
         # Node-level cache: { node_name: {rule_id: rule_obj, ...} }
         self._rules_cache: dict[str, dict[str, dict]] = {}
- 
+        # Node-level caches:
+        #  - by_id:   { node_name: {rule_id: rule_payload} }
+        #  - by_name: { node_name: {normalized_name: rule_payload} }
+        self._rules_cache_by_id: dict[str, dict[str, dict]] = {}
+        self._rules_cache_by_name: dict[str, dict[str, dict]] = {} 
 
     # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
@@ -168,7 +173,99 @@ class AlertRulesImporter(BaseImporter):
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
 
+
+    def _normalize_name(self, value: str) -> str:
+        """Normalize a rule name for consistent case-insensitive lookups."""
+        return (value or "").strip().lower()
+
+    def _index_rules(self, items: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+        """
+        Build two indices:
+        - by_id:    keyed by 'id' or '_id' (string)
+        - by_name:  keyed by normalized 'name' or 'searchname'
+        """
+        by_id: dict[str, dict] = {}
+        by_name: dict[str, dict] = {}
+
+        for it in items or []:
+            rid = str(it.get("_id") or it.get("id") or "").strip()
+            if rid:
+                by_id[rid] = it
+
+            # prefer 'searchname' if present, else 'name'
+            nm = (it.get("searchname") if it.get("searchname") else it.get("name"))
+            key = self._normalize_name(str(nm or ""))
+            if key:
+                by_name[key] = it
+
+        return by_id, by_name
+
+    def get_rule_by_name(self, node: dict, name: str) -> dict | None:
+        """
+        Return a rule payload by (case-insensitive) name or searchname.
+        Uses node-level cache, fetches if needed.
+        """
+        node_name = node.get("name") or node.get("display_name") or "unknown"
+        key = self._normalize_name(name)
+
+        # Warm cache if missing
+        if node_name not in self._rules_cache_by_name:
+            self.fetch_existing(node)
+
+        return self._rules_cache_by_name.get(node_name, {}).get(key)
+
     # ------------------------------ desired ------------------------------
+    
+    def _parse_list_field(self, raw) -> list[str]:
+        """
+        Accepts list or string and returns a clean list[str]:
+        - If list: coerce all items to str, strip quotes/spaces.
+        - If str:
+            * Try json.loads; if it yields a list, use it.
+            * Else split on comma/semicolon.
+        - Deduplicate while preserving order.
+        """
+        vals: list[str] = []
+
+        def _clean(s: str) -> str:
+            s = (s or "").strip()
+            # remove wrapping single/double quotes if present
+            if (len(s) >= 2) and ((s[0] == s[-1]) and s[0] in ("'", '"')):
+                s = s[1:-1].strip()
+            return s
+
+        if isinstance(raw, list):
+            vals = [_clean(str(x)) for x in raw]
+        elif isinstance(raw, str):
+            s = raw.strip()
+            parsed = None
+            if s:
+                try:
+                    parsed = json.loads(s)
+                except Exception:
+                    parsed = None
+
+            if isinstance(parsed, list):
+                vals = [_clean(str(x)) for x in parsed]
+            else:
+                # CSV-ish string
+                parts = [p for p in re.split(r"[;,]", s) if p is not None]
+                vals = [_clean(p) for p in parts]
+        else:
+            vals = []
+
+        # drop empties and dedupe (order-preserving)
+        seen = set()
+        clean: list[str] = []
+        for v in vals:
+            if not v:
+                continue
+            if v not in seen:
+                clean.append(v)
+                seen.add(v)
+
+        return clean
+    
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
         df = sheets["Alert"].fillna("")
         for _, r in df.iterrows():
@@ -391,7 +488,22 @@ class AlertRulesImporter(BaseImporter):
         indexed = self._index_rules_by_id(items)
         self._rules_cache[node_name] = indexed
         self.log.info("fetch_existing: %d rules [node=%s]", len(indexed), node_name)
-        return indexed
+
+        # ... after you extracted `items` as a list of rule dicts from the monitor payload:
+        by_id, by_name = self._index_rules(items)
+
+        node_name = node.get("name") or node.get("display_name") or "unknown"
+        self._rules_cache_by_id[node_name] = by_id
+        self._rules_cache_by_name[node_name] = by_name
+
+        self.log.info(
+            "fetch_existing: %d rules [node=%s] (indexed by id + name)",
+            len(by_id),
+            node_name,
+        )
+
+        # For compatibility with existing call sites that expect {id: payload}
+        return by_id
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -408,14 +520,17 @@ class AlertRulesImporter(BaseImporter):
             raise ValidationError("owner is required and could not be resolved from context or profiles.yml")
 
 
-        repos = desired_row.get("repos_norm", [])
-        if (
-            not isinstance(repos, list)
-            or not repos
-            or not all(isinstance(x, str) and x.strip() for x in repos)
-        ):
-            raise ValidationError("`repos` must be a non-empty list of strings.")
 
+        # Read raw values coming from Excel mapping
+        raw_repos = desired_row.get("repos") 
+        raw_log_source = desired_row.get("log_source")
+
+        repos = self._parse_list_field(raw_repos)
+        log_source = self._parse_list_field(raw_log_source)
+
+        # DEBUG dump to verify
+        self.log.debug("parsed repos=%s", repos)
+        self.log.debug("parsed log_source=%s", log_source)
 
         payload: Dict[str, Any] = {
             "name": _s(desired_row.get("name")),
@@ -426,6 +541,7 @@ class AlertRulesImporter(BaseImporter):
             "condition_value": _to_int(desired_row.get("condition_value")),
             "limit": _to_int(desired_row.get("limit")),
             "repos": repos,
+            "log_source": log_source,
             "searchname": _s(desired_row.get("searchname")) or _s(desired_row.get("name")),
             "timerange_day": int(desired_row.get("timerange_day")),
             "timerange_hour": int(desired_row.get("timerange_hour")),

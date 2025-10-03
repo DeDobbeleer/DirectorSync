@@ -170,6 +170,7 @@ class AlertRulesImporter(BaseImporter):
             # Timerange normalization happens later
             desired: Dict[str, Any] = {
                 "name": name,
+                "owner": _s(row.get("settings.user")),
                 "risk": _s(row.get("settings.risk")),
                 "aggregate": _s(row.get("settings.aggregate")),
                 "condition_option": _s(row.get("settings.condition.condition_option")),
@@ -313,42 +314,6 @@ class AlertRulesImporter(BaseImporter):
         k, v = self._canon_timerange(d)
         return k, v
 
-    def _resolve_owner_id(self, desired_row: Dict[str, Any]) -> str:
-        """Resolve owner using profiles.yml (preferred), then env, then context.
-        - profiles.yml: profiles.AlertRules.options.default_owner (string)
-        - env: LP_ALERT_OWNER
-        - ctx: owner_id / user_id / username
-        """
-        # 0) If desired already has an owner (future-proof), honor it
-        ov = desired_row.get("owner")
-        if isinstance(ov, str) and ov.strip():
-            log.debug("owner resolved from desired row: %s", ov)
-            return ov.strip()
-        # 1) profiles.yml option
-        try:
-            owner_from_profile = self._get_profile_option_default_owner()
-            if owner_from_profile:
-                log.debug("owner resolved from profiles.yml: %s", owner_from_profile)
-                return owner_from_profile
-        except Exception as e:
-            log.debug("profiles.yml lookup failed: %s", e)
-        # 2) environment override
-        import os
-        env_owner = os.getenv("LP_ALERT_OWNER", "").strip()
-        if env_owner:
-            log.debug("owner resolved from env LP_ALERT_OWNER: %s", env_owner)
-            return env_owner
-        # 3) context fallback
-        ctx = getattr(self, "ctx", None)
-        if ctx is not None:
-            for attr in ("owner_id", "user_id", "username"):
-                v = getattr(ctx, attr, None)
-                if isinstance(v, str) and v.strip():
-                    log.debug("owner resolved from context %s: %s", attr, v)
-                    return v.strip()
-        log.debug("owner could not be resolved from any source")
-        return ""
-
     def _get_profile_option_default_owner(self) -> str:
         """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
         import os
@@ -386,7 +351,7 @@ class AlertRulesImporter(BaseImporter):
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         # Resolve and validate owner
-        owner_id = self._resolve_owner_id(desired_row)
+        owner_id = _s(desired_row.get("owner")),
         if not owner_id:
             raise ValidationError("owner is required and could not be resolved from context")
         # Validate repos

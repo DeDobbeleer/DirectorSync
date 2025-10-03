@@ -1,267 +1,303 @@
-# lp_tenant_importer_v2/importers/alert_rules.py
 from __future__ import annotations
+"""AlertRules importer (DirectorSync v2)
 
+Follows the SAME pipeline and style as other importers (e.g. Devices/Repos):
+  - BaseImporter drives: load → validate → fetch → diff → plan → apply
+  - We implement only the hooks: validate, iter_desired, key_fn, canon_*, fetch_existing,
+    build_payload_*, apply.
+Scope: MyRules only (NOOP/CREATE/UPDATE/SKIP). No sharing/ownership transfer, no notifications.
+"""
 import logging
-import os
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import math
+from typing import Any, Dict, Iterable, List, Tuple
 
 import pandas as pd
 
 from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
-from ..utils.resolvers import normalize_repo_list_for_tenant
-from ..utils.validators import ValidationError
+from ..utils.validators import ValidationError  # reused from trunk
 
 log = logging.getLogger(__name__)
 
-RESOURCE = "AlertRules"
+RESOURCE = "AlertRules"  # Director API resource path
 
+# ------------------------------- helpers ------------------------------------
 
-# ------------------------------ Column aliases ------------------------------ #
-# For each canonical key, list acceptable XLSX columns (first non-empty wins).
-ALIASES: Dict[str, List[str]] = {
-    # Identity
-    "name": ["name", "Name"],
-
-    # Core settings
-    "settings.risk": ["settings.risk", "risk", "Risk"],
-    "settings.aggregate": ["settings.aggregate", "aggregate", "Aggregate"],
-
-    # Condition
-    "settings.condition.condition_option": [
-        "settings.condition.condition_option",
-        "settings.condition.option",
-        "condition_option",
-        "condition.option",
-    ],
-    "settings.condition.condition_value": [
-        "settings.condition.condition_value",
-        "settings.condition.value",
-        "condition_value",
-        "condition.value",
-    ],
-
-    # Live search core
-    "settings.livesearch_data.limit": [
-        "settings.livesearch_data.limit",
-        "settings.limit",
-        "limit",
-    ],
-    "query": [
-        "settings.livesearch_data.query",
-        "settings.extra_config.query",
-        "settings.query",
-        "query",
-    ],
-    "settings.repos": [
-        "settings.repos",
-        "repos",
-        "settings.livesearch_data.repos",
-    ],
-
-    # Timerange (we will keep only one among minute/hour/day)
-    "timerange_minute": [
-        "settings.livesearch_data.timerange_minute",
-        "settings.timerange.minute",
-        "timerange_minute",
-        "timerange.minute",
-        "settings.time_range_minutes",
-    ],
-    "timerange_hour": [
-        "settings.livesearch_data.timerange_hour",
-        "settings.timerange.hour",
-        "timerange_hour",
-        "timerange.hour",
-    ],
-    "timerange_day": [
-        "settings.livesearch_data.timerange_day",
-        "settings.timerange.day",
-        "timerange_day",
-        "timerange.day",
-    ],
-    # Seconds appear in some sheets; for MyAlertRules we drop it later.
-    "timerange_second": [
-        "settings.livesearch_data.timerange_second",
-        "settings.timerange.second",
-        "timerange_second",
-        "timerange.second",
-        "settings.time_range_seconds",
-    ],
-
-    # Optional / descriptive
-    "settings.description": ["settings.description", "description", "Description"],
-    "settings.livesearch_data.search_interval_minute": [
-        "settings.livesearch_data.search_interval_minute",
-        "settings.search_interval_minute",
-        "search_interval_minute",
-    ],
-    "settings.flush_on_trigger": ["settings.flush_on_trigger", "flush_on_trigger"],
-    "settings.throttling_enabled": ["settings.throttling_enabled", "throttling_enabled"],
-    "settings.throttling_field": ["settings.throttling_field", "throttling_field"],
-    "settings.throttling_time_range": ["settings.throttling_time_range", "throttling_time_range"],
-    "settings.log_source": ["settings.log_source", "log_source"],
-    "settings.context_template": ["settings.context_template", "context_template"],
-    "settings.active": ["settings.active", "active"],
-}
-
-
-# --------------------------------- Helpers --------------------------------- #
-def _s(value: Any) -> str:
-    """Return value as trimmed string (empty if None)."""
-    if isinstance(value, str):
-        return value.strip()
-    if value is None:
+def _s(v: Any) -> str:
+    if v is None:
         return ""
-    return str(value).strip()
-
-
-def _int_or_none(value: Any) -> Optional[int]:
-    """Parse int from arbitrary input; return None if not parseable."""
-    if value is None or value == "":
-        return None
     try:
-        return int(value)
+        if pd.isna(v):  # type: ignore[attr-defined]
+            return ""
     except Exception:
-        try:
-            return int(float(str(value).replace(",", ".")))
-        except Exception:
+        pass
+    return str(v).strip()
+
+
+def _int_or_none(v: Any) -> int | None:
+    try:
+        if v is None:
             return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = _s(v)
+        return int(s) if s else None
+    except Exception:
+        return None
 
 
-def _split_multi(cell: Any, seps: Tuple[str, ...]) -> List[str]:
-    """Split a cell by multiple separators into a list of non-empty strings."""
-    if cell is None:
+def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", "\n")) -> List[str]:
+    raw = _s(cell)
+    if not raw:
         return []
-    if isinstance(cell, list):
-        return [x.strip() for x in cell if isinstance(x, str) and x.strip()]
-    text = str(cell)
-    for sep in seps:
-        text = text.replace(sep, "\n")
-    return [x.strip() for x in text.split("\n") if x.strip()]
+    canon = raw
+    for s in seps[1:]:
+        canon = canon.replace(s, seps[0])
+    parts = [p.strip() for p in canon.split(seps[0]) if p.strip()]
+    # also accept JSON-ish arrays without full json.loads (defensive)
+    if len(parts) == 1 and parts[0].startswith("[") and parts[0].endswith("]"):
+        mid = parts[0].strip("[] ")
+        parts = [p.strip().strip('"') for p in mid.split(",") if p.strip()]
+    return parts
 
 
-def _first(row: pd.Series, keys: List[str]) -> Any:
-    """Return the first non-empty value among aliases in this row."""
-    for key in keys:
-        if key in row:
-            val = row.get(key)
-            if isinstance(val, list) and val:
-                return val
-            if _s(val) != "":
-                return val
-    return None
+def _normalize_repos(raw: Any, repo_map_df: pd.DataFrame | None) -> List[str]:
+    """Return normalized repo specs as list of strings: `ip:port` or `ip:port:Repo_CLEANED`.
+
+    - Accepts list/CSV/pipe/newline or legacy `ip:port/repo` and converts to colon form.
+    - If a Repo sheet is provided with `original_repo_name` → `cleaned_repo_name`, map it.
+    (Tenant IP filtering is intentionally not enforced here to stay consistent with
+     other importers' XLSX-only parsing at this stage. If needed later, do it in apply.)
+    """
+    items = _split_multi(raw)
+    mapping: Dict[str, str] = {}
+    if isinstance(repo_map_df, pd.DataFrame) and {"original_repo_name", "cleaned_repo_name"}.issubset(repo_map_df.columns):
+        mapping = dict(
+            zip(
+                repo_map_df["original_repo_name"].astype(str).str.strip(),
+                repo_map_df["cleaned_repo_name"].astype(str).str.strip(),
+            )
+        )
+    out: List[str] = []
+    for it in items:
+        tok = _s(it)
+        if "/" in tok and tok.count(":") == 1:
+            left, r = tok.split("/", 1)
+            tok = f"{left}:{r}"
+        parts = [p.strip() for p in tok.split(":") if p.strip()]
+        if len(parts) < 2:
+            continue
+        ip, port = parts[0], parts[1]
+        repo_old = parts[2] if len(parts) >= 3 else ""
+        if repo_old:
+            repo_clean = mapping.get(repo_old, repo_old)
+            out.append(f"{ip}:{port}:{repo_clean}")
+        else:
+            out.append(f"{ip}:{port}")
+    return sorted(set(out))
 
 
-def _first_list(row: pd.Series, keys: List[str], seps: Tuple[str, ...]) -> List[str]:
-    """Return a list from the first non-empty alias value, splitting if necessary."""
-    val = _first(row, keys)
-    return _split_multi(val, seps) if val is not None else []
+# ----------------------------- importer --------------------------------------
 
-
-# -------------------------------- Importer --------------------------------- #
 class AlertRulesImporter(BaseImporter):
+    """Importer for **AlertRules/MyRules**.
+
+    Sheet: "Alert"
+    Required columns: name, settings.risk, settings.aggregate,
+        settings.condition.condition_option, settings.condition.condition_value,
+        settings.livesearch_data.limit, settings.repos,
+        and one of timerange columns (minute/hour/day/second or time_range_seconds).
     """
-    AlertRules importer (MyAlertRules), aligned with the V2 importer pattern.
 
-    No dependency on profiles.yml. Owner is resolved from:
-      1) env var LP_ALERT_OWNER,
-      2) API context (username/user_id/owner_id),
-    Repos are normalized via the shared resolver (supports optional "Repo" sheet).
-    """
+    resource_name: str = "alert_rules"
+    sheet_names = ("Alert",)
+    required_columns = tuple()  # custom validation below (like other modules)
 
-    SHEET_ALERT = "Alert"
-    SHEET_REPO = "Repo"  # optional: old -> cleaned mapping
-
-    # Static behavior (since we do not use profiles.yml)
-    LIST_SEPARATORS: Tuple[str, ...] = ("|", ",", "\n")
-    TIMERANGE_PRIORITY: Tuple[str, ...] = ("minute", "hour", "day")
-
-    # Strict POST/PUT whitelist to avoid accidental 400s
-    POST_WHITELIST = {
-        "searchname",
-        "owner",
+    # Stable subset for diffing (order-insensitive fields normalized in canon_*):
+    compare_keys = (
         "risk",
-        "repos",
+        "repos_csv",
         "aggregate",
         "condition_option",
         "condition_value",
         "limit",
-        "timerange_minute",
-        "timerange_hour",
-        "timerange_day",
+        "timerange_key",
+        "timerange_value",
         "query",
         "description",
-        "log_source",
-        "search_interval_minute",
         "flush_on_trigger",
+        "search_interval_minute",
         "throttling_enabled",
         "throttling_field",
         "throttling_time_range",
-        "alert_context_template",
-    }
-    PUT_WHITELIST = POST_WHITELIST - {"searchname"}
+        "log_source_csv",
+        "context_template",
+    )
 
-    def __init__(self) -> None:
-        super().__init__()
-        # If needed, BaseImporter may set: self.ctx and self.xlsx_reader
-
-    # ------------------------------ Lifecycle ------------------------------ #
-    @property
-    def sheet_names(self) -> List[str]:
-        """Required sheet list for BaseImporter pre-validation."""
-        return [self.SHEET_ALERT]  # Repo sheet is optional
-
+    # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
-        """Validate presence of required columns (via alias groups)."""
-        if self.SHEET_ALERT not in sheets:
-            raise ValidationError(f"Missing required sheet: {self.SHEET_ALERT}")
+        if "Alert" not in sheets:
+            raise ValidationError("Missing required sheet: Alert")
+        df = sheets["Alert"]
+        def need(col: str) -> None:
+            if col not in df.columns:
+                raise ValidationError(f"Alert: missing required column '{col}'")
+        need("name")
+        need("settings.risk")
+        need("settings.aggregate")
+        need("settings.condition.condition_option")
+        need("settings.condition.condition_value")
+        need("settings.livesearch_data.limit")
+        need("settings.repos")
+        if not any(c in df.columns for c in (
+            "settings.livesearch_data.timerange_minute",
+            "settings.livesearch_data.timerange_hour",
+            "settings.livesearch_data.timerange_day",
+            "settings.livesearch_data.timerange_second",
+            "settings.time_range_seconds",
+        )):
+            raise ValidationError("Alert: missing timerange column (minute/hour/day/second)")
 
-        df = sheets[self.SHEET_ALERT]
+    # -------------------------- XLSX → desired ---------------------------
+    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+        df: pd.DataFrame = sheets["Alert"].copy()
+        # Optional mapping sheet for repo names
+        repo_map_df: pd.DataFrame | None = sheets.get("Repo") if isinstance(sheets.get("Repo"), pd.DataFrame) else None
+        for _, row in df.iterrows():
+            name = _s(row.get("name"))
+            if not name:
+                continue
+            # Timerange normalization happens later
+            desired: Dict[str, Any] = {
+                "name": name,
+                "risk": _s(row.get("settings.risk")),
+                "aggregate": _s(row.get("settings.aggregate")),
+                "condition_option": _s(row.get("settings.condition.condition_option")),
+                "condition_value": _int_or_none(row.get("settings.condition.condition_value")) or 0,
+                "limit": _int_or_none(row.get("settings.livesearch_data.limit")) or 0,
+                "query": _s(row.get("settings.extra_config.query") or row.get("settings.livesearch_data.query")),
+                "description": _s(row.get("settings.description")),
+                "search_interval_minute": _int_or_none(row.get("settings.livesearch_data.search_interval_minute")) or 0,
+                "flush_on_trigger": _s(row.get("settings.flush_on_trigger")).lower() in {"on", "true", "1", "yes"},
+                "throttling_enabled": _s(row.get("settings.throttling_enabled")).lower() in {"on", "true", "1", "yes"},
+                "throttling_field": _s(row.get("settings.throttling_field")),
+                "throttling_time_range": _int_or_none(row.get("settings.throttling_time_range")) or 0,
+                "log_source": _split_multi(row.get("settings.log_source")),
+                "context_template": _s(row.get("settings.context_template")),
+                "active": _s(row.get("settings.active")).lower() in {"on", "true", "1", "yes"},
+                # repos normalized here (mapping applied if sheet present)
+                "repos_norm": _normalize_repos(row.get("settings.repos"), repo_map_df),
+                # raw timeranges retained for conversion
+                "timerange_minute": _int_or_none(row.get("settings.livesearch_data.timerange_minute")),
+                "timerange_hour": _int_or_none(row.get("settings.livesearch_data.timerange_hour")),
+                "timerange_day": _int_or_none(row.get("settings.livesearch_data.timerange_day")),
+                "timerange_second": _int_or_none(row.get("settings.livesearch_data.timerange_second") or row.get("settings.time_range_seconds")),
+            }
+            log.debug(
+                "XLSX row parsed name=%s repos=%d timerange=(min=%s,hour=%s,day=%s,sec=%s)",
+                name,
+                len(desired["repos_norm"]),
+                desired.get("timerange_minute"),
+                desired.get("timerange_hour"),
+                desired.get("timerange_day"),
+                desired.get("timerange_second"),
+            )
+            yield desired
 
-        def need_alias(canon: str) -> None:
-            candidates = ALIASES.get(canon, [canon])
-            if not any(col in df.columns for col in candidates):
-                raise ValidationError(f"Alert sheet: missing any of {candidates}")
+    # ------------------------ canonicalization (diff) ------------------------
+    @staticmethod
+    def key_fn(desired_row: Dict[str, Any]) -> str:
+        return _s(desired_row.get("name"))
 
-        # Minimum column requirements to build a valid payload
-        need_alias("name")
-        need_alias("settings.risk")
-        need_alias("settings.aggregate")
-        need_alias("settings.condition.condition_option")
-        need_alias("settings.condition.condition_value")
-        need_alias("settings.livesearch_data.limit")
-        need_alias("settings.repos")
-        if not any(
-            any(col in df.columns for col in ALIASES.get(canon, [canon]))
-            for canon in ("timerange_minute", "timerange_hour", "timerange_day", "timerange_second")
-        ):
-            raise ValidationError("Alert sheet: missing timerange (minute/hour/day/second)")
+    def _canon_timerange(self, d: Dict[str, Any]) -> Tuple[str, int]:
+        if (m := d.get("timerange_minute")):
+            return ("minute", int(m))
+        if (h := d.get("timerange_hour")):
+            return ("hour", int(h))
+        if (dy := d.get("timerange_day")):
+            return ("day", int(dy))
+        if (s := d.get("timerange_second")):
+            return ("minute", int(math.ceil(float(s) / 60.0)))
+        return ("minute", 0)
 
-    # --------------------------- Director state --------------------------- #
+    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        key, val = self._canon_timerange(desired_row)
+        return {
+            "risk": _s(desired_row.get("risk")).lower(),
+            "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos_norm", [])])),
+            "aggregate": _s(desired_row.get("aggregate")).lower(),
+            "condition_option": _s(desired_row.get("condition_option")).lower(),
+            "condition_value": int(desired_row.get("condition_value") or 0),
+            "limit": int(desired_row.get("limit") or 0),
+            "timerange_key": key,
+            "timerange_value": int(val or 0),
+            "query": _s(desired_row.get("query")),
+            "description": _s(desired_row.get("description")),
+            "flush_on_trigger": bool(desired_row.get("flush_on_trigger")),
+            "search_interval_minute": int(desired_row.get("search_interval_minute") or 0),
+            "throttling_enabled": bool(desired_row.get("throttling_enabled")),
+            "throttling_field": _s(desired_row.get("throttling_field")),
+            "throttling_time_range": int(desired_row.get("throttling_time_range") or 0),
+            "log_source_csv": ",".join(sorted([_s(x) for x in desired_row.get("log_source", [])])),
+            "context_template": _s(desired_row.get("context_template")),
+        }
+
+    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not existing_obj:
+            return None
+        repos = existing_obj.get("repos") or []
+        # Timerange can be represented via minute/hour/day fields
+        t_key = (
+            "day" if existing_obj.get("timerange_day") else (
+                "hour" if existing_obj.get("timerange_hour") else "minute"
+            )
+        )
+        t_val = int(existing_obj.get(f"timerange_{t_key}") or 0)
+        return {
+            "risk": _s(existing_obj.get("risk")).lower(),
+            "repos_csv": ",".join(sorted([_s(x) for x in repos if _s(x)])),
+            "aggregate": _s(existing_obj.get("aggregate")).lower(),
+            "condition_option": _s(existing_obj.get("condition_option")).lower(),
+            "condition_value": int(existing_obj.get("condition_value") or 0),
+            "limit": int(existing_obj.get("limit") or 0),
+            "timerange_key": t_key,
+            "timerange_value": t_val,
+            "query": _s(existing_obj.get("query")),
+            "description": _s(existing_obj.get("description")),
+            "flush_on_trigger": bool(existing_obj.get("flush_on_trigger")),
+            "search_interval_minute": int(existing_obj.get("search_interval_minute") or 0),
+            "throttling_enabled": bool(existing_obj.get("throttling_enabled")),
+            "throttling_field": _s(existing_obj.get("throttling_field")),
+            "throttling_time_range": int(existing_obj.get("throttling_time_range") or 0),
+            "log_source_csv": ",".join(sorted([_s(x) for x in (existing_obj.get("log_source") or [])])),
+            "context_template": _s(existing_obj.get("context_template")),
+        }
+
+    # ----------------------------- read existing -----------------------------
     def fetch_existing(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
+        self, client: DirectorClient, pool_uuid: str, node: NodeRef,
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Return mapping {searchname -> object} using MyAlertRules/fetch.
-        Tolerates different API shapes and never raises.
+        """Return {searchname -> object} from MyAlertRules/fetch, tolerant to shapes.
+        No exceptions are raised; on error returns an empty dict and logs at WARNING.
         """
         path = client.configapi(pool_uuid, node.id, f"{RESOURCE}/MyAlertRules/fetch")
         items: List[Dict[str, Any]] = []
         try:
             data = client.post_json(path, {"data": {}}) or []
             if isinstance(data, dict):
-                items = data.get("items") or data.get("data") or data.get("results") or []
+                items = (
+                    data.get("items")
+                    or data.get("data")
+                    or data.get("results")
+                    or []
+                )
                 if not isinstance(items, list):
                     items = []
             elif isinstance(data, list):
-                items = data
-        except Exception as exc:  # pragma: no cover
+                items = data  # already a list
+        except Exception as exc:
             log.warning("fetch_existing failed [node=%s]: %s", node.name, exc)
             items = []
-
         out: Dict[str, Dict[str, Any]] = {}
         for it in items:
             if not isinstance(it, dict):
@@ -269,267 +305,167 @@ class AlertRulesImporter(BaseImporter):
             key = _s(it.get("searchname") or it.get("name"))
             if key:
                 out[key] = it
-
         log.info("fetch_existing: %d rules [node=%s]", len(out), node.name)
         return out
 
-    # ------------------------ XLSX → desired objects ----------------------- #
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
+    # --------------------------- payload builders ----------------------------
+    def _timerange_kv(self, d: Dict[str, Any]) -> Tuple[str, int]:
+        k, v = self._canon_timerange(d)
+        return k, v
+
+    def _resolve_owner_id(self, desired_row: Dict[str, Any]) -> str:
+        """Resolve owner using profiles.yml (preferred), then env, then context.
+        - profiles.yml: profiles.AlertRules.options.default_owner (string)
+        - env: LP_ALERT_OWNER
+        - ctx: owner_id / user_id / username
         """
-        Yield normalized desired rows parsed from the Alert sheet.
-
-        The result is a flat dict with canonical keys; build_* methods
-        then transform it into the exact API payload with whitelisting.
-        """
-        df: pd.DataFrame = sheets[self.SHEET_ALERT].copy()
-
-        # Optional Repo mapping sheet (old -> cleaned)
-        repo_map_df: Optional[pd.DataFrame] = (
-            sheets.get(self.SHEET_REPO) if isinstance(sheets.get(self.SHEET_REPO), pd.DataFrame) else None
-        )
-
-        for _, row in df.iterrows():
-            name = _s(_first(row, ALIASES["name"]))
-            if not name:
-                continue
-
-            # Raw timerange inputs
-            t_min = _int_or_none(_first(row, ALIASES["timerange_minute"]))
-            t_hour = _int_or_none(_first(row, ALIASES["timerange_hour"]))
-            t_day = _int_or_none(_first(row, ALIASES["timerange_day"]))
-            # Seconds are intentionally ignored later for MyAlertRules
-            _ = _int_or_none(_first(row, ALIASES["timerange_second"]))
-
-            desired: Dict[str, Any] = {
-                # Internal; remapped to `searchname` for POST
-                "name": name,
-
-                # Basic settings
-                "risk": _s(_first(row, ALIASES["settings.risk"])),
-                "aggregate": _s(_first(row, ALIASES["settings.aggregate"])),
-
-                # Condition
-                "condition_option": _s(_first(row, ALIASES["settings.condition.condition_option"])) or "count",
-                "condition_value": _int_or_none(_first(row, ALIASES["settings.condition.condition_value"])) or 0,
-
-                # Livesearch
-                "limit": _int_or_none(_first(row, ALIASES["settings.livesearch_data.limit"])) or 0,
-                "query": _s(_first(row, ALIASES["query"])),
-
-                # Optional descriptive fields
-                "description": _s(_first(row, ALIASES["settings.description"])),
-                "log_source": _first_list(row, ALIASES["settings.log_source"], self.LIST_SEPARATORS),
-
-                # Scheduling & throttling
-                "search_interval_minute": _int_or_none(
-                    _first(row, ALIASES["settings.livesearch_data.search_interval_minute"])
-                ) or 0,
-                "flush_on_trigger": _s(_first(row, ALIASES["settings.flush_on_trigger"])).lower()
-                in {"on", "true", "1", "yes"},
-                "throttling_enabled": _s(_first(row, ALIASES["settings.throttling_enabled"])).lower()
-                in {"on", "true", "1", "yes"},
-                "throttling_field": _s(_first(row, ALIASES["settings.throttling_field"])),
-                "throttling_time_range": _int_or_none(_first(row, ALIASES["settings.throttling_time_range"])) or 0,
-
-                "alert_context_template": _s(_first(row, ALIASES["settings.context_template"])),
-                "active": _s(_first(row, ALIASES["settings.active"])).lower() in {"on", "true", "1", "yes"},
-
-                # Repos as raw list (normalized below)
-                "repos": _first_list(row, ALIASES["settings.repos"], self.LIST_SEPARATORS),
-
-                # Timerange raw (normalized below)
-                "timerange_minute": t_min,
-                "timerange_hour": t_hour,
-                "timerange_day": t_day,
-            }
-
-            # Normalize repos (safe access to optional attributes).
-            desired["repos"] = normalize_repo_list_for_tenant(
-                desired.get("repos", []),
-                tenant_ctx=getattr(self, "ctx", None),
-                use_tenant_ip=True,
-                enable_repo_sheet_mapping=True,
-                xlsx_reader=getattr(self, "xlsx_reader", None),  # <-- FIX: safe getattr
-                repo_map_df=repo_map_df,
-            )
-
-            # Keep only one timerange key according to static priority.
-            chosen: Optional[str] = None
-            for unit in self.TIMERANGE_PRIORITY:
-                key = f"timerange_{unit}"
-                val = desired.get(key)
-                if isinstance(val, int) and val > 0:
-                    chosen = key
-                    break
-            for unit in ("minute", "hour", "day"):
-                key = f"timerange_{unit}"
-                if key != chosen and key in desired:
-                    desired.pop(key, None)
-            # We never include seconds for MyAlertRules
-
-            log.debug(
-                "Parsed XLSX row name=%s repos=%d timerange=%s",
-                name,
-                len(desired.get("repos", [])),
-                [k for k in ("timerange_minute", "timerange_hour", "timerange_day") if k in desired],
-            )
-            yield desired
-
-    # -------------------------- Matching key (existing) --------------------- #
-    def desired_key(self, desired_row: Dict[str, Any]) -> str:
-        """Use the rule searchname as the matching key (here `name` in desired)."""
-        return _s(desired_row.get("name"))
-
-    # ----------------------------- Payload builders ------------------------ #
-    def _resolve_owner(self, desired_row: Dict[str, Any]) -> str:
-        """
-        Resolve owner without requiring a XLSX column:
-          1) env: LP_ALERT_OWNER
-          2) API context: owner_id / user_id / username
-        """
-        # If already provided in desired_row, keep it
-        explicit = _s(desired_row.get("owner"))
-        if explicit:
-            return explicit
-
-        env_owner = _s(os.getenv("LP_ALERT_OWNER", ""))
+        # 0) If desired already has an owner (future-proof), honor it
+        ov = desired_row.get("owner")
+        if isinstance(ov, str) and ov.strip():
+            log.debug("owner resolved from desired row: %s", ov)
+            return ov.strip()
+        # 1) profiles.yml option
+        try:
+            owner_from_profile = self._get_profile_option_default_owner()
+            if owner_from_profile:
+                log.debug("owner resolved from profiles.yml: %s", owner_from_profile)
+                return owner_from_profile
+        except Exception as e:
+            log.debug("profiles.yml lookup failed: %s", e)
+        # 2) environment override
+        import os
+        env_owner = os.getenv("LP_ALERT_OWNER", "").strip()
         if env_owner:
-            log.debug("Owner resolved from env LP_ALERT_OWNER: %s", env_owner)
+            log.debug("owner resolved from env LP_ALERT_OWNER: %s", env_owner)
             return env_owner
-
+        # 3) context fallback
         ctx = getattr(self, "ctx", None)
         if ctx is not None:
             for attr in ("owner_id", "user_id", "username"):
-                v = _s(getattr(ctx, attr, None))
-                if v:
-                    log.debug("Owner resolved from context %s: %s", attr, v)
-                    return v
-
+                v = getattr(ctx, attr, None)
+                if isinstance(v, str) and v.strip():
+                    log.debug("owner resolved from context %s: %s", attr, v)
+                    return v.strip()
+        log.debug("owner could not be resolved from any source")
         return ""
 
-    def _normalize_onoff(self, payload: Dict[str, Any], key: str) -> None:
-        """Normalize boolean flags to API 'on'/absent convention."""
-        if key in payload and isinstance(payload[key], bool):
-            if payload[key]:
-                payload[key] = "on"
-            else:
-                payload.pop(key, None)
+    def _get_profile_option_default_owner(self) -> str:
+        """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
+        import os
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return ""
+        # Locate profiles.yml packaged with the module
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # lp_tenant_importer_v2/
+        res_path = os.path.join(base_dir, "resources", "profiles.yml")
+        if not os.path.exists(res_path):
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
+            return ""
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Build a POST payload from a normalized desired row:
-        - Rename `name` → `searchname`
-        - Ensure `owner` and non-empty `repos`
-        - Normalize booleans to 'on'/absent
-        - Apply strict POST whitelist
-        """
-        payload: Dict[str, Any] = {}
-
-        # name → searchname
-        name = _s(desired_row.get("name"))
-        if name:
-            payload["searchname"] = name
-
-        # Copy everything else (except internal `name`)
-        for key, val in desired_row.items():
-            if key == "name" or val in (None, ""):
-                continue
-            payload[key] = val
-
-        # Resolve owner
-        payload["owner"] = self._resolve_owner(desired_row)
-
-        # Mandatory guards before hitting the API
-        if not _s(payload.get("owner")):
+        # Resolve and validate owner
+        owner_id = self._resolve_owner_id(desired_row)
+        if not owner_id:
             raise ValidationError("owner is required and could not be resolved from context")
-
-        repos = payload.get("repos") or []
-        if not isinstance(repos, list) or not repos:
-            raise ValidationError("repos is required and must be a non-empty list")
-
-        # Only one timerange key allowed (iter_desired already tried to enforce)
-        present_tr = [k for k in ("timerange_minute", "timerange_hour", "timerange_day") if k in payload]
-        if len(present_tr) > 1:
-            # Keep the first according to static priority
-            keep: Optional[str] = None
-            for unit in self.TIMERANGE_PRIORITY:
-                key = f"timerange_{unit}"
-                if key in payload:
-                    keep = key
-                    break
-            for key in ("timerange_minute", "timerange_hour", "timerange_day"):
-                if key != keep:
-                    payload.pop(key, None)
-
-        # Boolean normalization: True → "on", False → remove key
-        self._normalize_onoff(payload, "flush_on_trigger")
-        self._normalize_onoff(payload, "throttling_enabled")
-
-        # Apply POST whitelist (avoid unknown fields)
-        payload = {k: v for k, v in payload.items() if k in self.POST_WHITELIST}
+        # Validate repos
+        repos = desired_row.get("repos_norm", [])
+        if not isinstance(repos, list) or not repos or not all(isinstance(x, str) and x.strip() for x in repos):
+            raise ValidationError("repos must be a non-empty list of strings")
+        # Timerange
+        k, v = self._timerange_kv(desired_row)
+        payload: Dict[str, Any] = {
+            "searchname": _s(desired_row.get("name")),
+            "owner": owner_id,
+            "risk": _s(desired_row.get("risk")),
+            "repos": repos,
+            "aggregate": _s(desired_row.get("aggregate")),
+            "condition_option": _s(desired_row.get("condition_option")),
+            "condition_value": int(desired_row.get("condition_value") or 0),
+            "limit": int(desired_row.get("limit") or 0),
+            f"timerange_{k}": int(v or 0),
+        }
+        if _s(desired_row.get("query")):
+            payload["query"] = _s(desired_row.get("query"))
+        if _s(desired_row.get("description")):
+            payload["description"] = _s(desired_row.get("description"))
+        if desired_row.get("log_source"):
+            payload["log_source"] = desired_row.get("log_source")
+        if desired_row.get("search_interval_minute"):
+            payload["search_interval_minute"] = int(desired_row.get("search_interval_minute"))
+        if desired_row.get("flush_on_trigger"):
+            payload["flush_on_trigger"] = "on"
+        if desired_row.get("throttling_enabled"):
+            payload["throttling_enabled"] = "on"
+            if _s(desired_row.get("throttling_field")):
+                payload["throttling_field"] = _s(desired_row.get("throttling_field"))
+            if desired_row.get("throttling_time_range"):
+                payload["throttling_time_range"] = int(desired_row.get("throttling_time_range"))
+        if _s(desired_row.get("context_template")):
+            payload["alert_context_template"] = _s(desired_row.get("context_template"))
         return payload
 
-    def build_payload_update(
-        self,
-        desired_row: Dict[str, Any],
-        existing: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Build a PUT payload. Same rules as POST, but never includes `searchname`."""
-        payload = self.build_payload_create(desired_row)
-        payload.pop("searchname", None)
-        # Apply PUT whitelist
-        payload = {k: v for k, v in payload.items() if k in self.PUT_WHITELIST}
-        return payload
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+        return self.build_payload_create(desired_row)
 
-    # --------------------------------- Apply -------------------------------- #
+    # -------------------------------- apply ----------------------------------
     def apply(
         self,
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-        action: str,
-        name: str,
-        desired_row: Dict[str, Any],
-        existing_id: Optional[str],
-        dry_run: bool,
+        decision,
+        existing_id: str | None,
     ) -> Dict[str, Any]:
-        """
-        Execute one operation. This method never raises:
-        - ValidationError → SKIPPED (no API call) with reason
-        - Other exceptions → FAILED with error message
-        """
+        desired = decision.desired or {}
+        name = _s(desired.get("name")) or "(unnamed)"
         try:
-            if action == "create":
-                payload = self.build_payload_create(desired_row)
-                log.debug("CREATE payload: %s", payload)
-                if dry_run:
-                    return {"status": "Dry-run", "action": action}
+            if decision.op == "CREATE":
+                try:
+                    payload = self.build_payload_create(desired)
+                except ValidationError as ve:
+                    log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
+                    return {"status": "Skipped", "reason": str(ve)}
+                log.info("CREATE alert=%s [node=%s]", name, node.name)
+                log.debug("CREATE payload=%s", payload)
                 return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
-
-            if action == "update":
-                payload = self.build_payload_update(desired_row, {})
-                log.debug("UPDATE payload: %s", payload)
-                if dry_run:
-                    return {"status": "Dry-run", "action": action}
-                assert existing_id, "existing_id required for update"
+            if decision.op == "UPDATE" and existing_id:
+                try:
+                    payload = self.build_payload_update(desired, {"id": existing_id})
+                except ValidationError as ve:
+                    log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s (no API call)", name, existing_id, node.name, ve)
+                    return {"status": "Skipped", "reason": str(ve)}
+                log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
+                log.debug("UPDATE payload=%s", payload)
                 return client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
+            log.info("NOOP alert=%s [node=%s]", name, node.name)
+            return {"status": "Success"}
+        except Exception as exc:
+            # Convert HTTP/errors to a clean per-row result without stacktrace propagation
+            msg = str(exc)
+            log.error("APPLY FAILED alert=%s [node=%s]: %s", name, node.name, msg)
+            return {"status": "Failed", "error": msg}
 
-            if action == "noop":
-                return {"status": "Noop"}
 
-            return {"status": "Skipped", "reason": f"unknown action {action}"}
-
-        except ValidationError as ve:
-            log.warning(
-                "SKIP %s alert=%s [node=%s] reason=%s (no API call)",
-                action.upper(),
-                name,
-                node.name,
-                ve,
-            )
-            return {"status": "Skipped", "reason": str(ve)}
-
-        except Exception as exc:  # pragma: no cover
-            # Keep the run going; report a clean error row.
-            log.error("API error for alert=%s [node=%s]: %s", name, node.name, exc)
-            return {"status": "Failed", "error": str(exc)}
+__all__ = ["AlertRulesImporter"]

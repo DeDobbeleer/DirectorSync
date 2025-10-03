@@ -352,12 +352,15 @@ class AlertRulesImporter(BaseImporter):
         try:
             if decision.op == "CREATE":
                 try:
+                    payload = self.build_payload_create(desired)
                     log.debug(f"new collected and normalized payload: {payload}")
                 except ValidationError as ve:
                     log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
                     return {"status": "Skipped", "reason": str(ve)}
+                
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
+                
                 return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
 
             if decision.op == "UPDATE" and existing_id:

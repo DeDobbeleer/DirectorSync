@@ -316,7 +316,6 @@ class AlertRulesImporter(BaseImporter):
         if _s(desired_row.get("query")):
             payload["query"] = _s(desired_row.get("query"))
             
-        log.debug(f"new collected and normalized payload: {payload}")
         return payload
 
     def build_payload_update(self, desired_row: Dict[str, Any], existing_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -353,7 +352,6 @@ class AlertRulesImporter(BaseImporter):
         try:
             if decision.op == "CREATE":
                 try:
-                    payload = self.build_payload_create(desired)
                     log.debug(f"new collected and normalized payload: {payload}")
                 except ValidationError as ve:
                     log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)

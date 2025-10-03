@@ -79,6 +79,7 @@ class AlertRulesImporter(BaseImporter):
         for _, r in df.iterrows():
             d: Dict[str, Any] = {
                 "name": _s(r.get("name")),
+                "query": _s(r.get("settings.extra_config.query")),
                 "owner": (_s(r.get("settings.user")) or _s(r.get("owner"))),
                 "risk": _s(r.get("settings.risk")).lower(),
                 "aggregate": _s(r.get("settings.aggregate")).lower(),
@@ -248,6 +249,7 @@ class AlertRulesImporter(BaseImporter):
         payload: Dict[str, Any] = {
             "name": _s(desired_row.get("name")),
             "owner": owner_id,
+            "query": _s(desired_row.get("query")),
             "risk": _s(desired_row.get("risk")).lower(),
             "aggregate": _s(desired_row.get("aggregate")).lower(),
             "condition_option": _s(desired_row.get("condition_option")).lower(),

@@ -22,8 +22,7 @@ from .utils.validators import ValidationError
 from .importers.registry import get_spec_by_key, iter_specs
 
 
-setup_logging()
-log = get_logger(__name__)
+
 
 EXIT_OK = 0
 EXIT_GENERIC_ERROR = 1
@@ -31,6 +30,7 @@ EXIT_CONFIG_ERROR = 2
 EXIT_VALIDATION_ERROR = 3
 EXIT_NETWORK_ERROR = 4
 
+log = ""
 
 def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     """Resolve environment/config and return runtime artifacts.
@@ -48,6 +48,8 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
 
     try:
         cfg = Config.from_env()
+        setup_logging()
+        log = get_logger(__name__)
     except ConfigError as exc:
         log.error("Configuration error: %s", exc)
         raise

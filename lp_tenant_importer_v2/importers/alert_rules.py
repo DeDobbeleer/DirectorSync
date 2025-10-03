@@ -601,7 +601,16 @@ class AlertRulesImporter(BaseImporter):
             if owner_input != owner_resolved:
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
             desired["owner"] = owner_resolved
-
+        # alert_rules.py — dans apply(), juste avant CREATE/UPDATE
+        self.log.debug(
+            "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
+            node.id,
+            payload.get("name") or payload.get("searchname"),
+            sorted(payload.keys()),
+            (payload.get("timerange_day"), payload.get("timerange_hour"), payload.get("timerange_minute")),
+             payload.get("repos"),
+             payload.get("log_source"),
+           )
         try:
             if decision.op == "CREATE":
                 try:

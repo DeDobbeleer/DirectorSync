@@ -79,7 +79,7 @@ class AlertRulesImporter(BaseImporter):
         for _, r in df.iterrows():
             d: Dict[str, Any] = {
                 "name": _s(r.get("name")),
-                "owner": _s(r.get("owner")),
+                "owner": (_s(r.get("settings.user")) or _s(r.get("owner"))),
                 "risk": _s(r.get("settings.risk")).lower(),
                 "aggregate": _s(r.get("settings.aggregate")).lower(),
                 "condition_option": _s(r.get("settings.condition.condition_option")).lower(),
@@ -212,23 +212,15 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------------ fetching ------------------------------
     def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:  # type: ignore[override]
-        """Return existing rules by name for diffing."""
-        path = f"configapi/{pool_uuid}/{node.id}/{RESOURCE}"
-        items: List[Dict[str, Any]] = []
+        """Return existing rules by name for diffing (list_resource)."""
         try:
-            data = client.post_json(path, {"data": {}}) or []
-            if isinstance(data, dict):
-                items = data.get("items") or data.get("data") or data.get("results") or []
-                if not isinstance(items, list):
-                    items = []
-            elif isinstance(data, list):
-                items = data
+            items = client.list_resource(pool_uuid, node.id, RESOURCE) or []
         except Exception as exc:
             log.warning("fetch_existing failed [node=%s]: %s", node.name, exc)
-
+            items = []
         existing: Dict[str, Dict[str, Any]] = {}
         for it in items:
-            nm = _s(it.get("name"))
+            nm = _s(it.get("name") or it.get("searchname"))
             if nm:
                 existing[nm] = it
         log.info("fetch_existing: %d rules [node=%s]", len(existing), node.name)

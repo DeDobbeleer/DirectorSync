@@ -399,7 +399,7 @@ class AlertRulesImporter(BaseImporter):
         k, v = self._timerange_kv(desired_row)
         payload: Dict[str, Any] = {
             "searchname": _s(desired_row.get("name")),
-            "owne": owner_id,
+            "owner": owner_id,
             "risk": _s(desired_row.get("risk")),
             "repos": repos,
             "aggregate": _s(desired_row.get("aggregate")),

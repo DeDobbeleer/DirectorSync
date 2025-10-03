@@ -316,7 +316,8 @@ class AlertRulesImporter(BaseImporter):
 
         Also dumps each raw rule payload at DEBUG level for troubleshooting.
         """
-        node_id = node["id"]
+        node_id = node.id
+        node_name = node.name
 
         endpoint = (
             f"configapi/{pool_uuid}/{node_id}/{RESOURCE}/fetchMyRules"
@@ -353,7 +354,7 @@ class AlertRulesImporter(BaseImporter):
                         dump = json.dumps(it, ensure_ascii=False)
                     except Exception:
                         dump = str(it)
-                    log.debug("fetchMyRules item [node=%s]: %s", node["name"], dump)
+                    log.debug("fetchMyRules item [node=%s]: %s", node_name, dump)
 
                 all_items.extend(items)
 
@@ -362,14 +363,14 @@ class AlertRulesImporter(BaseImporter):
                     break
                 page += 1
         except Exception as exc:
-            log.warning("fetch_existing failed [node=%s]: %s", node["name"], exc)
+            log.warning("fetch_existing failed [node=%s]: %s", node_name, exc)
 
         by_name: Dict[str, Dict[str, Any]] = {}
         for r in all_items:
             if isinstance(r, dict) and r.get("name"):
                 by_name[r["name"]] = r
 
-        log.info("fetch_existing: %d rules [node=%s]", len(by_name), node["name"])
+        log.info("fetch_existing: %d rules [node=%s]", len(by_name), node_name)
         return by_name
 
     # ------------------------------ payloads ------------------------------

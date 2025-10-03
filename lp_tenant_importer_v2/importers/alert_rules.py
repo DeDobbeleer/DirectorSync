@@ -1,514 +1,354 @@
-
 from __future__ import annotations
-"""
-AlertRules importer (DirectorSync v2) — hardened implementation.
 
-- Resolves `owner` by listing Users on the node (username/display_name/email → id).
-- If owner can't be resolved: SKIP (no API call), like other importers.
-- Accepts numeric strings like "30.0" safely for all integer fields.
-- Ensures `searchname` is present (falls back to `name`).
-- Preserves prior behaviour of repos/log_source normalization and timerange handling.
-"""
-from typing import Any, Dict, Iterable, List, Tuple
-import logging
-import math
 import json
-import pandas as pd
+import logging
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional, Tuple
 
-from .base import BaseImporter, NodeRef, ValidationError
+from ..core.config import ImportContext
 from ..core.director_client import DirectorClient
+from ..utils.validators import bool_from_cell, int_from_cell, non_empty_str, list_from_cell, norm_str
 
 log = logging.getLogger(__name__)
 
-RESOURCE = "AlertRules"
+
+# --------------------------------------------------------------------------------------
+# Data models
+# --------------------------------------------------------------------------------------
+@dataclass
+class AlertRuleRow:
+    """Structured view of one Excel row for an Alert Rule."""
+    name: str
+    searchname: str
+    risk: str
+    owner: str
+    aggregate: str
+    condition_option: str
+    condition_value: int
+    limit: int
+    flush_on_trigger: str
+    timerange_day: int
+    timerange_hour: int
+    timerange_minute: int
+    query: str
+    repos: List[str]
+    log_source: List[str]
 
 
-def _s(v: Any) -> str:
-    return str(v).strip() if v is not None else ""
-
-
-def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
-    """Coerce common spreadsheet values to int.
-
-    Accepts numbers, numeric strings (e.g. "5", "30.0"), blank -> 0.
-    If ceil_from_seconds=True, we treat value as seconds and return ceil(seconds/60).
-    """
-    if v is None or v == "":
-        return 0
+# --------------------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------------------
+def _safe_int(value: Any, field: str) -> int:
+    """Force int conversion with explicit error for better debug."""
     try:
-        # Already an int
-        if isinstance(v, int):
-            return v
-        # Excel often gives floats-as-strings like "30.0"
-        f = float(str(v).strip())
-        if ceil_from_seconds:
-            return int(math.ceil(f / 60.0))
-        return int(f)
-    except Exception:
-        raise ValidationError(f"invalid integer value: {v!r}")
+        if value is None or value == "":
+            raise ValueError("empty")
+        if isinstance(value, (int,)):
+            return int(value)
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            raise ValueError(f"non-integer float {value!r}")
+        return int(str(value).strip())
+    except Exception as e:
+        raise ValueError(f"Invalid integer in column '{field}': {value!r} ({e})") from e
 
 
-def _s(value: Any) -> str:
-    """Return a trimmed string for any value; empty string for None."""
-    return str(value).strip() if value is not None else ""
-
-
-def _uniq(items: Iterable[str]) -> List[str]:
-    """Return a list with duplicates removed while preserving order."""
-    seen: set[str] = set()
-    out: List[str] = []
-    for it in items:
-        if it not in seen:
-            out.append(it)
-            seen.add(it)
-    return out
-
-
-def _parse_list_cell(cell: Any) -> List[str]:
+def _split_comma_list(cell: Any) -> List[str]:
     """
-    Parse an Excel cell into a clean list of strings.
-
-    Accepted formats:
-      - JSON arrays: ["a","b"]
-      - Delimited text using ',', ';', '|' or newlines.
-
-    Behavior:
-      - Trims quotes/brackets left-overs.
-      - Filters empty entries.
-      - Deduplicates while preserving order.
+    Accept:
+      - Python/JSON list-like strings: '["repo1","repo2"]'
+      - Comma-separated plain string: 'repo1, repo2'
+      - Already-a-list value
+    Returns a normalized list[str].
     """
-    text = _s(cell)
-    if not text:
+    if cell is None:
         return []
-
-    raw = text.strip()
-
-    # 1) Try strict JSON first for cells that look like arrays.
-    if raw.startswith("[") and raw.endswith("]"):
+    if isinstance(cell, list):
+        return [norm_str(x) for x in cell if norm_str(x)]
+    s = str(cell).strip()
+    if not s:
+        return []
+    # Try JSON list first
+    if s.startswith("[") and s.endswith("]"):
         try:
-            arr = json.loads(raw)
-            return _uniq([_s(x) for x in arr if _s(x)])
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [norm_str(x) for x in parsed if norm_str(x)]
         except Exception:
-            # Fall back to tolerant text parsing if JSON is malformed.
+            # fall back to split below
             pass
-
-    # 2) Tolerant text parsing: normalize common separators to comma.
-    for sep in ("\n", ";", "|"):
-        raw = raw.replace(sep, ",")
-
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    cleaned: List[str] = []
-    for p in parts:
-        # Remove stray quotes/brackets commonly found in CSV/Excel exports.
-        p2 = p.strip().strip('"').strip("'").strip()
-        if p2 == "[]":
-            continue
-        p2 = p2.strip("[]").strip()
-        if p2:
-            cleaned.append(p2)
-
-    return _uniq(cleaned)
+    # Fallback: comma-separated
+    return [norm_str(x) for x in s.split(",") if norm_str(x)]
 
 
-class AlertRulesImporter(BaseImporter):
-    """Importer for **AlertRules/MyRules**.
-
-    Sheets expected: `Alert` with columns at least:
-      - name
-      - settings.risk
-      - settings.aggregate
-      - settings.condition.condition_option
-      - settings.condition.condition_value
-      - settings.livesearch_data.limit
-      - settings.repos
-      - one of timerange columns (minute/hour/day/second or time_range_seconds).
+def _normalize_repos(cell: Any) -> List[str]:
     """
-    resource_name: str = "alert_rules"
-    sheet_names = ("Alert",)
-    required_columns = tuple()  # custom validation below
+    Normalize repos to bare strings (no nested quotes, no list-as-string).
+    Example inputs:
+      '["10.1.2.3:5504/Repo-A","10.2.3.4:5504/Repo-B"]'
+      '10.1.2.3:5504/Repo-A, 10.2.3.4:5504/Repo-B'
+      ['10.1.2.3:5504/Repo-A', '10.2.3.4:5504/Repo-B']
+    """
+    items = _split_comma_list(cell)
+    # Remove surrounding quotes if user put '"value"' style
+    cleaned: List[str] = []
+    for it in items:
+        v = it.strip()
+        if v.startswith('"') and v.endswith('"') and len(v) >= 2:
+            v = v[1:-1].strip()
+        if v.startswith("'") and v.endswith("'") and len(v) >= 2:
+            v = v[1:-1].strip()
+        if v:
+            cleaned.append(v)
+    return cleaned
 
-    # ---------------------------- validation ----------------------------
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
-        if "Alert" not in sheets:
-            raise ValidationError("Missing required sheet: Alert")
-        df = sheets["Alert"]
 
-        def need(col: str) -> None:
-            if col not in df.columns:
-                raise ValidationError(f"Alert: missing required column '{col}'")
+def _normalize_log_source(cell: Any) -> List[str]:
+    """
+    Same normalization as repos, but empty list is allowed/meaningful.
+    """
+    return _normalize_repos(cell)
 
-        need("name")
-        need("settings.risk")
-        need("settings.aggregate")
-        need("settings.condition.condition_option")
-        need("settings.condition.condition_value")
-        need("settings.livesearch_data.limit")
-        need("settings.repos")
-        if not any(
-            c in df.columns
-            for c in (
-                "settings.livesearch_data.timerange_minute",
-                "settings.livesearch_data.timerange_hour",
-                "settings.livesearch_data.timerange_day",
-                "settings.livesearch_data.timerange_second",
-                "settings.time_range_seconds",
-            )
-        ):
-            raise ValidationError(
-                "Alert: missing timerange column (minute/hour/day/second)"
-            )
 
-    # ------------------------------ desired ------------------------------
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
-        df = sheets["Alert"].fillna("")
-        for _, r in df.iterrows():
-            d: Dict[str, Any] = {
-                "name": _s(r.get("name")),
-                # owner priority: settings.user then owner
-                "owner": (_s(r.get("settings.user")) or _s(r.get("owner"))),
-                "risk": _s(r.get("settings.risk")).lower(),
-                "aggregate": _s(r.get("settings.aggregate")).lower(),
-                "condition_option": _s(r.get("settings.condition.condition_option")).lower(),
-                "condition_value": _to_int(r.get("settings.condition.condition_value")),
-                "limit": _to_int(r.get("settings.livesearch_data.limit")),
-                "timerange_minute": _s(r.get("settings.livesearch_data.timerange_minute")),
-                "timerange_hour": _s(r.get("settings.livesearch_data.timerange_hour")),
-                "timerange_day": _s(r.get("settings.livesearch_data.timerange_day")),
-                "timerange_second": _s(r.get("settings.livesearch_data.timerange_second")),
-                "time_range_seconds": _s(r.get("settings.time_range_seconds")),
-                
-                # Parse repos/log_source with JSON-first strategy; then tolerant text.
-                "repos": _parse_list_cell(r.get("settings.repos")),
-                "log_source": _parse_list_cell(r.get("settings.log_source")),                
-                               
-                "searchname": _s(r.get("settings.searchname")) or _s(r.get("name")),
-                "flush_on_trigger": bool(r.get("settings.flush_on_trigger")),
-                "throttling_enabled": bool(r.get("settings.throttling_enabled")),
-                "throttling_field": _s(r.get("settings.throttling_field")),
-                "throttling_time_range": _s(r.get("settings.throttling_time_range")),
-                "search_interval_minute": _s(r.get("settings.search_interval_minute")),
-                "context_template": _s(r.get("settings.alert_context_template")) or _s(r.get("settings.context_template")),
-                # optional query passthrough if present in sheet (prevents Monitor "Query cannot be empty")
-                "query": _s(r.get("settings.extra_config.query")),
-            }
-            
-            # Normalized copies used in payload build (already cleaned & deduped).
-            d["repos_norm"] = [x for x in d["repos"] if x]
-            d["log_source_norm"] = [x for x in d["log_source"] if x]
+def _must_get(d: Dict[str, Any], key: str) -> Any:
+    """Raise with a helpful message if key missing."""
+    if key not in d:
+        raise KeyError(f"Missing required column '{key}' in Excel row")
+    return d[key]
 
-            # Compute timerange fallback from seconds
-            if d.get("time_range_seconds") and not any(
-                d.get(k) for k in ("timerange_minute", "timerange_hour", "timerange_day", "timerange_second")
-            ):
-                try:
-                    sec = _to_int(d["time_range_seconds"])
-                    d["timerange_second"] = str(sec)
-                except Exception:
-                    pass
-            yield d
 
-    # ------------------------ canonicalization (diff) ------------------------
-    @staticmethod
-    def key_fn(desired_row: Dict[str, Any]) -> str:
-        return _s(desired_row.get("name"))
+def _owner_to_id(owner_name: str, users: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Find a user id by its username (case-insensitive).
+    If not found: return None.
+    """
+    target = owner_name.strip().lower()
+    for u in users:
+        uname = str(u.get("username", "")).lower()
+        if uname == target:
+            return str(u.get("_id"))
+    return None
 
-    def _canon_timerange(self, d: Dict[str, Any]) -> Tuple[str, int]:
-        if (m := d.get("timerange_minute")):
-            return ("minute", _to_int(m))
-        if (h := d.get("timerange_hour")):
-            return ("hour", _to_int(h))
-        if (dy := d.get("timerange_day")):
-            return ("day", _to_int(dy))
-        if (s := d.get("timerange_second")):
-            # seconds → minutes (ceil)
-            return ("minute", _to_int(s, ceil_from_seconds=True))
-        return ("minute", 0)
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        # key, val = self._canon_timerange(desired_row)
-        return {
-            "risk": _s(desired_row.get("risk")).lower(),
-            "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos_norm", [])])),
-            "aggregate": _s(desired_row.get("aggregate")).lower(),
-            "condition_option": _s(desired_row.get("condition_option")).lower(),
-            "condition_value": _to_int(desired_row.get("condition_value")),
-            "limit": _to_int(desired_row.get("limit")),
-            "timerange_day":  _to_int(desired_row.get("timerange_day")),
-            "timerange_hour":  _to_int(desired_row.get("timerange_hour")),
-            "timerange_minute":  _to_int(desired_row.get("timerange_minute")),
-            "searchname": _s(desired_row.get("searchname")),
-        }
+def _collect_row(data: Dict[str, Any]) -> AlertRuleRow:
+    """
+    Map Excel row to AlertRuleRow with strict typing and PEP8-friendly, self-documented fields.
+    Required columns are enforced; errors are explicit and actionable.
+    """
+    name = non_empty_str(_must_get(data, "name"), "name")
+    searchname = non_empty_str(_must_get(data, "searchname"), "searchname")
+    risk = non_empty_str(_must_get(data, "risk"), "risk").lower()
+    owner = non_empty_str(_must_get(data, "owner"), "owner")
+    aggregate = non_empty_str(_must_get(data, "aggregate"), "aggregate").lower()
+    condition_option = non_empty_str(_must_get(data, "condition_option"), "condition_option").lower()
+    condition_value = _safe_int(_must_get(data, "condition_value"), "condition_value")
+    limit = _safe_int(_must_get(data, "limit"), "limit")
+    flush_on_trigger = non_empty_str(_must_get(data, "flush_on_trigger"), "flush_on_trigger").lower()
 
-    # ------------------------------ users cache ------------------------------
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Users cache: node_id -> { lookup_key_lower: user_id }
-        self._users_cache: dict[str, dict[str, str]] = {}
-        self._users_loaded: set[str] = set()
+    # official columns for time range
+    timerange_day = _safe_int(_must_get(data, "timerange_day"), "timerange_day")
+    timerange_hour = _safe_int(_must_get(data, "timerange_hour"), "timerange_hour")
+    timerange_minute = _safe_int(_must_get(data, "timerange_minute"), "timerange_minute")
 
-    def _get_profile_option_default_owner(self) -> str:
-        """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
-        import os
-        try:
-            import yaml  # type: ignore
-        except Exception:
-            return ""
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # lp_tenant_importer_v2/
-        res_path = os.path.join(base_dir, "resources", "profiles.yml")
-        if not os.path.exists(res_path):
-            return ""
-        try:
-            with open(res_path, "r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh) or {}
-            prof = (data.get("profiles") or {}).get("AlertRules") or {}
-            opts = prof.get("options") or {}
-            val = opts.get("default_owner") or ""
-            return val.strip() if isinstance(val, str) else ""
-        except Exception:
-            return ""
+    # official column for the Query (settings.extra_config.query)
+    query = non_empty_str(_must_get(data, "settings.extra_config.query"), "settings.extra_config.query")
 
-    def _load_users_for_node(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
-        node_key = node.id
-        if node_key in self._users_loaded:
-            return
-        try:
-            raw = client.list_resource(pool_uuid, node.id, "Users") or []
-        except Exception:
-            raw = []
-        idx: dict[str, str] = {}
-        for u in raw:
-            uid = _s(u.get("id"))
-            if not uid:
-                continue
-            for k in (
-                u.get("id"),
-                u.get("username"),
-                (u.get("display_name") or u.get("name")),
-                (u.get("email") or u.get("emailAddress")),
-            ):
-                key = _s(k).lower()
-                if key:
-                    idx[key] = uid
-        self._users_cache[node_key] = idx
-        self._users_loaded.add(node_key)
-        log.debug("Users cache loaded: node=%s size=%d", node.name, len(idx))
+    # repos and log_source must be list[str] (API expects an array of plain strings)
+    repos = _normalize_repos(_must_get(data, "repos"))
+    log_source = _normalize_log_source(_must_get(data, "log_source"))
 
-    def _resolve_owner_id(self, client: DirectorClient, pool_uuid: str, node: NodeRef, owner_raw: str) -> str:
-        """Return a valid Director user id for this node (case-insensitive resolution), or '' if not found."""
-        self._load_users_for_node(client, pool_uuid, node)
-        lookup = _s(owner_raw)
-        if not lookup:
-            return ""
-        idx = self._users_cache.get(node.id) or {}
-        # Direct exact id
-        if lookup in idx.values():
-            return lookup
-        # Case-insensitive by common keys (username/display_name/email)
-        return idx.get(lookup.lower(), "")
+    return AlertRuleRow(
+        name=name,
+        searchname=searchname,
+        risk=risk,
+        owner=owner,
+        aggregate=aggregate,
+        condition_option=condition_option,
+        condition_value=condition_value,
+        limit=limit,
+        flush_on_trigger=flush_on_trigger,
+        timerange_day=timerange_day,
+        timerange_hour=timerange_hour,
+        timerange_minute=timerange_minute,
+        query=query,
+        repos=repos,
+        log_source=log_source,
+    )
 
-    # ------------------------------ fetching ------------------------------
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef,) -> Dict[str, Dict[str, Any]]:
-        
+def _row_to_payload(row: AlertRuleRow, owner_id: str) -> Dict[str, Any]:
+    """
+    Convert a validated row into a Director API payload.
+    All keys/shape follow the AlertRules Config API (v2.6+).
+    """
+    payload: Dict[str, Any] = {
+        "name": row.name,
+        "owner": owner_id,
+        "risk": row.risk,
+        "aggregate": row.aggregate,
+        "condition_option": row.condition_option,
+        "condition_value": row.condition_value,
+        "limit": row.limit,
+        "searchname": row.searchname,
+        "timerange_day": row.timerange_day,
+        "timerange_hour": row.timerange_hour,
+        "timerange_minute": row.timerange_minute,
+        "flush_on_trigger": row.flush_on_trigger,
+        "query": row.query,
+        # These two must be arrays of strings. (No JSON-encoded strings)
+        "repos": row.repos,
+        "log_source": row.log_source,
+    }
+    return payload
+
+
+# --------------------------------------------------------------------------------------
+# Importer
+# --------------------------------------------------------------------------------------
+class AlertRulesImporter:
+    """
+    Importer for Alert Rules that conforms to the v2 framework:
+      - Read/validate Excel rows
+      - Resolve dependencies (owner -> id via Users API)
+      - Create resources via DirectorClient
+      - Monitor via monitorapi URL
+      - NO fallbacks: if a required field is missing in Excel, we SKIP and log
+    """
+
+    SHEET = "alert_rules"
+
+    def __init__(self, ctx: ImportContext, director: DirectorClient) -> None:
+        self.ctx = ctx
+        self.director = director
+        self.users_cache: Dict[str, List[Dict[str, Any]]] = {}  # by node name/id
+
+    # ----------------------------- Users dependency -----------------------------
+    def _load_users_for_node(self, node_id: str, node_name: str) -> List[Dict[str, Any]]:
         """
-        Fetch all existing AlertRules using POST /AlertRules/fetchMyRules,
-        then build a map keyed by rule name.
-
-        Also dumps each raw rule payload at DEBUG level for troubleshooting.
+        Fetch and cache users for a given node (tenant node id).
+        We use the Config API: GET /{pool}/{node}/Users
         """
-        node_id = node.id
-        node_name = node.name
+        cache_key = node_name
+        if cache_key in self.users_cache:
+            return self.users_cache[cache_key]
 
-        endpoint = (
-            f"configapi/{pool_uuid}/{node_id}/{RESOURCE}/fetchMyRules"
-        )
+        url = f"configapi/{self.ctx.pool_uuid}/{node_id}/Users"
+        resp = self.director.get(url)
+        users = resp.json() if hasattr(resp, "json") else resp
+        if not isinstance(users, list):
+            log.warning("Unexpected Users response for node=%s: %r", node_name, users)
+            users = []
+        self.users_cache[cache_key] = users
+        log.debug("Users cache loaded: node=%s size=%d", node_name, len(users))
+        return users
 
-        # Default page size chosen to avoid multiple roundtrips on typical setups.
-        page = 1
-        limit = 500
-        all_items: List[Dict[str, Any]] = []
-
-        try:
-            while True:
-                # Most Logpoint endpoints expect the JSON body wrapped into {"data": {...}}
-                body = {"data": {"filters": {}, "page": page, "limit": limit}}
-                resp = self.client._req("POST", endpoint, json=body)
-
-                # Be tolerant about response shape across Director versions.
-                items = []
-                if isinstance(resp, dict):
-                    # Common shapes observed: {"status":"Success","data":[...]} or {"data":{"list":[...]}}
-                    if isinstance(resp.get("data"), list):
-                        items = resp["data"]
-                    elif isinstance(resp.get("data"), dict) and isinstance(resp["data"].get("list"), list):
-                        items = resp["data"]["list"]
-                    elif isinstance(resp.get("list"), list):
-                        items = resp["list"]
-
-                if not items:
-                    break
-
-                # Debug-dump each rule payload (truncated for safety).
-                for it in items:
-                    try:
-                        dump = json.dumps(it, ensure_ascii=False)
-                    except Exception:
-                        dump = str(it)
-                    log.debug("fetchMyRules item [node=%s]: %s", node_name, dump)
-
-                all_items.extend(items)
-
-                # Stop if fewer items than requested => last page.
-                if len(items) < limit:
-                    break
-                page += 1
-        except Exception as exc:
-            log.warning("fetch_existing failed [node=%s]: %s", node_name, exc)
-
-        by_name: Dict[str, Dict[str, Any]] = {}
-        for r in all_items:
-            if isinstance(r, dict) and r.get("name"):
-                by_name[r["name"]] = r
-
-        log.info("fetch_existing: %d rules [node=%s]", len(by_name), node_name)
-        return by_name
-
-    # ------------------------------ payloads ------------------------------
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Build payload for AlertRules.create (types validated)."""
-        # Resolve and validate owner (must be a string id here)
-        owner_raw = desired_row.get("owner")
-        if isinstance(owner_raw, (list, tuple)) and owner_raw:
-            owner_id = _s(owner_raw[0])
+    def _resolve_owner(self, owner: str, users: List[Dict[str, Any]], node_name: str) -> Optional[str]:
+        """
+        Resolve owner name to its Logpoint ID by scanning the Users list.
+        If not found: return None (caller will SKIP the row).
+        """
+        user_id = _owner_to_id(owner, users)
+        if user_id:
+            log.info("owner resolved: %r -> id=%s [node=%s]", owner, user_id, node_name)
         else:
-            owner_id = _s(owner_raw)
-        if not owner_id:
-            owner_id = self._get_profile_option_default_owner()
-        if not owner_id:
-            raise ValidationError("owner is required and could not be resolved from context or profiles.yml")
+            log.warning("Unknown owner %r on node=%s -> SKIP", owner, node_name)
+        return user_id
 
-
-        repos = desired_row.get("repos_norm", [])
-        if (
-            not isinstance(repos, list)
-            or not repos
-            or not all(isinstance(x, str) and x.strip() for x in repos)
-        ):
-            raise ValidationError("`repos` must be a non-empty list of strings.")
-
-
-        payload: Dict[str, Any] = {
-            "name": _s(desired_row.get("name")),
-            "owner": owner_id,
-            "risk": _s(desired_row.get("risk")).lower(),
-            "aggregate": _s(desired_row.get("aggregate")).lower(),
-            "condition_option": _s(desired_row.get("condition_option")).lower(),
-            "condition_value": _to_int(desired_row.get("condition_value")),
-            "limit": _to_int(desired_row.get("limit")),
-            "repos": repos,
-            "searchname": _s(desired_row.get("searchname")) or _s(desired_row.get("name")),
-            "timerange_day": int(desired_row.get("timerange_day")),
-            "timerange_hour": int(desired_row.get("timerange_hour")),
-            "timerange_minute": int(desired_row.get("timerange_minute")),
-        }
-
-        # timerange fields
-        # key, val = self._canon_timerange(desired_row)
-        # if val:
-        #     payload[f"timerange_{key}"] = val
-
-        # log_source optional
-        if desired_row.get("log_source_norm"):
-            payload["log_source"] = desired_row.get("log_source_norm")
-
-        # search interval
-        if desired_row.get("search_interval_minute"):
-            payload["search_interval_minute"] = _to_int(desired_row.get("search_interval_minute"))
-
-        # switches
-        if desired_row.get("flush_on_trigger"):
-            payload["flush_on_trigger"] = "on"
-        if desired_row.get("throttling_enabled"):
-            payload["throttling_enabled"] = "on"
-            if _s(desired_row.get("throttling_field")):
-                payload["throttling_field"] = _s(desired_row.get("throttling_field"))
-            if desired_row.get("throttling_time_range"):
-                payload["throttling_time_range"] = _to_int(desired_row.get("throttling_time_range"))
-
-        # context template
-        if _s(desired_row.get("context_template")):
-            payload["alert_context_template"] = _s(desired_row.get("context_template"))
-
-        # optional query passthrough (prevents empty query validation on some setups)
-        if _s(desired_row.get("query")):
-            payload["query"] = _s(desired_row.get("query"))
-            
-        return payload
-
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_row: Dict[str, Any]) -> Dict[str, Any]:
-        """Build payload for AlertRules.update (reuse create builder)."""
-        return self.build_payload_create(desired_row)
-
-    # ------------------------------ apply ------------------------------
-    def apply(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-        decision,
-        existing_id: str | None,
-    ) -> Dict[str, Any]:
-        desired = decision.desired or {}
-        name = _s(desired.get("name")) or "(unnamed)"
-
-        # Resolve owner -> user id BEFORE calling API (CREATE/UPDATE only)
-        if decision.op in ("CREATE", "UPDATE"):
-            # prefer settings.user if present, else any provided owner, else profiles.yml default
-            owner_input = (desired.get("owner") or self._get_profile_option_default_owner())
-            owner_resolved = self._resolve_owner_id(client, pool_uuid, node, owner_input or "")
-            if not owner_resolved:
-                log.warning(
-                    "SKIP %s alert=%s [node=%s] reason=Unknown owner '%s' (no API call)",
-                    decision.op, name, node.name, owner_input
-                )
-                return {"status": "Skipped", "reason": f"Unknown owner '{owner_input}'"}
-            if owner_input != owner_resolved:
-                log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
-            desired["owner"] = owner_resolved
-
+    # ----------------------------- Existing rules -----------------------------
+    def fetch_existing(self, node_id: str, node_name: str) -> List[Dict[str, Any]]:
+        """
+        Fetch existing rules by using the official "fetchMyRules" endpoint.
+        This is a POST with no payload, returning a monitor URL; we must monitor the job.
+        """
         try:
-            if decision.op == "CREATE":
-                try:
-                    payload = self.build_payload_create(desired)
-                    log.debug(f"new collected and normalized payload: {payload}")
-                except ValidationError as ve:
-                    log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
-                    return {"status": "Skipped", "reason": str(ve)}
-                
-                log.info("CREATE alert=%s [node=%s]", name, node.name)
-                log.debug("CREATE payload=%s", payload)
-                
-                return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
+            # Per framework: do not call requests directly; go via DirectorClient + monitor job.
+            # See docs: POST /{pool}/{node}/AlertRules/fetchMyRules
+            url = f"configapi/{self.ctx.pool_uuid}/{node_id}/AlertRules/fetchMyRules"
+            log.debug("Fetching existing alert rules via %s", url)
 
-            if decision.op == "UPDATE" and existing_id:
-                try:
-                    payload = self.build_payload_update(desired, {"id": existing_id})
-                except ValidationError as ve:
-                    log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s (no API call)",
-                                name, existing_id, node.name, ve)
-                    return {"status": "Skipped", "reason": str(ve)}
-                log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
-                log.debug("UPDATE payload=%s", payload)
-                return client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
+            # For fetchMyRules, the API expects POST with an empty JSON payload.
+            post_resp = self.director.post(url, data={})
+            monitor_url = self.director.extract_monitor_url(post_resp)
+            if not monitor_url:
+                log.warning("fetch_existing: monitor URL not found in response [node=%s]", node_name)
+                return []
 
-            log.info("NOOP alert=%s [node=%s]", name, node.name)
-            return {"status": "Success"}
+            result = self.director.monitor_job_url(monitor_url, node_id=node_id)
+            data = result.get("response") or {}
+            # The result shape can vary; make it defensive.
+            rules = data.get("data") or data.get("rules") or []
+            if not isinstance(rules, list):
+                log.warning("fetch_existing: unexpected payload shape [node=%s]: %r", node_name, data)
+                return []
 
-        except Exception as exc:
-            # Convert HTTP/errors to a clean per-row result without stacktrace propagation
-            msg = str(exc)
-            log.error("APPLY FAILED alert=%s [node=%s]: %s", name, node.name, msg)
-            return {"status": "Failed", "error": msg}
+            log.info("fetch_existing: %d rules [node=%s]", len(rules), node_name)
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("fetch_existing: DEBUG dump of payload [node=%s]: %s", node_name, json.dumps(data, ensure_ascii=False))
+            return rules
 
+        except Exception as e:
+            log.warning("fetch_existing failed [node=%s]: %s", node_name, e)
+            log.info("fetch_existing: 0 rules [node=%s]", node_name)
+            return []
 
-__all__ = ["AlertRulesImporter"]
+    # ----------------------------- Apply (create/update) -----------------------------
+    def apply(self, node_id: str, node_name: str, rows: List[Dict[str, Any]]) -> List[Tuple[str, str, str, str, Optional[str]]]:
+        """
+        Apply the desired state from Excel rows.
+        Returns a list of tuples for reporting:
+          (siem, node, name, action, status_or_error)
+        """
+        results: List[Tuple[str, str, str, str, Optional[str]]] = []
+
+        # Preload dependencies
+        users = self._load_users_for_node(node_id, node_name)
+
+        # (Optional) existing rules set — currently unused but ready for future "update" logic
+        _existing = self.fetch_existing(node_id, node_name)
+
+        for raw in rows:
+            try:
+                row = _collect_row(raw)
+
+                # Resolve owner
+                owner_id = self._resolve_owner(row.owner, users, node_name)
+                if not owner_id:
+                    results.append((self.ctx.siem_uuid, node_name, row.name, "create", "Skipped (unknown owner)"))
+                    continue
+
+                payload = _row_to_payload(row, owner_id)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("new collected and normalized payload: %s", payload)
+
+                # For now we only support CREATE (no ID from Excel to match)
+                log.info("CREATE alert=%s [node=%s]", row.name, node_name)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("CREATE payload=%s", payload)
+
+                # API call + monitor via framework
+                create_url = f"configapi/{self.ctx.pool_uuid}/{node_id}/AlertRules"
+                resp = self.director.create_resource(
+                    pool_uuid=self.ctx.pool_uuid,
+                    node_id=node_id,
+                    resource="AlertRules",
+                    data=payload
+                )
+
+                # The DirectorClient.create_resource() already monitors and returns a final status,
+                # but we keep the line-by-line reporting consistent with other importers.
+                results.append((self.ctx.siem_uuid, node_name, row.name, "create", "Success", None))
+
+            except KeyError as e:
+                msg = f"Missing field: {e}"
+                log.warning("SKIP CREATE alert=%s [node=%s] reason=%s", raw.get("name") or raw.get("searchname") or "<unnamed>", node_name, msg)
+                results.append((self.ctx.siem_uuid, node_name, str(raw.get("name") or raw.get("searchname") or "<unnamed>"), "create", f"Skipped ({msg})", None))
+            except ValueError as e:
+                # Type/format issues (e.g., "30.0" in an int column)
+                log.error("APPLY FAILED alert=%s [node=%s]: %s", raw.get("name") or raw.get("searchname") or "<unnamed>", node_name, e)
+                results.append((self.ctx.siem_uuid, node_name, str(raw.get("name") or raw.get("searchname") or "<unnamed>"), "create", "Failed", str(e)))
+            except Exception as e:
+                log.exception("APPLY FAILED (unexpected) alert=%s [node=%s]", raw.get("name") or raw.get("searchname") or "<unnamed>", node_name)
+                results.append((self.ctx.siem_uuid, node_name, str(raw.get("name") or raw.get("searchname") or "<unnamed>"), "create", "Failed", str(e)))
+
+        return results

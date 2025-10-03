@@ -264,6 +264,7 @@ class DirectorClient:
             last = data
 
             resp = data.get("response")
+            log.debug(f"monitor_job: running payload={_short_json(_redact(data))}" )
             if isinstance(resp, dict):
                 success = resp.get("success")
                 errors = resp.get("errors", [])

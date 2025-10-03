@@ -1,10 +1,13 @@
-from __future__ import annotations
-"""AlertRules importer (DirectorSync v2) — clean implementation.
 
-- Matches BaseImporter hooks used elsewhere in the repo.
-- Resolves `owner` by listing Users on the node and mapping name/email/username -> user id.
-- Skips rows with unknown owner (no API call).
-- Ensures correct payload types for Director API (AlertRules).
+from __future__ import annotations
+"""
+AlertRules importer (DirectorSync v2) — hardened implementation.
+
+- Resolves `owner` by listing Users on the node (username/display_name/email → id).
+- If owner can't be resolved: SKIP (no API call), like other importers.
+- Accepts numeric strings like "30.0" safely for all integer fields.
+- Ensures `searchname` is present (falls back to `name`).
+- Preserves prior behaviour of repos/log_source normalization and timerange handling.
 """
 from typing import Any, Dict, Iterable, List, Tuple
 import logging
@@ -24,6 +27,27 @@ def _s(v: Any) -> str:
     return str(v).strip() if v is not None else ""
 
 
+def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
+    """Coerce common spreadsheet values to int.
+
+    Accepts numbers, numeric strings (e.g. "5", "30.0"), blank -> 0.
+    If ceil_from_seconds=True, we treat value as seconds and return ceil(seconds/60).
+    """
+    if v is None or v == "":
+        return 0
+    try:
+        # Already an int
+        if isinstance(v, int):
+            return v
+        # Excel often gives floats-as-strings like "30.0"
+        f = float(str(v).strip())
+        if ceil_from_seconds:
+            return int(math.ceil(f / 60.0))
+        return int(f)
+    except Exception:
+        raise ValidationError(f"invalid integer value: {v!r}")
+
+
 class AlertRulesImporter(BaseImporter):
     """Importer for **AlertRules/MyRules**.
 
@@ -37,7 +61,6 @@ class AlertRulesImporter(BaseImporter):
       - settings.repos
       - one of timerange columns (minute/hour/day/second or time_range_seconds).
     """
-    # minimal BaseImporter metadata (kept for consistency if used)
     resource_name: str = "alert_rules"
     sheet_names = ("Alert",)
     required_columns = tuple()  # custom validation below
@@ -79,13 +102,13 @@ class AlertRulesImporter(BaseImporter):
         for _, r in df.iterrows():
             d: Dict[str, Any] = {
                 "name": _s(r.get("name")),
-                "query": _s(r.get("settings.extra_config.query")),
+                # owner priority: settings.user then owner
                 "owner": (_s(r.get("settings.user")) or _s(r.get("owner"))),
                 "risk": _s(r.get("settings.risk")).lower(),
                 "aggregate": _s(r.get("settings.aggregate")).lower(),
                 "condition_option": _s(r.get("settings.condition.condition_option")).lower(),
-                "condition_value": int(r.get("settings.condition.condition_value") or 0),
-                "limit": int(r.get("settings.livesearch_data.limit") or 0),
+                "condition_value": _to_int(r.get("settings.condition.condition_value")),
+                "limit": _to_int(r.get("settings.livesearch_data.limit")),
                 "timerange_minute": _s(r.get("settings.livesearch_data.timerange_minute")),
                 "timerange_hour": _s(r.get("settings.livesearch_data.timerange_hour")),
                 "timerange_day": _s(r.get("settings.livesearch_data.timerange_day")),
@@ -100,16 +123,19 @@ class AlertRulesImporter(BaseImporter):
                 "throttling_time_range": _s(r.get("settings.throttling_time_range")),
                 "search_interval_minute": _s(r.get("settings.search_interval_minute")),
                 "context_template": _s(r.get("settings.alert_context_template")) or _s(r.get("settings.context_template")),
+                # optional query passthrough if present in sheet (prevents Monitor "Query cannot be empty")
+                "query": _s(r.get("settings.query")),
             }
             # Normalizations
             d["repos_norm"] = [x for x in d["repos"] if x]
             d["log_source_norm"] = [x for x in d["log_source"] if x]
+
             # Compute timerange fallback from seconds
             if d.get("time_range_seconds") and not any(
                 d.get(k) for k in ("timerange_minute", "timerange_hour", "timerange_day", "timerange_second")
             ):
                 try:
-                    sec = int(d["time_range_seconds"])
+                    sec = _to_int(d["time_range_seconds"])
                     d["timerange_second"] = str(sec)
                 except Exception:
                     pass
@@ -122,13 +148,14 @@ class AlertRulesImporter(BaseImporter):
 
     def _canon_timerange(self, d: Dict[str, Any]) -> Tuple[str, int]:
         if (m := d.get("timerange_minute")):
-            return ("minute", int(m))
+            return ("minute", _to_int(m))
         if (h := d.get("timerange_hour")):
-            return ("hour", int(h))
+            return ("hour", _to_int(h))
         if (dy := d.get("timerange_day")):
-            return ("day", int(dy))
+            return ("day", _to_int(dy))
         if (s := d.get("timerange_second")):
-            return ("minute", int(math.ceil(float(s) / 60.0)))
+            # seconds → minutes (ceil)
+            return ("minute", _to_int(s, ceil_from_seconds=True))
         return ("minute", 0)
 
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,8 +165,8 @@ class AlertRulesImporter(BaseImporter):
             "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos_norm", [])])),
             "aggregate": _s(desired_row.get("aggregate")).lower(),
             "condition_option": _s(desired_row.get("condition_option")).lower(),
-            "condition_value": int(desired_row.get("condition_value") or 0),
-            "limit": int(desired_row.get("limit") or 0),
+            "condition_value": _to_int(desired_row.get("condition_value")),
+            "limit": _to_int(desired_row.get("limit")),
             f"timerange_{key}": val,
             "searchname": _s(desired_row.get("searchname")),
         }
@@ -249,12 +276,11 @@ class AlertRulesImporter(BaseImporter):
         payload: Dict[str, Any] = {
             "name": _s(desired_row.get("name")),
             "owner": owner_id,
-            "query": _s(desired_row.get("query")),
             "risk": _s(desired_row.get("risk")).lower(),
             "aggregate": _s(desired_row.get("aggregate")).lower(),
             "condition_option": _s(desired_row.get("condition_option")).lower(),
-            "condition_value": int(desired_row.get("condition_value") or 0),
-            "limit": int(desired_row.get("limit") or 0),
+            "condition_value": _to_int(desired_row.get("condition_value")),
+            "limit": _to_int(desired_row.get("limit")),
             "repos": repos,
             "searchname": _s(desired_row.get("searchname")) or _s(desired_row.get("name")),
         }
@@ -270,7 +296,7 @@ class AlertRulesImporter(BaseImporter):
 
         # search interval
         if desired_row.get("search_interval_minute"):
-            payload["search_interval_minute"] = int(desired_row.get("search_interval_minute"))
+            payload["search_interval_minute"] = _to_int(desired_row.get("search_interval_minute"))
 
         # switches
         if desired_row.get("flush_on_trigger"):
@@ -280,11 +306,15 @@ class AlertRulesImporter(BaseImporter):
             if _s(desired_row.get("throttling_field")):
                 payload["throttling_field"] = _s(desired_row.get("throttling_field"))
             if desired_row.get("throttling_time_range"):
-                payload["throttling_time_range"] = int(desired_row.get("throttling_time_range"))
+                payload["throttling_time_range"] = _to_int(desired_row.get("throttling_time_range"))
 
         # context template
         if _s(desired_row.get("context_template")):
             payload["alert_context_template"] = _s(desired_row.get("context_template"))
+
+        # optional query passthrough (prevents empty query validation on some setups)
+        if _s(desired_row.get("query")):
+            payload["query"] = _s(desired_row.get("query"))
 
         return payload
 
@@ -306,11 +336,14 @@ class AlertRulesImporter(BaseImporter):
 
         # Resolve owner -> user id BEFORE calling API (CREATE/UPDATE only)
         if decision.op in ("CREATE", "UPDATE"):
-            owner_input = desired.get("owner") or self._get_profile_option_default_owner()
+            # prefer settings.user if present, else any provided owner, else profiles.yml default
+            owner_input = (desired.get("owner") or self._get_profile_option_default_owner())
             owner_resolved = self._resolve_owner_id(client, pool_uuid, node, owner_input or "")
             if not owner_resolved:
-                log.warning("SKIP %s alert=%s [node=%s] reason=Unknown owner '%s' (no API call)",
-                            decision.op, name, node.name, owner_input)
+                log.warning(
+                    "SKIP %s alert=%s [node=%s] reason=Unknown owner '%s' (no API call)",
+                    decision.op, name, node.name, owner_input
+                )
                 return {"status": "Skipped", "reason": f"Unknown owner '{owner_input}'"}
             if owner_input != owner_resolved:
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)

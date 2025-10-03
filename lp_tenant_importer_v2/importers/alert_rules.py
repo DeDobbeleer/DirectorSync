@@ -221,6 +221,7 @@ def _soft_list(value: object) -> list[str]:
             parsed = json.loads(s)
         except Exception:
             parsed = None
+            return []
         # Python literal
         if not isinstance(parsed, list):
             try:
@@ -229,19 +230,24 @@ def _soft_list(value: object) -> list[str]:
                     parsed = lit
             except Exception:
                 parsed = None
+                return []
         if isinstance(parsed, list):
             raw = [str(x) for x in parsed]
+            return raw
         else:
             s = s.replace("\n", ",").replace(";", ",").replace("|", ",")
             raw = [p for p in (x.strip() for x in s.split(",")) if p]
+            return raw
+    return []
+    
 
-    def _clean_one(x: str) -> str:
-        x = x.strip().lstrip("[").rstrip("]").strip()
-        if x.startswith(("'", '"')):
-            x = x[1:].lstrip()
-        if x.endswith(("'", '"')):
-            x = x[:-1].rstrip()
-        return x.strip()
+def _clean_one(x: str) -> str:
+    x = x.strip().lstrip("[").rstrip("]").strip()
+    if x.startswith(("'", '"')):
+        x = x[1:].lstrip()
+    if x.endswith(("'", '"')):
+        x = x[:-1].rstrip()
+    return x.strip()
 
     seen, out = set(), []
     for it in ( _clean_one(x) for x in raw ):

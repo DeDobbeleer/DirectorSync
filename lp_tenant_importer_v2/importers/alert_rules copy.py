@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 """
 AlertRules importer (DirectorSync v2) — hardened implementation.
@@ -28,7 +27,6 @@ FETCHARLERT = "AlertRules/MyAlertRules/fetch"
 def _s(v: Any) -> str:
     return str(v).strip() if v is not None else ""
 
-
 def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     """Coerce common spreadsheet values to int.
 
@@ -50,12 +48,9 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         log.error(f"invalid integer value: {v!r}")
         raise ValidationError(f"invalid integer value: {v!r}")
 
-
-
 def _s(value: Any) -> str:
     """Return a trimmed string for any value; empty string for None."""
     return str(value).strip() if value is not None else ""
-
 
 def _uniq(items: Iterable[str]) -> List[str]:
     """Return a list with duplicates removed while preserving order."""
@@ -66,7 +61,6 @@ def _uniq(items: Iterable[str]) -> List[str]:
             out.append(it)
             seen.add(it)
     return out
-
 
 def _parse_list_cell(cell: Any) -> List[str]:
     """
@@ -112,7 +106,6 @@ def _parse_list_cell(cell: Any) -> List[str]:
             cleaned.append(p2)
 
     return _uniq(cleaned)
-
 
 def _parse_list_field(raw) -> list[str]:
     """
@@ -183,6 +176,106 @@ def _parse_list_field(raw) -> list[str]:
             seen.add(v)
     return clean
 
+_RE_IP_PORT = re.compile(r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})(?P<rest>/.*)?\s*$")
+
+def _get_repo_port_from_profiles() -> int:
+    """
+    Optional override from resources/profiles.yml:
+      profiles.AlertRules.options.repo_port
+    Falls back to 5504 if not found.
+    """
+    import os
+    try:
+        import yaml  # type: ignore
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        res_path = os.path.join(base_dir, "resources", "profiles.yml")
+        if os.path.exists(res_path):
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            port = (((data.get("profiles") or {})
+                     .get("AlertRules") or {})
+                    .get("options") or {}).get("repo_port")
+            if isinstance(port, int) and port > 0:
+                return port
+    except Exception:
+        pass
+    return 5504
+
+def _soft_list(value: object) -> list[str]:
+    """
+    Parse a cell into list[str]:
+      - JSON array
+      - Python list literal
+      - CSV-ish with ',', ';', '|', or newlines
+    Also trims stray quotes/brackets.
+    """
+    if isinstance(value, list):
+        raw = [str(x) for x in value]
+    else:
+        s = (str(value or "")).strip()
+        if not s:
+            return []
+        parsed = None
+        # JSON
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            parsed = None
+        # Python literal
+        if not isinstance(parsed, list):
+            try:
+                lit = ast.literal_eval(s)
+                if isinstance(lit, list):
+                    parsed = lit
+            except Exception:
+                parsed = None
+        if isinstance(parsed, list):
+            raw = [str(x) for x in parsed]
+        else:
+            s = s.replace("\n", ",").replace(";", ",").replace("|", ",")
+            raw = [p for p in (x.strip() for x in s.split(",")) if p]
+
+    def _clean_one(x: str) -> str:
+        x = x.strip().lstrip("[").rstrip("]").strip()
+        if x.startswith(("'", '"')):
+            x = x[1:].lstrip()
+        if x.endswith(("'", '"')):
+            x = x[:-1].rstrip()
+        return x.strip()
+
+    seen, out = set(), []
+    for it in ( _clean_one(x) for x in raw ):
+        if it and it not in seen:
+            out.append(it)
+            seen.add(it)
+    return out
+
+def _is_literal_repo_path(token: str) -> bool:
+    """
+    True si 'token' est déjà au format 'IP:port[/name]'.
+    """
+    return bool(_RE_IP_PORT.match(token))
+
+def _expand_local_repo(token: str, port: int) -> str:
+    """
+    'default', '_logpoint', '_logpointAlert' => 127.0.0.1:<port>/<token>
+    """
+    name = token.strip()
+    return f"127.0.0.1:{port}/{name}"
+
+def _build_repo_paths_for_backends(repo_name: str, backend_ips: list[str], port: int) -> list[str]:
+    """
+    À partir d’un nom de repo (ex: 'Repo_system'), produit
+    ['10.x.x.x:5504/Repo_system', '10.y.y.y:5504/Repo_system', ...]
+    """
+    paths = [f"{ip}:{port}/{repo_name}" for ip in backend_ips if ip]
+    # déduplication en préservant l'ordre
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out
 
 class AlertRulesImporter(BaseImporter):
     """Importer for **AlertRules/MyRules**.
@@ -221,6 +314,9 @@ class AlertRulesImporter(BaseImporter):
         # Cache of existing alerts per node_id: { node_id: {name: row, ...}, ... }
         self._alerts_by_node: dict[str, dict[str, dict]] = {}
 
+        self.repo_name_map: dict[str, str] = {}   # optional mapping if you load it elsewhere
+        self.tenant_nodes: list[dict] | None = None  # can be set by the runner to include all nodes of the tenant
+
     # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
@@ -254,7 +350,6 @@ class AlertRulesImporter(BaseImporter):
             raise ValidationError(
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
-
 
     def _normalize_name(self, value: str) -> str:
         """Normalize a rule name for consistent case-insensitive lookups."""
@@ -376,8 +471,85 @@ class AlertRulesImporter(BaseImporter):
             "searchname": _s(desired_row.get("searchname")),
         }
 
-    # ------------------------------ users cache ------------------------------
+    # ------------------------------ caches ------------------------------
+    def _collect_backend_ips(self, node: "NodeRef") -> list[str]:
+        """
+        Récupère les IP privées OpenVPN des nodes du tenant (type backend / all_in_one)
+        si 'self.tenant_nodes' est renseigné par le runner. Sinon essaie de récupérer
+        'ip_private' sur le node courant. En dernier recours retourne [].
+        """
+        ips: list[str] = []
+        if isinstance(self.tenant_nodes, list) and self.tenant_nodes:
+            for n in self.tenant_nodes:
+                typ = (n.get("type") or n.get("node_type") or "").lower()
+                if typ in ("backend", "all_in_one", "all-in-one", "allinone"):
+                    ip_priv = (n.get("ip_private") or n.get("ip_priv") or "").strip()
+                    if ip_priv:
+                        ips.append(ip_priv)
+        else:
+            # fallback minimal: si le NodeRef courant possède ip_private, on l'utilise
+            ip_priv = getattr(node, "ip_private", None) or getattr(node, "ip_priv", None) or ""
+            if isinstance(ip_priv, str) and ip_priv.strip():
+                ips.append(ip_priv.strip())
 
+        # dédup
+        seen, out = set(), []
+        for ip in ips:
+            if ip and ip not in seen:
+                out.append(ip)
+                seen.add(ip)
+        return out
+
+    def _normalize_and_expand_repos(self, raw_value: object, node: "NodeRef") -> list[str]:
+        """
+        Convertit la cellule 'settings.repos' en une liste finale de chemins repos.
+
+        Règles:
+          - 'IP:port[/name]' => conservé tel quel
+          - 'default' | '_logpoint' | '_logpointAlert' => 127.0.0.1:<port>/<token>
+          - '<repo_token>' (sans IP:port) => étendu sur toutes les IP backends: 'ip:port/<repo_token>'
+                * si 'self.repo_name_map' contient une entrée pour <repo_token>, utilise le 'cleaned' à la place
+        """
+        tokens = _soft_list(raw_value)
+        if not tokens:
+            return []
+
+        port = _get_repo_port_from_profiles()
+        backend_ips = self._collect_backend_ips(node)
+
+        special_local = {"default", "_logpoint", "_logpointalert"}
+        final: list[str] = []
+
+        for t in tokens:
+            tt = t.strip()
+            if not tt:
+                continue
+
+            # déjà un IP:port[/name]
+            if _is_literal_repo_path(tt):
+                final.append(tt)
+                continue
+
+            low = tt.lower()
+            if low in special_local:
+                final.append(_expand_local_repo(tt, port))
+                continue
+
+            # C'est un token de repo: on peut le remapper et l'étendre aux backends
+            repo_token = self.repo_name_map.get(tt, tt)  # remap si dispo
+            if backend_ips:
+                final.extend(_build_repo_paths_for_backends(repo_token, backend_ips, port))
+            else:
+                # si on n'a pas les IP backends, on garde tel quel (le moteur côté SIEM validera)
+                final.append(repo_token)
+
+        # dédup préservant l'ordre
+        seen, out = set(), []
+        for p in final:
+            if p not in seen:
+                out.append(p)
+                seen.add(p)
+        return out
 
     def _get_profile_option_default_owner(self) -> str:
         """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
@@ -611,6 +783,15 @@ class AlertRulesImporter(BaseImporter):
             if decision.op == "CREATE":
                 try:
                     payload = self.build_payload_create(desired)
+                    
+                    try:
+                        expanded = self._normalize_and_expand_repos(desired.get("repos"), node)
+                        if expanded:
+                            payload["repos"] = expanded
+                        log.debug("repos expanded => %s", payload.get("repos"))
+                    except Exception as ex:
+                        log.warning("repos expansion failed; using raw parsed repos. err=%s", ex)
+                    
                     log.debug(
                         "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
                         node.id,
@@ -633,6 +814,13 @@ class AlertRulesImporter(BaseImporter):
             if decision.op == "UPDATE" and existing_id:
                 try:
                     payload = self.build_payload_update(desired, {"id": existing_id})
+                    try:
+                        expanded = self._normalize_and_expand_repos(desired.get("repos"), node)
+                        if expanded:
+                            payload["repos"] = expanded
+                        log.debug("repos expanded => %s", payload.get("repos"))
+                    except Exception as ex:
+                        log.warning("repos expansion failed; using raw parsed repos. err=%s", ex)
                     log.debug(
                         "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
                         node.id,

@@ -346,8 +346,7 @@ class AlertRulesImporter(BaseImporter):
             # Normalize repos using the shared resolver (same as other modules).
             desired["repos"] = normalize_repo_list_for_tenant(
                 desired.get("repos", []),
-                tenant_ctx=self.ctx,
-                # We do not rely on profiles; resolver will use tenant ips from ctx.
+                tenant_ctx=getattr(self, "ctx", None),  # <-- SECURISÉ: pas d'attribut manquant
                 use_tenant_ip=True,
                 enable_repo_sheet_mapping=True,
                 xlsx_reader=self.xlsx_reader,  # provided by BaseImporter

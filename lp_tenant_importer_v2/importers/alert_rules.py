@@ -181,8 +181,8 @@ class AlertRulesImporter(BaseImporter):
     def _index_rules(self, items: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
         """
         Build two indices:
-        - by_id:    keyed by 'id' or '_id' (string)
-        - by_name:  keyed by normalized 'name' or 'searchname'
+        - by_id:    keyed by 'id' or '_id'
+        - by_name:  keyed by normalized 'searchname' (preferred) or 'name'
         """
         by_id: dict[str, dict] = {}
         by_name: dict[str, dict] = {}
@@ -191,9 +191,7 @@ class AlertRulesImporter(BaseImporter):
             rid = str(it.get("_id") or it.get("id") or "").strip()
             if rid:
                 by_id[rid] = it
-
-            # prefer 'searchname' if present, else 'name'
-            nm = (it.get("searchname") if it.get("searchname") else it.get("name"))
+            nm = it.get("searchname") if it.get("searchname") else it.get("name")
             key = self._normalize_name(str(nm or ""))
             if key:
                 by_name[key] = it
@@ -423,87 +421,101 @@ class AlertRulesImporter(BaseImporter):
                 indexed[rid] = it
         return indexed
 
-    def fetch_existing(self, node: dict) -> dict[str, dict]:
+    def fetch_existing(
+        self,
+        client: "DirectorClient",
+        pool_uuid: str,
+        node: "NodeRef",
+    ) -> dict[str, dict]:
         """
-        Fetch and cache existing AlertRules for a node using the official
-        'AlertRules/fetchmyrules' POST + monitor flow.
+        Fetch and cache existing AlertRules on a node using the official
+        POST AlertRules/fetchmyrules (no payload) + monitor flow.
 
-        Returns:
+        Returns
+        -------
+        dict[str, dict]
             Mapping {rule_id: rule_payload}
         """
-        node_name = node.get("name") or node.get("display_name") or "unknown"
-        if node_name in self._rules_cache:
-            return self._rules_cache[node_name]
+        node_name = node.name
+        # Fast-path: already cached
+        if node_name in self._rules_cache_by_id:
+            return self._rules_cache_by_id[node_name]
 
-        pool_uuid = self.ctx.pool_uuid
-        node_id = node["id"]
-
-        # Call the generic POST action: AlertRules/fetchmyrules
-        # No payload required by the API, keep {} to be explicit.
-        action = self.client.invoke_action(
+        # 1) Call the action via DirectorClient (framework-compliant)
+        action = client.invoke_action(
             pool_uuid=pool_uuid,
-            node_id=node_id,
+            node_id=node.id,
             resource="AlertRules",
             action="fetchmyrules",
-            payload={},        # API expects no body; empty dict is OK
+            payload={},          # API expects no body; keep {} for clarity
             monitor=True,
         )
 
-        ok = action.get("monitor_ok")
+        mon_ok = action.get("monitor_ok")
         mon = action.get("monitor_payload") or {}
-        if not ok:
-            # Keep the exact behavior the framework uses: log, return empty.
+
+        if not mon_ok:
+            # Keep importer behaviour: no crash, just log & return empty cache
             self.log.warning(
                 "fetch_existing failed [node=%s]: %s",
                 node_name,
-                self._short_json(mon) if hasattr(self, "_short_json") else str(mon)[:600],
+                self._short_json(mon),
             )
-            self._rules_cache[node_name] = {}
-            return self._rules_cache[node_name]
+            self._rules_cache_by_id[node_name] = {}
+            self._rules_cache_by_name[node_name] = {}
+            return {}
 
-        # Debug-dump of the raw payload from monitor (requested)
+        # Optional: dump complet en DEBUG comme demandé
         self.log.debug(
             "fetch_existing monitor payload [node=%s]: %s",
             node_name,
-            self._short_json(mon) if hasattr(self, "_short_json") else str(mon)[:1200],
+            self._short_json(mon),
         )
 
-        # The monitor payload can vary; prefer 'response.result' then 'result' then 'data'
-        items = []
+        # 2) Extract rows from monitor payload (schema-tolerant)
+        items: list[dict] = []
         resp = mon.get("response")
-        if isinstance(resp, dict) and isinstance(resp.get("result"), list):
-            items = resp["result"]
+        if isinstance(resp, dict) and isinstance(resp.get("rows"), list):
+            # format observé dans tes logs → response.rows
+            items = resp["rows"]
         elif isinstance(mon.get("result"), list):
             items = mon["result"]
         elif isinstance(mon.get("data"), list):
             items = mon["data"]
         else:
-            # If schema is different, log and keep empty (do not crash)
             self.log.warning(
-                "fetch_existing: no list payload detected [node=%s] keys=%s",
+                "fetch_existing: no rows list detected [node=%s] keys=%s",
                 node_name,
                 list(mon.keys())[:10],
             )
 
-        indexed = self._index_rules_by_id(items)
-        self._rules_cache[node_name] = indexed
-        self.log.info("fetch_existing: %d rules [node=%s]", len(indexed), node_name)
-
-        # ... after you extracted `items` as a list of rule dicts from the monitor payload:
+        # 3) Index & cache
         by_id, by_name = self._index_rules(items)
-
-        node_name = node.get("name") or node.get("display_name") or "unknown"
         self._rules_cache_by_id[node_name] = by_id
         self._rules_cache_by_name[node_name] = by_name
 
         self.log.info(
             "fetch_existing: %d rules [node=%s] (indexed by id + name)",
-            len(by_id),
-            node_name,
+            len(by_id), node_name,
         )
-
-        # For compatibility with existing call sites that expect {id: payload}
         return by_id
+
+    def get_rule_by_name(
+        self,
+        client: "DirectorClient",
+        pool_uuid: str,
+        node: "NodeRef",
+        name: str,
+    ) -> dict | None:
+        """
+        Return a rule payload by (case-insensitive) name or searchname.
+        Ensures the node-level cache is populated first.
+        """
+        node_name = node.name
+        if node_name not in self._rules_cache_by_name:
+            self.fetch_existing(client, pool_uuid, node)
+        key = self._normalize_name(name)
+        return self._rules_cache_by_name.get(node_name, {}).get(key)
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

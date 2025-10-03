@@ -567,3 +567,99 @@ class DirectorClient:
             "monitor_payload": None,
             "corr": corr,
         }
+
+
+    def invoke_action(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        action: str,
+        payload: dict | None = None,
+        *,
+        monitor: bool = True,
+    ) -> dict:
+        """
+        POST an action on a resource, then (optionally) follow the monitor URL.
+
+        Examples
+        --------
+        # Alert rules: list my rules for the current user (no payload)
+        invoke_action(pool, node, "AlertRules", "fetchmyrules", {})
+
+        Parameters
+        ----------
+        pool_uuid : str
+            Tenant/pool UUID.
+        node_id : str
+            Target node (search head) id.
+        resource : str
+            Base resource, e.g. "AlertRules".
+        action : str
+            Action to invoke, e.g. "fetchmyrules".
+        payload : dict | None
+            Body to send under the "data" wrapper; many actions expect {}.
+        monitor : bool
+            When True, follow the monitor URL returned by the Config API.
+
+        Returns
+        -------
+        dict
+            {
+            "status": "Success" | "Error",
+            "result": <raw response from POST>,
+            "monitor_ok": True/False or None,
+            "monitor_branch": "url" | None,
+            "monitor_payload": <payload from monitorapi> or None,
+            }
+        """
+        path = f"configapi/{pool_uuid}/{node_id}/{resource}/{action}"
+        data = {"data": payload or {}}
+
+        corr = self._corr()  # keep existing correlation-id style if you have it
+        self.log.info(
+            "CREATE[%s] POST %s pool=%s node=%s resource=%s/%s",
+            corr, path, pool_uuid, node_id, resource, action,
+        )
+        self.log.debug("CREATE[%s] payload=%s", corr, self._short_json(data))
+
+        # Reuse the same low-level request helper as create_resource()
+        res = self._req("POST", path, json=data)
+
+        out = {"status": res.get("status"), "result": res, "corr": corr,
+            "monitor_ok": None, "monitor_branch": None, "monitor_payload": None}
+
+        # Config API returns the monitor URL in the "message" field (same pattern as create/update).
+        msg = res.get("message")
+        if monitor and isinstance(msg, str) and msg:
+            self.log.info("CREATE[%s] monitor via URL: %s", corr, msg)
+            mon_ok, mon_payload = self.monitor_job_url(pool_uuid, node_id, msg)
+            out["monitor_ok"] = mon_ok
+            out["monitor_branch"] = "url"
+            out["monitor_payload"] = mon_payload
+
+        return out
+
+
+    def fetch_resource(
+        self,
+        pool_uuid: str,
+        node_id: str,
+        resource: str,
+        *,
+        monitor: bool = True,
+    ) -> dict:
+        """
+        Convenience wrapper for resource 'fetch' semantics where the API
+        expects a POST with an empty body and returns a monitor URL.
+
+        For AlertRules this maps to: POST AlertRules/fetchmyrules
+        """
+        return self.invoke_action(
+            pool_uuid=pool_uuid,
+            node_id=node_id,
+            resource=resource,
+            action="fetchmyrules",
+            payload={},
+            monitor=monitor,
+        )

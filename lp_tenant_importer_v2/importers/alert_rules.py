@@ -12,7 +12,7 @@ AlertRules importer (DirectorSync v2) — hardened implementation.
 from typing import Any, Dict, Iterable, List, Tuple
 import logging
 import math
-
+import json
 import pandas as pd
 
 from .base import BaseImporter, NodeRef, ValidationError
@@ -46,6 +46,68 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         return int(f)
     except Exception:
         raise ValidationError(f"invalid integer value: {v!r}")
+
+
+def _s(value: Any) -> str:
+    """Return a trimmed string for any value; empty string for None."""
+    return str(value).strip() if value is not None else ""
+
+
+def _uniq(items: Iterable[str]) -> List[str]:
+    """Return a list with duplicates removed while preserving order."""
+    seen: set[str] = set()
+    out: List[str] = []
+    for it in items:
+        if it not in seen:
+            out.append(it)
+            seen.add(it)
+    return out
+
+
+def _parse_list_cell(cell: Any) -> List[str]:
+    """
+    Parse an Excel cell into a clean list of strings.
+
+    Accepted formats:
+      - JSON arrays: ["a","b"]
+      - Delimited text using ',', ';', '|' or newlines.
+
+    Behavior:
+      - Trims quotes/brackets left-overs.
+      - Filters empty entries.
+      - Deduplicates while preserving order.
+    """
+    text = _s(cell)
+    if not text:
+        return []
+
+    raw = text.strip()
+
+    # 1) Try strict JSON first for cells that look like arrays.
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            arr = json.loads(raw)
+            return _uniq([_s(x) for x in arr if _s(x)])
+        except Exception:
+            # Fall back to tolerant text parsing if JSON is malformed.
+            pass
+
+    # 2) Tolerant text parsing: normalize common separators to comma.
+    for sep in ("\n", ";", "|"):
+        raw = raw.replace(sep, ",")
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    cleaned: List[str] = []
+    for p in parts:
+        # Remove stray quotes/brackets commonly found in CSV/Excel exports.
+        p2 = p.strip().strip('"').strip("'").strip()
+        if p2 == "[]":
+            continue
+        p2 = p2.strip("[]").strip()
+        if p2:
+            cleaned.append(p2)
+
+    return _uniq(cleaned)
 
 
 class AlertRulesImporter(BaseImporter):
@@ -114,8 +176,11 @@ class AlertRulesImporter(BaseImporter):
                 "timerange_day": _s(r.get("settings.livesearch_data.timerange_day")),
                 "timerange_second": _s(r.get("settings.livesearch_data.timerange_second")),
                 "time_range_seconds": _s(r.get("settings.time_range_seconds")),
-                "repos": [s.strip() for s in _s(r.get("settings.repos")).split(",") if s.strip()],
-                "log_source": [s.strip() for s in _s(r.get("settings.log_source")).split(",") if s.strip()],
+                
+                # Parse repos/log_source with JSON-first strategy; then tolerant text.
+                "repos": _parse_list_cell(r.get("settings.repos")),
+                "log_source": _parse_list_cell(r.get("settings.log_source")),                
+                               
                 "searchname": _s(r.get("settings.searchname")) or _s(r.get("name")),
                 "flush_on_trigger": bool(r.get("settings.flush_on_trigger")),
                 "throttling_enabled": bool(r.get("settings.throttling_enabled")),
@@ -126,7 +191,8 @@ class AlertRulesImporter(BaseImporter):
                 # optional query passthrough if present in sheet (prevents Monitor "Query cannot be empty")
                 "query": _s(r.get("settings.extra_config.query")),
             }
-            # Normalizations
+            
+            # Normalized copies used in payload build (already cleaned & deduped).
             d["repos_norm"] = [x for x in d["repos"] if x]
             d["log_source_norm"] = [x for x in d["log_source"] if x]
 
@@ -270,10 +336,15 @@ class AlertRulesImporter(BaseImporter):
         if not owner_id:
             raise ValidationError("owner is required and could not be resolved from context or profiles.yml")
 
-        # Validate repos
+
         repos = desired_row.get("repos_norm", [])
-        if not isinstance(repos, list) or not repos or not all(isinstance(x, str) and x.strip() for x in repos):
-            raise ValidationError("repos must be a non-empty list of strings")
+        if (
+            not isinstance(repos, list)
+            or not repos
+            or not all(isinstance(x, str) and x.strip() for x in repos)
+        ):
+            raise ValidationError("`repos` must be a non-empty list of strings.")
+
 
         payload: Dict[str, Any] = {
             "name": _s(desired_row.get("name")),

@@ -131,6 +131,12 @@ class AlertRulesImporter(BaseImporter):
  
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+        # logger instance per-importer (cohérent avec les autres importers)
+        self.log = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        # cache des règles par node.id
+        self._existing_cache: Dict[str, Dict[str, Any]] = {}
+        
         # Users cache: node_id -> { lookup_key_lower: user_id }
         self._users_cache: dict[str, dict[str, str]] = {}
         self._users_loaded: set[str] = set()
@@ -423,83 +429,50 @@ class AlertRulesImporter(BaseImporter):
                 indexed[rid] = it
         return indexed
 
-    def fetch_existing(self, client, pool_uuid, node):
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
         """
-        Fetch all alert rules from a search head and populate the local cache.
+        Fetch all alert rules visible to the current user on the given node, using
+        the standard POST + monitor flow via DirectorClient.fetch_resource().
+        Returns a dict mapping `rule_name -> full_rule_payload`.
 
-        Uses DirectorClient.fetch_resource(), which POSTS to:
-        configapi/{pool}/{node}/AlertRules/MyAlertRules/fetch
-        then monitors via monitorapi URL (framework standard).
-
-        The monitor payload is expected to contain:
-        response: { success: bool, rows: [ { name, ... }, ... ] }
+        Contract with BaseImporter:
+        - Always return a dict (possibly empty), never None.
+        - Keys are the canonical names used by `key_fn()`.
         """
-        node_id = getattr(node, "id", str(node))
-        node_name = getattr(node, "name", str(node))
+        # 1) POST sans payload vers l’endpoint "MyAlertRules/fetch"
+        resp = client.fetch_resource(
+            pool_uuid=pool_uuid,
+            node_id=node.id,
+            resource="AlertRules/MyAlertRules/fetch",
+            data={},   # POST sans payload d'après la doc/framework
+        )
 
-        try:
-            res = client.fetch_resource(
-                pool_uuid,
-                node_id,
-                "AlertRules/MyAlertRules",
-                path="fetch",
-                data={},  # POST without payload per framework rule
-            )
-
-            ok_payload = res.get("monitor_ok")
-            if not ok_payload:
-                log.warning("fetch_existing: no monitor payload [node=%s]", node_name)
-                self._alerts_by_node[node_id] = {}
-                return
-
-            ok, payload = ok_payload
-            if not ok:
-                log.warning("fetch_existing failed [node=%s]: %s", node_name, payload)
-                self._alerts_by_node[node_id] = {}
-                return
-
-            # Expected: {"response": {"success": true, "rows": [ ... ]}}
+        # 2) Extraire le résultat monitorisé (framework: monitor_ok = (bool, payload))
+        rows = []
+        monitor_ok = resp.get("monitor_ok")
+        if isinstance(monitor_ok, tuple) and monitor_ok[0] and monitor_ok[1]:
+            payload = monitor_ok[1] or {}
             response = payload.get("response") or {}
             rows = response.get("rows") or []
+        else:
+            # Pas d’erreur levée ici : on respecte le contrat et on renvoie un dict vide.
+            self.log.warning("fetch_existing: monitor not OK on node=%s; returning empty mapping", node.name)
+            mapping: Dict[str, Dict[str, Any]] = {}
+            self._existing_cache[node.id] = mapping
+            return mapping
 
-            cache: dict[str, dict] = {}
-            for row in rows:
-                name = row.get("name")
-                if isinstance(name, str) and name.strip():
-                    cache[name.strip()] = row
+        # 3) Construire le mapping `name -> full_object`
+        mapping: Dict[str, Dict[str, Any]] = {}
+        for item in rows:
+            name = item.get("name")
+            if not name:
+                continue
+            mapping[name] = item
 
-            self._alerts_by_node[node_id] = cache
-            log.debug("fetchAlerts on node: %s: %d rules cached", node_name, len(cache))
-
-        except Exception as exc:
-            log.warning("fetch_existing failed [node=%s]: %s", node_name, exc, exc_info=True)
-            self._alerts_by_node[node_id] = {}
-
-
-        def get_rule_by_name(
-            self,
-            client: "DirectorClient",
-            pool_uuid: str,
-            node: "NodeRef",
-            name: str,
-        ) -> dict | None:
-            """
-            Return a rule payload by (case-insensitive) name or searchname.
-            Ensures the node-level cache is populated first.
-            """
-            node_name = node.name
-            if node_name not in self._rules_cache_by_name:
-                self.fetch_existing(client, pool_uuid, node)
-            key = self._normalize_name(name)
-            return self._rules_cache_by_name.get(node_name, {}).get(key)
-
-        def get_by_name(self, node, name: str) -> dict | None:
-            """
-            Return the cached alert (raw row from fetch) for a given node and name.
-            """
-            node_id = getattr(node, "id", str(node))
-            cache = self._alerts_by_node.get(node_id) or {}
-            return cache.get(name)
+        # 4) Cache + log debug
+        self._existing_cache[node.id] = mapping
+        self.log.debug("fetch_existing: cached %d alert(s) for node=%s", len(mapping), node.name)
+        return mapping
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

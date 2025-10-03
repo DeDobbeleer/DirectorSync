@@ -606,19 +606,20 @@ class AlertRulesImporter(BaseImporter):
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
             desired["owner"] = owner_resolved
         # alert_rules.py — dans apply(), juste avant CREATE/UPDATE
-        log.debug(
-            "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
-            node.id,
-            payload.get("name") or payload.get("searchname"),
-            sorted(payload.keys()),
-            (payload.get("timerange_day"), payload.get("timerange_hour"), payload.get("timerange_minute")),
-             payload.get("repos"),
-             payload.get("log_source"),
-           )
+
         try:
             if decision.op == "CREATE":
                 try:
                     payload = self.build_payload_create(desired)
+                    log.debug(
+                        "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
+                        node.id,
+                        payload.get("name") or payload.get("searchname"),
+                        sorted(payload.keys()),
+                        (payload.get("timerange_day"), payload.get("timerange_hour"), payload.get("timerange_minute")),
+                        payload.get("repos"),
+                        payload.get("log_source"),
+                    )
                     log.debug(f"new collected and normalized payload: {payload}")
                 except ValidationError as ve:
                     log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
@@ -632,6 +633,15 @@ class AlertRulesImporter(BaseImporter):
             if decision.op == "UPDATE" and existing_id:
                 try:
                     payload = self.build_payload_update(desired, {"id": existing_id})
+                    log.debug(
+                        "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
+                        node.id,
+                        payload.get("name") or payload.get("searchname"),
+                        sorted(payload.keys()),
+                        (payload.get("timerange_day"), payload.get("timerange_hour"), payload.get("timerange_minute")),
+                        payload.get("repos"),
+                        payload.get("log_source"),
+                    )
                 except ValidationError as ve:
                     log.warning("SKIP UPDATE alert=%s id=%s [node=%s] reason=%s (no API call)",
                                 name, existing_id, node.name, ve)

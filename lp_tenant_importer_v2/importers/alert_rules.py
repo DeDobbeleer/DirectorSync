@@ -159,7 +159,7 @@ class AlertRulesImporter(BaseImporter):
         return ("minute", 0)
 
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        key, val = self._canon_timerange(desired_row)
+        # key, val = self._canon_timerange(desired_row)
         return {
             "risk": _s(desired_row.get("risk")).lower(),
             "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos_norm", [])])),
@@ -283,12 +283,15 @@ class AlertRulesImporter(BaseImporter):
             "limit": _to_int(desired_row.get("limit")),
             "repos": repos,
             "searchname": _s(desired_row.get("searchname")) or _s(desired_row.get("name")),
+            "timerange_day": int(desired_row.get("timerange_day")),
+            "timerange_hour": int(desired_row.get("timerange_hour")),
+            "timerange_minute": int(desired_row.get("timerange_minute")),
         }
 
         # timerange fields
-        key, val = self._canon_timerange(desired_row)
-        if val:
-            payload[f"timerange_{key}"] = val
+        # key, val = self._canon_timerange(desired_row)
+        # if val:
+        #     payload[f"timerange_{key}"] = val
 
         # log_source optional
         if desired_row.get("log_source_norm"):

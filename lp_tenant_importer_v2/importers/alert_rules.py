@@ -141,6 +141,8 @@ class AlertRulesImporter(BaseImporter):
         #  - by_name: { node_name: {normalized_name: rule_payload} }
         self._rules_cache_by_id: dict[str, dict[str, dict]] = {}
         self._rules_cache_by_name: dict[str, dict[str, dict]] = {} 
+        # Cache of existing alerts per node_id: { node_id: {name: row, ...}, ... }
+        self._alerts_by_node: dict[str, dict[str, dict]] = {}
 
     # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
@@ -421,85 +423,69 @@ class AlertRulesImporter(BaseImporter):
                 indexed[rid] = it
         return indexed
 
-    def fetch_existing(
-        self,
-        client: "DirectorClient",
-        pool_uuid: str,
-        node: "NodeRef",
-    ) -> dict[str, dict]:
+    def fetch_existing(self, client, pool_uuid, node):
         """
-        Fetch and cache existing AlertRules on a node using the official
-        POST AlertRules/fetchmyrules (no payload) + monitor flow.
+        Fetch all alert rules from the search head and populate the local cache.
 
-        Returns
-        -------
-        dict[str, dict]
-            Mapping {rule_id: rule_payload}
+        Uses DirectorClient.fetch_resource(), which POSTS to:
+          configapi/{pool}/{node}/AlertRules/MyAlertRules/fetch
+        and then monitors via monitorapi URL.
+
+        The monitor payload is expected to contain:
+          response: { success: bool, rows: [ { name, ... }, ... ] }
         """
-        node_name = node.name
-        # Fast-path: already cached
-        if node_name in self._rules_cache_by_id:
-            return self._rules_cache_by_id[node_name]
+        node_id = getattr(node, "id", str(node))
+        node_name = getattr(node, "name", str(node))
 
-        # 1) Call the action via DirectorClient (framework-compliant)
-        action = client.invoke_action(
-            pool_uuid=pool_uuid,
-            node_id=node.id,
-            resource="AlertRules",
-            action="fetchmyrules",
-            payload={},          # API expects no body; keep {} for clarity
-            monitor=True,
-        )
+        try:
+            # POST fetch endpoint with empty body per framework rule
+            res = client.fetch_resource(
+                pool_uuid,
+                node_id,
+                "AlertRules/MyAlertRules",
+                path="fetch",
+                data={},
+            )
 
-        mon_ok = action.get("monitor_ok")
-        mon = action.get("monitor_payload") or {}
+            ok_payload = res.get("monitor_ok")
+            if not ok_payload:
+                self.log.warning("fetch_existing: no monitor payload [node=%s]", node_name)
+                self._alerts_by_node[node_id] = {}
+                return
 
-        if not mon_ok:
-            # Keep importer behaviour: no crash, just log & return empty cache
+            ok, payload = ok_payload
+            if not ok:
+                self.log.warning(
+                    "fetch_existing failed [node=%s]: %s",
+                    node_name, payload,
+                )
+                self._alerts_by_node[node_id] = {}
+                return
+
+            # Expected shape: {"response": {"success": true, "rows": [ ... ]}}
+            response = payload.get("response") or {}
+            rows = response.get("rows") or []
+
+            cache: dict[str, dict] = {}
+            for row in rows:
+                name = row.get("name")
+                if isinstance(name, str) and name.strip():
+                    cache[name.strip()] = row
+
+            self._alerts_by_node[node_id] = cache
+            self.log.debug(
+                "fetchAlerts on node: %s: %d rules cached",
+                node_name, len(cache),
+            )
+
+        except Exception as exc:
             self.log.warning(
                 "fetch_existing failed [node=%s]: %s",
-                node_name,
-                self._short_json(mon),
+                node_name, exc,
+                exc_info=True,
             )
-            self._rules_cache_by_id[node_name] = {}
-            self._rules_cache_by_name[node_name] = {}
-            return {}
-
-        # Optional: dump complet en DEBUG comme demandé
-        self.log.debug(
-            "fetch_existing monitor payload [node=%s]: %s",
-            node_name,
-            self._short_json(mon),
-        )
-
-        # 2) Extract rows from monitor payload (schema-tolerant)
-        items: list[dict] = []
-        resp = mon.get("response")
-        if isinstance(resp, dict) and isinstance(resp.get("rows"), list):
-            # format observé dans tes logs → response.rows
-            items = resp["rows"]
-        elif isinstance(mon.get("result"), list):
-            items = mon["result"]
-        elif isinstance(mon.get("data"), list):
-            items = mon["data"]
-        else:
-            self.log.warning(
-                "fetch_existing: no rows list detected [node=%s] keys=%s",
-                node_name,
-                list(mon.keys())[:10],
-            )
-
-        # 3) Index & cache
-        by_id, by_name = self._index_rules(items)
-        self._rules_cache_by_id[node_name] = by_id
-        self._rules_cache_by_name[node_name] = by_name
-
-        self.log.info(
-            "fetch_existing: %d rules [node=%s] (indexed by id + name)",
-            len(by_id), node_name,
-        )
-        return by_id
-
+            self._alerts_by_node[node_id] = {}
+   
     def get_rule_by_name(
         self,
         client: "DirectorClient",
@@ -516,6 +502,14 @@ class AlertRulesImporter(BaseImporter):
             self.fetch_existing(client, pool_uuid, node)
         key = self._normalize_name(name)
         return self._rules_cache_by_name.get(node_name, {}).get(key)
+
+    def get_by_name(self, node, name: str) -> dict | None:
+        """
+        Return the cached alert (raw row from fetch) for a given node and name.
+        """
+        node_id = getattr(node, "id", str(node))
+        cache = self._alerts_by_node.get(node_id) or {}
+        return cache.get(name)
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

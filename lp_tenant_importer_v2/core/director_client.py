@@ -647,19 +647,63 @@ class DirectorClient:
         node_id: str,
         resource: str,
         *,
-        monitor: bool = True,
+        path: str | None = None,
+        data: dict | None = None,
     ) -> dict:
         """
-        Convenience wrapper for resource 'fetch' semantics where the API
-        expects a POST with an empty body and returns a monitor URL.
+        POST a fetch-like endpoint under configapi and monitor it via monitorapi.
 
-        For AlertRules this maps to: POST AlertRules/fetchmyrules
+        This adheres to the framework rule: importers do not call HTTP directly.
+        The call is always a POST with an empty JSON body (or provided `data`).
+
+        Args:
+            pool_uuid: Pool UUID.
+            node_id: Node (search head) id.
+            resource: Base resource (e.g. "AlertRules/MyAlertRules").
+            path: Optional extra path (e.g. "fetch"), appended with a slash if given.
+            data: Optional payload; defaults to {} for fetch endpoints.
+
+        Returns:
+            A dict with:
+              - status: "Success" | "Failed"
+              - result: raw JSON from the configapi POST
+              - monitor_ok: (ok: bool, payload: dict) or None
+              - monitor_branch: "url" | None
         """
-        return self.invoke_action(
-            pool_uuid=pool_uuid,
-            node_id=node_id,
-            resource=resource,
-            action="fetchmyrules",
-            payload={},
-            monitor=monitor,
+        # Build full resource path like "AlertRules/MyAlertRules/fetch"
+        full_res = resource.strip("/")
+        if path:
+            full_res = f"{full_res}/{path.strip('/')}"
+
+        corr = uuid.uuid4().hex[:8]
+        cfg_path = self.configapi(pool_uuid, node_id, full_res)
+        body = {"data": data or {}}
+
+        log.info(
+            "FETCH[%s] POST %s pool=%s node=%s resource=%s",
+            corr, cfg_path, pool_uuid, node_id, full_res,
         )
+        log.debug("FETCH[%s] payload=%s", corr, _short_json(_redact(body)))
+
+        response = self.post_json(cfg_path, body) or {}
+        log.debug("FETCH[%s] response=%s", corr, _short_json(_redact(response)))
+
+        # monitor via URL (legacy / standard for our framework)
+        monitor_path = self._extract_monitor_path(response)
+        out = {
+            "status": "Failed",
+            "result": response,
+            "monitor_ok": None,
+            "monitor_branch": None,
+        }
+        if monitor_path and self.options.monitor_enabled:
+            log.info("FETCH[%s] monitor via URL: %s", corr, monitor_path)
+            ok, payload = self.monitor_job_url(monitor_path)
+            out["status"] = "Success" if ok else "Failed"
+            out["monitor_ok"] = (ok, payload)
+            out["monitor_branch"] = "url"
+        else:
+            # No monitor URL returned by server
+            out["status"] = "Failed"
+
+        return out

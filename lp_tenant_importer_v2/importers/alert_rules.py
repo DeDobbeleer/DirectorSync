@@ -354,6 +354,7 @@ class AlertRulesImporter(BaseImporter):
             if decision.op == "CREATE":
                 try:
                     payload = self.build_payload_create(desired)
+                    log.debug(f"new collected and normalized payload: {payload}")
                 except ValidationError as ve:
                     log.warning("SKIP CREATE alert=%s [node=%s] reason=%s (no API call)", name, node.name, ve)
                     return {"status": "Skipped", "reason": str(ve)}

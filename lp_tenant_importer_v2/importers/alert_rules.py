@@ -15,6 +15,7 @@ import math
 import json
 import pandas as pd
 import re
+import ast
 
 from .base import BaseImporter, NodeRef, ValidationError
 from ..core.director_client import DirectorClient
@@ -109,6 +110,76 @@ def _parse_list_cell(cell: Any) -> List[str]:
             cleaned.append(p2)
 
     return _uniq(cleaned)
+
+
+def _parse_list_field(raw) -> list[str]:
+    """
+    Parse a cell value into a clean list[str].
+
+    Accepts:
+      - JSON arrays: ["a","b"]
+      - Python-like arrays: ['a', 'b']
+      - CSV-ish strings: "a,b" or "a; b | c" (comma/semicolon/pipe/newlines)
+
+    Guarantees:
+      - Trims stray quotes/brackets even when unbalanced
+      - Deduplicates while preserving order
+      - Filters empty entries
+    """
+    def _soft_clean(s: str) -> str:
+        # Remove common wrappers even if unbalanced: quotes and brackets
+        s = (s or "").strip()
+        s = s.strip().lstrip("[").rstrip("]").strip()
+        # Strip one leading/trailing quote if present (even if not paired)
+        if s.startswith(("'", '"')):
+            s = s[1:].lstrip()
+        if s.endswith(("'", '"')):
+            s = s[:-1].rstrip()
+        return s.strip()
+
+    # 1) Already a list
+    if isinstance(raw, list):
+        vals = [_soft_clean(str(x)) for x in raw]
+
+    # 2) Try JSON, then Python literal (for ['...','...'] from Excel)
+    elif isinstance(raw, str):
+        s = raw.strip()
+        parsed = None
+        if s:
+            # JSON first
+            try:
+                parsed = json.loads(s)
+            except Exception:
+                parsed = None
+            # Python literal if JSON failed
+            if not isinstance(parsed, list):
+                try:
+                    lit = ast.literal_eval(s)
+                    if isinstance(lit, list):
+                        parsed = lit
+                except Exception:
+                    parsed = None
+
+        if isinstance(parsed, list):
+            vals = [_soft_clean(str(x)) for x in parsed]
+        else:
+            # 3) Tolerant CSV fallback
+            tmp = s.replace("\n", ",").replace(";", ",").replace("|", ",")
+            parts = [p for p in tmp.split(",") if p is not None]
+            vals = [_soft_clean(p) for p in parts]
+    else:
+        vals = []
+
+    # 4) Drop empties + dedupe (order-preserving)
+    seen = set()
+    clean: list[str] = []
+    for v in vals:
+        if not v:
+            continue
+        if v not in seen:
+            clean.append(v)
+            seen.add(v)
+    return clean
 
 
 class AlertRulesImporter(BaseImporter):
@@ -221,56 +292,6 @@ class AlertRulesImporter(BaseImporter):
         return self._rules_cache_by_name.get(node_name, {}).get(key)
 
     # ------------------------------ desired ------------------------------
-    
-    def _parse_list_field(self, raw) -> list[str]:
-        """
-        Accepts list or string and returns a clean list[str]:
-        - If list: coerce all items to str, strip quotes/spaces.
-        - If str:
-            * Try json.loads; if it yields a list, use it.
-            * Else split on comma/semicolon.
-        - Deduplicate while preserving order.
-        """
-        vals: list[str] = []
-
-        def _clean(s: str) -> str:
-            s = (s or "").strip()
-            # remove wrapping single/double quotes if present
-            if (len(s) >= 2) and ((s[0] == s[-1]) and s[0] in ("'", '"')):
-                s = s[1:-1].strip()
-            return s
-
-        if isinstance(raw, list):
-            vals = [_clean(str(x)) for x in raw]
-        elif isinstance(raw, str):
-            s = raw.strip()
-            parsed = None
-            if s:
-                try:
-                    parsed = json.loads(s)
-                except Exception:
-                    parsed = None
-
-            if isinstance(parsed, list):
-                vals = [_clean(str(x)) for x in parsed]
-            else:
-                # CSV-ish string
-                parts = [p for p in re.split(r"[;,]", s) if p is not None]
-                vals = [_clean(p) for p in parts]
-        else:
-            vals = []
-
-        # drop empties and dedupe (order-preserving)
-        seen = set()
-        clean: list[str] = []
-        for v in vals:
-            if not v:
-                continue
-            if v not in seen:
-                clean.append(v)
-                seen.add(v)
-
-        return clean
     
     def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
         df = sheets["Alert"].fillna("")
@@ -494,8 +515,8 @@ class AlertRulesImporter(BaseImporter):
         raw_repos = desired_row.get("repos") 
         raw_log_source = desired_row.get("log_source")
 
-        repos = self._parse_list_field(raw_repos)
-        log_source = self._parse_list_field(raw_log_source)
+        repos = _parse_list_field(raw_repos)
+        log_source = _parse_list_field(raw_log_source)
 
         # DEBUG dump to verify
         self.log.debug("parsed repos=%s", repos)

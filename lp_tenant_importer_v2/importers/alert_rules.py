@@ -143,6 +143,7 @@ class AlertRulesImporter(BaseImporter):
             if col not in df.columns:
                 raise ValidationError(f"Alert: missing required column '{col}'")
         need("name")
+        need("settings.user")
         need("settings.risk")
         need("settings.aggregate")
         need("settings.condition.condition_option")
@@ -170,6 +171,7 @@ class AlertRulesImporter(BaseImporter):
             # Timerange normalization happens later
             desired: Dict[str, Any] = {
                 "name": name,
+                "owner": _s(row.get("settings.user")),
                 "risk": _s(row.get("settings.risk")),
                 "aggregate": _s(row.get("settings.aggregate")),
                 "condition_option": _s(row.get("settings.condition.condition_option")),
@@ -386,7 +388,7 @@ class AlertRulesImporter(BaseImporter):
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
         # Resolve and validate owner
-        owner_id = self._resolve_owner_id(desired_row)
+        owner_id = _s(desired_row.get("owner"))
         if not owner_id:
             raise ValidationError("owner is required and could not be resolved from context")
         # Validate repos

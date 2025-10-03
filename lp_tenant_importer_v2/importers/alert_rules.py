@@ -307,20 +307,70 @@ class AlertRulesImporter(BaseImporter):
         return idx.get(lookup.lower(), "")
 
     # ------------------------------ fetching ------------------------------
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:  # type: ignore[override]
-        """Return existing rules by name for diffing (list_resource)."""
+
+    def fetch_existing(self, node: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch all existing AlertRules using POST /AlertRules/fetchMyRules,
+        then build a map keyed by rule name.
+
+        Also dumps each raw rule payload at DEBUG level for troubleshooting.
+        """
+        node_id = node["id"]
+        pool_uuid = self.client.pool_uuid
+
+        endpoint = (
+            f"configapi/{pool_uuid}/{node_id}/{RESOURCE}/fetchMyRules"
+        )
+
+        # Default page size chosen to avoid multiple roundtrips on typical setups.
+        page = 1
+        limit = 500
+        all_items: List[Dict[str, Any]] = []
+
         try:
-            items = client.list_resource(pool_uuid, node.id, RESOURCE) or []
+            while True:
+                # Most Logpoint endpoints expect the JSON body wrapped into {"data": {...}}
+                body = {"data": {"filters": {}, "page": page, "limit": limit}}
+                resp = self.client._req("POST", endpoint, json=body)
+
+                # Be tolerant about response shape across Director versions.
+                items = []
+                if isinstance(resp, dict):
+                    # Common shapes observed: {"status":"Success","data":[...]} or {"data":{"list":[...]}}
+                    if isinstance(resp.get("data"), list):
+                        items = resp["data"]
+                    elif isinstance(resp.get("data"), dict) and isinstance(resp["data"].get("list"), list):
+                        items = resp["data"]["list"]
+                    elif isinstance(resp.get("list"), list):
+                        items = resp["list"]
+
+                if not items:
+                    break
+
+                # Debug-dump each rule payload (truncated for safety).
+                for it in items:
+                    try:
+                        dump = json.dumps(it, ensure_ascii=False)
+                    except Exception:
+                        dump = str(it)
+                    log.debug("fetchMyRules item [node=%s]: %s", node["name"], dump)
+
+                all_items.extend(items)
+
+                # Stop if fewer items than requested => last page.
+                if len(items) < limit:
+                    break
+                page += 1
         except Exception as exc:
-            log.warning("fetch_existing failed [node=%s]: %s", node.name, exc)
-            items = []
-        existing: Dict[str, Dict[str, Any]] = {}
-        for it in items:
-            nm = _s(it.get("name") or it.get("searchname"))
-            if nm:
-                existing[nm] = it
-        log.info("fetch_existing: %d rules [node=%s]", len(existing), node.name)
-        return existing
+            log.warning("fetch_existing failed [node=%s]: %s", node["name"], exc)
+
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for r in all_items:
+            if isinstance(r, dict) and r.get("name"):
+                by_name[r["name"]] = r
+
+        log.info("fetch_existing: %d rules [node=%s]", len(by_name), node["name"])
+        return by_name
 
     # ------------------------------ payloads ------------------------------
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:

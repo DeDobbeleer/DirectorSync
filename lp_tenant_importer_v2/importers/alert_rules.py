@@ -308,7 +308,8 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------------ fetching ------------------------------
 
-    def fetch_existing(self, node: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef,) -> Dict[str, Dict[str, Any]]:
+        
         """
         Fetch all existing AlertRules using POST /AlertRules/fetchMyRules,
         then build a map keyed by rule name.
@@ -316,7 +317,6 @@ class AlertRulesImporter(BaseImporter):
         Also dumps each raw rule payload at DEBUG level for troubleshooting.
         """
         node_id = node["id"]
-        pool_uuid = self.client.pool_uuid
 
         endpoint = (
             f"configapi/{pool_uuid}/{node_id}/{RESOURCE}/fetchMyRules"

@@ -205,8 +205,6 @@ class AlertRulesImporter(BaseImporter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
-        # logger instance per-importer (cohérent avec les autres importers)
-        self.log = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         # cache des règles par node.id
         self._existing_cache: Dict[str, Dict[str, Any]] = {}
         
@@ -482,7 +480,7 @@ class AlertRulesImporter(BaseImporter):
             rows = response.get("rows") or []
         else:
             # Pas d’erreur levée ici : on respecte le contrat et on renvoie un dict vide.
-            self.log.warning("fetch_existing: monitor not OK on node=%s; returning empty mapping", node.name)
+            log.warning("fetch_existing: monitor not OK on node=%s; returning empty mapping", node.name)
             mapping: Dict[str, Dict[str, Any]] = {}
             self._existing_cache[node.id] = mapping
             return mapping
@@ -497,7 +495,7 @@ class AlertRulesImporter(BaseImporter):
 
         # 4) Cache + log debug
         self._existing_cache[node.id] = mapping
-        self.log.debug("fetch_existing: cached %d alert(s) for node=%s", len(mapping), node.name)
+        log.debug("fetch_existing: cached %d alert(s) for node=%s", len(mapping), node.name)
         return mapping
 
     # ------------------------------ payloads ------------------------------
@@ -525,8 +523,8 @@ class AlertRulesImporter(BaseImporter):
         log_source = _parse_list_field(raw_log_source)
 
         # DEBUG dump to verify
-        self.log.debug("parsed repos=%s", repos)
-        self.log.debug("parsed log_source=%s", log_source)
+        log.debug("parsed repos=%s", repos)
+        log.debug("parsed log_source=%s", log_source)
 
         payload: Dict[str, Any] = {
             "name": _s(desired_row.get("name")),
@@ -608,7 +606,7 @@ class AlertRulesImporter(BaseImporter):
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
             desired["owner"] = owner_resolved
         # alert_rules.py — dans apply(), juste avant CREATE/UPDATE
-        self.log.debug(
+        log.debug(
             "apply: node=%s name=%s payload_keys=%s timerange=%s repos=%s log_source=%s",
             node.id,
             payload.get("name") or payload.get("searchname"),

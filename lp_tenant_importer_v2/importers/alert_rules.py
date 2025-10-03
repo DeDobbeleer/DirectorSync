@@ -1,128 +1,175 @@
-
-"""
-Alert Rules Importer (patched)
-- Adds per-node owner ID resolution (username/email -> internal user id)
-- Caches lookups per node
-- Skips gracefully when owner cannot be resolved
-- Uses resolved owner_id in payload for create/update
-- Keeps the rest of the trunk (validate -> fetch -> diff -> plan -> apply) assumptions
-"""
-
 from __future__ import annotations
+"""AlertRules importer (DirectorSync v2)
 
+Follows the SAME pipeline and style as other importers (e.g. Devices/Repos):
+  - BaseImporter drives: load → validate → fetch → diff → plan → apply
+  - We implement only the hooks: validate, iter_desired, key_fn, canon_*, fetch_existing,
+    build_payload_*, apply.
+Scope: MyRules only (NOOP/CREATE/UPDATE/SKIP). No sharing/ownership transfer, no notifications.
+"""
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import math
+from typing import Any, Dict, Iterable, List, Tuple
 
 import pandas as pd
 
-# Framework imports (expected by the project structure)
-from .base import BaseImporter, NodeRef, Decision
+from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError
+from ..utils.validators import ValidationError  # reused from trunk
 
 log = logging.getLogger(__name__)
 
-RESOURCE = "AlertRules"
-USER_RESOURCE_CANDIDATES: Tuple[str, ...] = (
-    # Try common shapes seen across Director builds
-    "Users",
-    "Users/list",
-    "Users/fetch",
-    "User",
-    "User/list",
-)
+RESOURCE = "AlertRules"  # Director API resource path
 
+# ------------------------------- helpers ------------------------------------
 
-# ------------------------- small helpers -------------------------
-
-def _s(val: Any) -> str:
-    return str(val).strip() if val is not None else ""
-
-def _int_or_none(val: Any) -> Optional[int]:
+def _s(v: Any) -> str:
+    if v is None:
+        return ""
     try:
-        if val is None or (isinstance(val, str) and not val.strip()):
+        if pd.isna(v):  # type: ignore[attr-defined]
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
+
+
+def _int_or_none(v: Any) -> int | None:
+    try:
+        if v is None:
             return None
-        return int(val)
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = _s(v)
+        return int(s) if s else None
     except Exception:
         return None
 
-def _split_multi(val: Any) -> List[str]:
-    if val is None:
+
+def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", "\n")) -> List[str]:
+    raw = _s(cell)
+    if not raw:
         return []
-    if isinstance(val, list):
-        return [str(x).strip() for x in val if str(x).strip()]
-    s = str(val).strip()
-    if not s:
-        return []
-    # allow both csv and ; separated lists
-    parts = []
-    for chunk in s.replace(";", ",").split(","):
-        c = chunk.strip()
-        if c:
-            parts.append(c)
+    canon = raw
+    for s in seps[1:]:
+        canon = canon.replace(s, seps[0])
+    parts = [p.strip() for p in canon.split(seps[0]) if p.strip()]
+    # also accept JSON-ish arrays without full json.loads (defensive)
+    if len(parts) == 1 and parts[0].startswith("[") and parts[0].endswith("]"):
+        mid = parts[0].strip("[] ")
+        parts = [p.strip().strip('"') for p in mid.split(",") if p.strip()]
     return parts
 
-def _normalize_repos(raw: Any, repo_map_df: Optional[pd.DataFrame]) -> List[str]:
+
+def _normalize_repos(raw: Any, repo_map_df: pd.DataFrame | None) -> List[str]:
+    """Return normalized repo specs as list of strings: `ip:port` or `ip:port:Repo_CLEANED`.
+
+    - Accepts list/CSV/pipe/newline or legacy `ip:port/repo` and converts to colon form.
+    - If a Repo sheet is provided with `original_repo_name` → `cleaned_repo_name`, map it.
+    (Tenant IP filtering is intentionally not enforced here to stay consistent with
+     other importers' XLSX-only parsing at this stage. If needed later, do it in apply.)
     """
-    Accept lists or csv strings; apply optional mapping from a 'Repo' sheet:
-    - If repo_map_df provided and contains columns ['alias','value'], replace alias with value.
-    """
-    repos = _split_multi(raw)
-    if not repos:
-        return []
-    if isinstance(repo_map_df, pd.DataFrame) and not repo_map_df.empty:
-        lowmap = {}
-        # allow various column namings
-        cols = {c.lower(): c for c in repo_map_df.columns}
-        alias_col = cols.get("alias") or cols.get("name") or list(repo_map_df.columns)[0]
-        value_col = cols.get("value") or cols.get("repo") or list(repo_map_df.columns)[-1]
-        for _, r in repo_map_df.iterrows():
-            alias = _s(r.get(alias_col)).lower()
-            value = _s(r.get(value_col))
-            if alias and value:
-                lowmap[alias] = value
-        out = []
-        for r in repos:
-            out.append(lowmap.get(r.lower(), r))
-        repos = out
-    # final cleanup
-    cleaned = [x for x in (str(r).strip() for r in repos) if x]
-    return cleaned
+    items = _split_multi(raw)
+    mapping: Dict[str, str] = {}
+    if isinstance(repo_map_df, pd.DataFrame) and {"original_repo_name", "cleaned_repo_name"}.issubset(repo_map_df.columns):
+        mapping = dict(
+            zip(
+                repo_map_df["original_repo_name"].astype(str).str.strip(),
+                repo_map_df["cleaned_repo_name"].astype(str).str.strip(),
+            )
+        )
+    out: List[str] = []
+    for it in items:
+        tok = _s(it)
+        if "/" in tok and tok.count(":") == 1:
+            left, r = tok.split("/", 1)
+            tok = f"{left}:{r}"
+        parts = [p.strip() for p in tok.split(":") if p.strip()]
+        if len(parts) < 2:
+            continue
+        ip, port = parts[0], parts[1]
+        repo_old = parts[2] if len(parts) >= 3 else ""
+        if repo_old:
+            repo_clean = mapping.get(repo_old, repo_old)
+            out.append(f"{ip}:{port}:{repo_clean}")
+        else:
+            out.append(f"{ip}:{port}")
+    return sorted(set(out))
 
 
-# --------------------------- importer ----------------------------
+# ----------------------------- importer --------------------------------------
 
 class AlertRulesImporter(BaseImporter):
+    """Importer for **AlertRules/MyRules**.
+
+    Sheet: "Alert"
+    Required columns: name, settings.risk, settings.aggregate,
+        settings.condition.condition_option, settings.condition.condition_value,
+        settings.livesearch_data.limit, settings.repos,
+        and one of timerange columns (minute/hour/day/second or time_range_seconds).
     """
-    Importer implementing:
-      - iter_desired(): build desired rows from sheets
-      - fetch_existing(): list existing alerts (via DirectorClient)
-      - diff(): provided by BaseImporter trunk, or overridden in the real project
-      - apply(): create/update/noop for each node with owner resolution
-    """
 
-    def name(self) -> str:
-        return "alert_rules"
+    resource_name: str = "alert_rules"
+    sheet_names = ("Alert",)
+    required_columns = tuple()  # custom validation below (like other modules)
 
-    # ---------------- desired ----------------
+    # Stable subset for diffing (order-insensitive fields normalized in canon_*):
+    compare_keys = (
+        "risk",
+        "repos_csv",
+        "aggregate",
+        "condition_option",
+        "condition_value",
+        "limit",
+        "timerange_key",
+        "timerange_value",
+        "query",
+        "description",
+        "flush_on_trigger",
+        "search_interval_minute",
+        "throttling_enabled",
+        "throttling_field",
+        "throttling_time_range",
+        "log_source_csv",
+        "context_template",
+    )
 
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
+    # ---------------------------- validation ----------------------------
+    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+        if "Alert" not in sheets:
+            raise ValidationError("Missing required sheet: Alert")
+        df = sheets["Alert"]
+        def need(col: str) -> None:
+            if col not in df.columns:
+                raise ValidationError(f"Alert: missing required column '{col}'")
+        need("name")
+        need("settings.risk")
+        need("settings.aggregate")
+        need("settings.condition.condition_option")
+        need("settings.condition.condition_value")
+        need("settings.livesearch_data.limit")
+        need("settings.repos")
+        if not any(c in df.columns for c in (
+            "settings.livesearch_data.timerange_minute",
+            "settings.livesearch_data.timerange_hour",
+            "settings.livesearch_data.timerange_day",
+            "settings.livesearch_data.timerange_second",
+            "settings.time_range_seconds",
+        )):
+            raise ValidationError("Alert: missing timerange column (minute/hour/day/second)")
+
+    # -------------------------- XLSX → desired ---------------------------
+    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
         df: pd.DataFrame = sheets["Alert"].copy()
-
-        repo_map_df: Optional[pd.DataFrame] = None
-        maybe_repo = sheets.get("Repo")
-        if isinstance(maybe_repo, pd.DataFrame):
-            repo_map_df = maybe_repo
-
+        # Optional mapping sheet for repo names
+        repo_map_df: pd.DataFrame | None = sheets.get("Repo") if isinstance(sheets.get("Repo"), pd.DataFrame) else None
         for _, row in df.iterrows():
             name = _s(row.get("name"))
             if not name:
                 continue
+            # Timerange normalization happens later
             desired: Dict[str, Any] = {
                 "name": name,
-                # Keep raw username/email; resolve per node during apply()
-                "owner_login": _s(row.get("settings.user")),
                 "risk": _s(row.get("settings.risk")),
                 "aggregate": _s(row.get("settings.aggregate")),
                 "condition_option": _s(row.get("settings.condition.condition_option")),
@@ -138,118 +185,261 @@ class AlertRulesImporter(BaseImporter):
                 "log_source": _split_multi(row.get("settings.log_source")),
                 "context_template": _s(row.get("settings.context_template")),
                 "active": _s(row.get("settings.active")).lower() in {"on", "true", "1", "yes"},
+                # repos normalized here (mapping applied if sheet present)
                 "repos_norm": _normalize_repos(row.get("settings.repos"), repo_map_df),
-                # raw ranges (kept for conversion downstream, if any)
+                # raw timeranges retained for conversion
                 "timerange_minute": _int_or_none(row.get("settings.livesearch_data.timerange_minute")),
                 "timerange_hour": _int_or_none(row.get("settings.livesearch_data.timerange_hour")),
                 "timerange_day": _int_or_none(row.get("settings.livesearch_data.timerange_day")),
                 "timerange_second": _int_or_none(row.get("settings.livesearch_data.timerange_second") or row.get("settings.time_range_seconds")),
             }
+            log.debug(
+                "XLSX row parsed name=%s repos=%d timerange=(min=%s,hour=%s,day=%s,sec=%s)",
+                name,
+                len(desired["repos_norm"]),
+                desired.get("timerange_minute"),
+                desired.get("timerange_hour"),
+                desired.get("timerange_day"),
+                desired.get("timerange_second"),
+            )
             yield desired
 
-    # ---------------- existing ----------------
+    # ------------------------ canonicalization (diff) ------------------------
+    @staticmethod
+    def key_fn(desired_row: Dict[str, Any]) -> str:
+        return _s(desired_row.get("name"))
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> List[Dict[str, Any]]:
-        # Basic list; concrete implementation can adapt schemas if required
+    def _canon_timerange(self, d: Dict[str, Any]) -> Tuple[str, int]:
+        if (m := d.get("timerange_minute")):
+            return ("minute", int(m))
+        if (h := d.get("timerange_hour")):
+            return ("hour", int(h))
+        if (dy := d.get("timerange_day")):
+            return ("day", int(dy))
+        if (s := d.get("timerange_second")):
+            return ("minute", int(math.ceil(float(s) / 60.0)))
+        return ("minute", 0)
+
+    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+        key, val = self._canon_timerange(desired_row)
+        return {
+            "risk": _s(desired_row.get("risk")).lower(),
+            "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos_norm", [])])),
+            "aggregate": _s(desired_row.get("aggregate")).lower(),
+            "condition_option": _s(desired_row.get("condition_option")).lower(),
+            "condition_value": int(desired_row.get("condition_value") or 0),
+            "limit": int(desired_row.get("limit") or 0),
+            "timerange_key": key,
+            "timerange_value": int(val or 0),
+            "query": _s(desired_row.get("query")),
+            "description": _s(desired_row.get("description")),
+            "flush_on_trigger": bool(desired_row.get("flush_on_trigger")),
+            "search_interval_minute": int(desired_row.get("search_interval_minute") or 0),
+            "throttling_enabled": bool(desired_row.get("throttling_enabled")),
+            "throttling_field": _s(desired_row.get("throttling_field")),
+            "throttling_time_range": int(desired_row.get("throttling_time_range") or 0),
+            "log_source_csv": ",".join(sorted([_s(x) for x in desired_row.get("log_source", [])])),
+            "context_template": _s(desired_row.get("context_template")),
+        }
+
+    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        if not existing_obj:
+            return None
+        repos = existing_obj.get("repos") or []
+        # Timerange can be represented via minute/hour/day fields
+        t_key = (
+            "day" if existing_obj.get("timerange_day") else (
+                "hour" if existing_obj.get("timerange_hour") else "minute"
+            )
+        )
+        t_val = int(existing_obj.get(f"timerange_{t_key}") or 0)
+        return {
+            "risk": _s(existing_obj.get("risk")).lower(),
+            "repos_csv": ",".join(sorted([_s(x) for x in repos if _s(x)])),
+            "aggregate": _s(existing_obj.get("aggregate")).lower(),
+            "condition_option": _s(existing_obj.get("condition_option")).lower(),
+            "condition_value": int(existing_obj.get("condition_value") or 0),
+            "limit": int(existing_obj.get("limit") or 0),
+            "timerange_key": t_key,
+            "timerange_value": t_val,
+            "query": _s(existing_obj.get("query")),
+            "description": _s(existing_obj.get("description")),
+            "flush_on_trigger": bool(existing_obj.get("flush_on_trigger")),
+            "search_interval_minute": int(existing_obj.get("search_interval_minute") or 0),
+            "throttling_enabled": bool(existing_obj.get("throttling_enabled")),
+            "throttling_field": _s(existing_obj.get("throttling_field")),
+            "throttling_time_range": int(existing_obj.get("throttling_time_range") or 0),
+            "log_source_csv": ",".join(sorted([_s(x) for x in (existing_obj.get("log_source") or [])])),
+            "context_template": _s(existing_obj.get("context_template")),
+        }
+
+    # ----------------------------- read existing -----------------------------
+    def fetch_existing(
+        self, client: DirectorClient, pool_uuid: str, node: NodeRef,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return {searchname -> object} from MyAlertRules/fetch, tolerant to shapes.
+        No exceptions are raised; on error returns an empty dict and logs at WARNING.
+        """
+        path = client.configapi(pool_uuid, node.id, f"{RESOURCE}/MyAlertRules/fetch")
+        items: List[Dict[str, Any]] = []
         try:
-            raw = client.list_resource(pool_uuid, node.id, RESOURCE) or []
+            data = client.post_json(path, {"data": {}}) or []
+            if isinstance(data, dict):
+                items = (
+                    data.get("items")
+                    or data.get("data")
+                    or data.get("results")
+                    or []
+                )
+                if not isinstance(items, list):
+                    items = []
+            elif isinstance(data, list):
+                items = data  # already a list
         except Exception as exc:
-            log.error("fetch_existing failed [node=%s]: %s", node.name, exc)
-            return []
-        results: List[Dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
+            log.warning("fetch_existing failed [node=%s]: %s", node.name, exc)
+            items = []
+        out: Dict[str, Dict[str, Any]] = {}
+        for it in items:
+            if not isinstance(it, dict):
                 continue
-            name = _s(item.get("name"))
-            if not name:
-                continue
-            results.append({
-                "id": _s(item.get("id") or item.get("_id")),
-                "name": name,
-            })
-        log.info("fetch_existing: %d rules [node=%s]", len(results), node.name)
-        return results
+            key = _s(it.get("searchname") or it.get("name"))
+            if key:
+                out[key] = it
+        log.info("fetch_existing: %d rules [node=%s]", len(out), node.name)
+        return out
 
-    # ---------------- payload builders ----------------
+    # --------------------------- payload builders ----------------------------
+    def _timerange_kv(self, d: Dict[str, Any]) -> Tuple[str, int]:
+        k, v = self._canon_timerange(d)
+        return k, v
+
+    def _resolve_owner_id(self, desired_row: Dict[str, Any]) -> str:
+        """Resolve owner using profiles.yml (preferred), then env, then context.
+        - profiles.yml: profiles.AlertRules.options.default_owner (string)
+        - env: LP_ALERT_OWNER
+        - ctx: owner_id / user_id / username
+        """
+        # 0) If desired already has an owner (future-proof), honor it
+        ov = desired_row.get("owner")
+        if isinstance(ov, str) and ov.strip():
+            log.debug("owner resolved from desired row: %s", ov)
+            return ov.strip()
+        # 1) profiles.yml option
+        try:
+            owner_from_profile = self._get_profile_option_default_owner()
+            if owner_from_profile:
+                log.debug("owner resolved from profiles.yml: %s", owner_from_profile)
+                return owner_from_profile
+        except Exception as e:
+            log.debug("profiles.yml lookup failed: %s", e)
+        # 2) environment override
+        import os
+        env_owner = os.getenv("LP_ALERT_OWNER", "").strip()
+        if env_owner:
+            log.debug("owner resolved from env LP_ALERT_OWNER: %s", env_owner)
+            return env_owner
+        # 3) context fallback
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            for attr in ("owner_id", "user_id", "username"):
+                v = getattr(ctx, attr, None)
+                if isinstance(v, str) and v.strip():
+                    log.debug("owner resolved from context %s: %s", attr, v)
+                    return v.strip()
+        log.debug("owner could not be resolved from any source")
+        return ""
+
+    def _get_profile_option_default_owner(self) -> str:
+        """Read resources/profiles.yml and return profiles.AlertRules.options.default_owner if present."""
+        import os
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return ""
+        # Locate profiles.yml packaged with the module
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # lp_tenant_importer_v2/
+        res_path = os.path.join(base_dir, "resources", "profiles.yml")
+        if not os.path.exists(res_path):
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
+            return ""
+        try:
+            with open(res_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            prof = (data.get("profiles") or {}).get("AlertRules") or {}
+            opts = prof.get("options") or {}
+            val = opts.get("default_owner") or ""
+            if isinstance(val, str):
+                return val.strip()
+            return ""
+        except Exception:
+            return ""
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        owner_id = _s(desired_row.get("owner_id"))
+        # Resolve and validate owner
+        owner_id = self._resolve_owner_id(desired_row)
         if not owner_id:
-            raise ValidationError("owner is required (user id not resolved for target node)")
-
+            raise ValidationError("owner is required and could not be resolved from context")
+        # Validate repos
         repos = desired_row.get("repos_norm", [])
         if not isinstance(repos, list) or not repos or not all(isinstance(x, str) and x.strip() for x in repos):
             raise ValidationError("repos must be a non-empty list of strings")
-
+        # Timerange
+        k, v = self._timerange_kv(desired_row)
         payload: Dict[str, Any] = {
-            "searchname": desired_row["name"],
-            "description": _s(desired_row.get("description")),
-            "aggregate": _s(desired_row.get("aggregate")) or "max",
-            "condition_option": _s(desired_row.get("condition_option")) or "greaterthan",
-            "condition_value": int(desired_row.get("condition_value") or 0),
-            "timerange_hour": int(desired_row.get("timerange_hour") or 1),
-            "limit": int(desired_row.get("limit") or 100),
+            "searchname": _s(desired_row.get("name")),
             "owner": owner_id,
-            "query": _s(desired_row.get("query")),
-            "flush_on_trigger": "on" if desired_row.get("flush_on_trigger") else "off",
+            "risk": _s(desired_row.get("risk")),
             "repos": repos,
-            "risk": _s(desired_row.get("risk")) or "low",
+            "aggregate": _s(desired_row.get("aggregate")),
+            "condition_option": _s(desired_row.get("condition_option")),
+            "condition_value": int(desired_row.get("condition_value") or 0),
+            "limit": int(desired_row.get("limit") or 0),
+            f"timerange_{k}": int(v or 0),
         }
+        if _s(desired_row.get("query")):
+            payload["query"] = _s(desired_row.get("query"))
+        if _s(desired_row.get("description")):
+            payload["description"] = _s(desired_row.get("description"))
+        if desired_row.get("log_source"):
+            payload["log_source"] = desired_row.get("log_source")
+        if desired_row.get("search_interval_minute"):
+            payload["search_interval_minute"] = int(desired_row.get("search_interval_minute"))
+        if desired_row.get("flush_on_trigger"):
+            payload["flush_on_trigger"] = "on"
+        if desired_row.get("throttling_enabled"):
+            payload["throttling_enabled"] = "on"
+            if _s(desired_row.get("throttling_field")):
+                payload["throttling_field"] = _s(desired_row.get("throttling_field"))
+            if desired_row.get("throttling_time_range"):
+                payload["throttling_time_range"] = int(desired_row.get("throttling_time_range"))
+        if _s(desired_row.get("context_template")):
+            payload["alert_context_template"] = _s(desired_row.get("context_template"))
         return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
-        # For simplicity, reuse the same structure; real diffing can be applied in BaseImporter
-        payload = self.build_payload_create(desired_row)
-        # The API may require name/immutable fields handling; adjust if your backend differs
-        return payload
+    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+        return self.build_payload_create(desired_row)
 
-    # ---------------- apply ----------------
-
+    # -------------------------------- apply ----------------------------------
     def apply(
         self,
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-        decision: Decision,
-        existing_id: Optional[str],
+        decision,
+        existing_id: str | None,
     ) -> Dict[str, Any]:
         desired = decision.desired or {}
         name = _s(desired.get("name")) or "(unnamed)"
-
-        # ----- per-node owner resolution -----
-        try:
-            cache: Dict[str, str] = getattr(self, "_owner_cache", {})
-            if not isinstance(cache, dict):
-                cache = {}
-                setattr(self, "_owner_cache", cache)
-
-            owner_login = _s(desired.get("owner_login"))
-            if owner_login:
-                cache_key = f"{node.id}:{owner_login.lower()}"
-                if cache_key in cache:
-                    desired["owner_id"] = cache[cache_key]
-                else:
-                    uid = self._resolve_owner_id_for_node(client, pool_uuid, node, owner_login)
-                    if uid:
-                        cache[cache_key] = uid
-                        desired["owner_id"] = uid
-                    else:
-                        msg = f"owner '{owner_login}' not found/unique on node={node.name}"
-                        log.warning("SKIP %s alert=%s [node=%s] reason=%s", decision.op, name, node.name, msg)
-                        return {"status": "Skipped", "reason": msg}
-            else:
-                owner_id_ctx = _s(desired.get("owner_id") or desired.get("owner"))
-                if owner_id_ctx:
-                    desired["owner_id"] = owner_id_ctx
-                else:
-                    msg = "missing settings.user and no owner id in context"
-                    log.warning("SKIP %s alert=%s [node=%s] reason=%s", decision.op, name, node.name, msg)
-                    return {"status": "Skipped", "reason": msg}
-        except Exception as e:
-            log.error("owner resolution failed for alert=%s [node=%s]: %s", name, node.name, e)
-            return {"status": "Failed", "error": f"owner resolution error: {e}"}
-
-        # ----- standard apply -----
         try:
             if decision.op == "CREATE":
                 try:
@@ -260,7 +450,6 @@ class AlertRulesImporter(BaseImporter):
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
                 return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
-
             if decision.op == "UPDATE" and existing_id:
                 try:
                     payload = self.build_payload_update(desired, {"id": existing_id})
@@ -270,74 +459,13 @@ class AlertRulesImporter(BaseImporter):
                 log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
                 log.debug("UPDATE payload=%s", payload)
                 return client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
-
             log.info("NOOP alert=%s [node=%s]", name, node.name)
             return {"status": "Success"}
-
         except Exception as exc:
+            # Convert HTTP/errors to a clean per-row result without stacktrace propagation
             msg = str(exc)
             log.error("APPLY FAILED alert=%s [node=%s]: %s", name, node.name, msg)
             return {"status": "Failed", "error": msg}
-
-    # ---------------- owner lookup ----------------
-
-    def _resolve_owner_id_for_node(
-        self,
-        client: DirectorClient,
-        pool_uuid: str,
-        node: NodeRef,
-        login_or_email: str,
-    ) -> str:
-        """
-        Resolve a user's internal id for the given *node* from a username or email.
-        Strategy:
-          1) Query user collections from likely endpoints (USER_RESOURCE_CANDIDATES).
-          2) Prefer exact match on 'username' (case-insensitive), else on 'email'.
-          3) Return a single id only if unique; otherwise return "" to force a SKIP.
-        """
-        users: List[Dict[str, Any]] = []
-        for res in USER_RESOURCE_CANDIDATES:
-            try:
-                path = client.configapi(pool_uuid, node.id, res)
-                data = client.get_json(path) or {}
-                if isinstance(data, list):
-                    users = data
-                elif isinstance(data, dict):
-                    for key in ("items", "results", "data"):
-                        val = data.get(key)
-                        if isinstance(val, list):
-                            users = val
-                            break
-                if users:
-                    break
-            except Exception as exc:
-                log.debug("owner lookup: %s not usable on node=%s: %s", res, node.name, exc)
-                continue
-
-        if not users:
-            return ""
-
-        want = login_or_email.strip().lower()
-
-        def _fld(u: Dict[str, Any], key: str) -> str:
-            v = u.get(key)
-            return str(v).strip() if v is not None else ""
-
-        matches: List[str] = []
-        for u in users:
-            if not isinstance(u, dict):
-                continue
-            uname = _fld(u, "username").lower()
-            email = _fld(u, "email").lower()
-            if uname == want or (email and email == want):
-                uid = _fld(u, "_id") or _fld(u, "id")
-                if uid:
-                    matches.append(uid)
-
-        uniq = sorted(set(matches))
-        if len(uniq) == 1:
-            return uniq[0]
-        return ""
 
 
 __all__ = ["AlertRulesImporter"]

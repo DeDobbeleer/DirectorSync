@@ -47,7 +47,9 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
             return int(math.ceil(f / 60.0))
         return int(f)
     except Exception:
+        log.error(f"invalid integer value: {v!r}")
         raise ValidationError(f"invalid integer value: {v!r}")
+
 
 
 def _s(value: Any) -> str:
@@ -224,11 +226,13 @@ class AlertRulesImporter(BaseImporter):
     # ---------------------------- validation ----------------------------
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
+            log.error("Missing required sheet: Alert")
             raise ValidationError("Missing required sheet: Alert")
         df = sheets["Alert"]
 
         def need(col: str) -> None:
             if col not in df.columns:
+                log.error(f"Alert: missing required column '{col}'")
                 raise ValidationError(f"Alert: missing required column '{col}'")
 
         need("name")
@@ -248,6 +252,7 @@ class AlertRulesImporter(BaseImporter):
                 "settings.time_range_seconds",
             )
         ):
+            log.error("Alert: missing timerange column (minute/hour/day/second)")
             raise ValidationError(
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
@@ -507,6 +512,7 @@ class AlertRulesImporter(BaseImporter):
         if not owner_id:
             owner_id = self._get_profile_option_default_owner()
         if not owner_id:
+            log.error("owner is required and could not be resolved from context or profiles.yml")
             raise ValidationError("owner is required and could not be resolved from context or profiles.yml")
 
 

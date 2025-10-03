@@ -30,7 +30,7 @@ EXIT_CONFIG_ERROR = 2
 EXIT_VALIDATION_ERROR = 3
 EXIT_NETWORK_ERROR = 4
 
-log = ""
+log = get_logger(__name__)
 
 def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     """Resolve environment/config and return runtime artifacts.

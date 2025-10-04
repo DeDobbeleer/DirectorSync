@@ -405,7 +405,7 @@ class AlertRulesImporter(BaseImporter):
                     ip_priv = node.ip_private
                     if ip_priv:
                         ips.append(ip_priv)
-            log.debug(f"siems private IPs list: {self.tenant_name}")
+            log.debug(f"siems private IPs list: {ips}")
         else:
             log.error(f"no siems defined for this tenant: {self.tenant_name}")
             

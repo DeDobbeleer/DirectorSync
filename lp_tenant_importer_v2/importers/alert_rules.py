@@ -263,6 +263,7 @@ class AlertRulesImporter(BaseImporter):
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
         self._repo_map = self._build_repo_name_map(sheets)
+        self.backend_ips = self._collect_backend_ips()
 
     # ------------------------ desired rows ------------------------
 
@@ -399,7 +400,7 @@ class AlertRulesImporter(BaseImporter):
         tenant_siems = self.tenant_ctx.siems if self.tenant_ctx.siems else None
         log.debug(f"tenant siems content: {tenant_siems}")
         if tenant_siems:
-            siem_types = ("backend", "all_in_one", "all-in-one", "allinone")
+            siem_types = ("backends", "backend", "all_in_one", "all-in-one", "allinone")
             for siem_type in siem_types:
                 for node in tenant_siems.get(siem_type, []):
                     ip_priv = node.ip_private
@@ -427,7 +428,7 @@ class AlertRulesImporter(BaseImporter):
             return []
 
         port = _get_repo_port_from_profiles()
-        backend_ips = self._collect_backend_ips()
+        
         special_local = {"default", "_logpoint", "_logpointalert"}  # compare lowercase
 
         final: List[str] = []
@@ -460,8 +461,8 @@ class AlertRulesImporter(BaseImporter):
 
             # 3) Pure repo name (original). Remap and expand across backend IPs.
             repo_token = self.repo_name_map.get(tt, tt)
-            if backend_ips:
-                expanded = _build_repo_paths_for_backends(repo_token, backend_ips, port)
+            if self.backend_ips:
+                expanded = _build_repo_paths_for_backends(repo_token, self.backend_ips, port)
                 final.extend(expanded)
                 log.debug("repo token '%s' (mapped='%s') -> expanded=%s", tt, repo_token, expanded)
             else:

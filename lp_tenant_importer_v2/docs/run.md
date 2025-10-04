@@ -38,8 +38,23 @@ cd lp_tenant_importer_v2
 python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \
-  --xlsx ../lp_tenant_importer/samples/core_config.xlsx \
+  --xlsx samples/core_config.xlsx \
   --dry-run \
+  --no-verify \
+  import-alert-rules
+```
+
+```bash
+cd ~/dev/DirectorSync/lp_tenant_importer_v2
+export PYTHONPATH=..
+cd ~/dev/DirectorSync
+source lp_tenant_importer_v2/.venv/bin/activate
+git pull origin main
+cd lp_tenant_importer_v2
+python -m lp_tenant_importer_v2.main \
+  --tenant core \
+  --tenants-file ../tenants.yml \
+  --xlsx samples/core_config.xlsx \
   --no-verify \
   import-alert-rules
 ```

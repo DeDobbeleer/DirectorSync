@@ -474,7 +474,8 @@ class AlertRulesImporter(BaseImporter):
                 continue
 
             # 3) Pure repo name (original). Remap and expand across backend IPs.
-            repo_token = self.repo_name_map.get(tt, tt)
+            repo_token = self.repo_name_map.get(m, m)
+            log.debug(f"remapped repo_name from {m} to {repo_token}")
             if self.backend_ips:
                 expanded = _build_repo_paths_for_backends(repo_token, self.backend_ips, port)
                 final.extend(expanded)

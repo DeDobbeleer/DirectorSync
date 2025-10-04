@@ -573,7 +573,7 @@ class AlertRulesImporter(BaseImporter):
         log.debug("build_payload_create: log_source(parsed)=%s", payload["log_source"])
 
         # normalize & expand repos
-        if node is not None:
+        if self.backend_ips:
             payload["repos"] = self._normalize_and_expand_repos(repos_raw, node)
         else:
             payload["repos"] = _parse_list_field(repos_raw)

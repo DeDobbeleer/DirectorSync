@@ -14,7 +14,7 @@ from typing import Tuple, List, Dict, Any
 
 import requests
 
-from .core.config import Config, NodeRef, ConfigError
+from .core.config import Config, ConfigError
 from .core.director_client import DirectorClient
 from .core.logging_utils import setup_logging, get_logger
 from .utils.reporting import print_rows
@@ -117,12 +117,13 @@ def cmd_import_generic(args):
 
         client, pool_uuid, tenant_name, xlsx_path, cfg = _prepare_context(args)
         # Resolve target nodes from global defaults.target
-        nodes = cfg.get_targets(cfg.get_tenant(tenant_name), spec.element_key)
+        tenant_ctx = cfg.get_tenant(tenant_name)
+        nodes = cfg.get_targets(tenant_ctx, spec.element_key)
 
         # Lazy-load the importer class and run
         importer_cls = spec.load_class()
         importer = importer_cls()
-        result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
+        result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, tenant_name, tenant_ctx)
 
         # Enrich rows for nicer table output (skip reason, monitor)
         rows = _enrich_rows_for_output(result.rows)

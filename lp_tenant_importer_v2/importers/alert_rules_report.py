@@ -163,6 +163,7 @@ class AlertRulesXlsxLister(BaseImporter):
         nodes: List[NodeRef],
         xlsx_path: str,
         dry_run: bool,
+        tenant_name: str = None,
     ) -> ImportResult:
         """
         Read the workbook once, then produce one report row per (node x alert).

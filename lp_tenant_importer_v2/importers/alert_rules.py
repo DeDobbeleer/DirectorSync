@@ -24,7 +24,7 @@ import re
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef, ValidationError
+from .base import BaseImporter, NodeRef, ValidationError, TenantConfig
 from ..core.director_client import DirectorClient
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,6 @@ def _s(v: Any) -> str:
     """Return trimmed string, or empty string for None."""
     return str(v).strip() if v is not None else ""
 
-
 def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     """Coerce common spreadsheet values to int."""
     if v is None or v == "":
@@ -53,7 +52,6 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         return int(f)
     except Exception:
         raise ValidationError(f"invalid integer value: {v!r}")
-
 
 def _parse_list_field(raw: Any) -> List[str]:
     """
@@ -116,14 +114,12 @@ def _parse_list_field(raw: Any) -> List[str]:
 
 
 _RE_IP_PORT = re.compile(
-    r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})(?P<rest>/.*)?\s*$"
+    r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})(?P<repo>/.*)?\s*$"
 )
-
 
 def _is_literal_repo_path(token: str) -> bool:
     """True if token is already 'IP:port[/name]'."""
     return bool(_RE_IP_PORT.match(token))
-
 
 def _get_repo_port_from_profiles() -> int:
     """
@@ -152,12 +148,10 @@ def _get_repo_port_from_profiles() -> int:
         pass
     return 5504
 
-
 def _expand_local_repo(token: str, port: int) -> str:
     """Map 'default'/'_logpoint'/'_logpointAlert' to 127.0.0.1:<port>/<name>."""
     name = token.strip()
     return f"127.0.0.1:{port}/{name}"
-
 
 def _build_repo_paths_for_backends(repo_name: str, backend_ips: List[str], port: int) -> List[str]:
     """Generate '<ip>:<port>/<repo_name>' for each backend/private IP."""
@@ -168,7 +162,6 @@ def _build_repo_paths_for_backends(repo_name: str, backend_ips: List[str], port:
             out.append(p)
             seen.add(p)
     return out
-
 
 # ------------------------ importer ------------------------
 
@@ -193,11 +186,30 @@ class AlertRulesImporter(BaseImporter):
         self._users_loaded: set[str] = set()
 
         # Provided/filled by runner if needed:
-        self.repo_name_map: Dict[str, str] = {}     # original -> cleaned name
+        self._repo_map: Dict[str, str] = {}     # original -> cleaned name
         self.tenant_nodes: List[Dict[str, Any]] | None = None  # nodes of tenant (to collect ip_private)
 
     # ------------------------ validation ------------------------
 
+    def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
+        """Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet."""
+        if "Repo" not in sheets:
+            return {}
+        df = sheets["Repo"]
+        cols = {c.lower(): c for c in df.columns}
+        src = cols.get("original_repo_name")
+        dst = cols.get("cleaned_repo_name")
+        if not src or not dst:
+            return {}
+
+        mapping: Dict[str, str] = {}
+        for _, row in df.iterrows():
+            k = _s(row.get(src))
+            v = _s(row.get(dst))
+            if k and v:
+                mapping[k] = v
+        return mapping
+    
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
             raise ValidationError("Missing required sheet: Alert")
@@ -216,17 +228,18 @@ class AlertRulesImporter(BaseImporter):
         need("settings.repos")
         if not any(
             c in df.columns
-            for c in (
-                "settings.livesearch_data.timerange_minute",
-                "settings.livesearch_data.timerange_hour",
-                "settings.livesearch_data.timerange_day",
-                "settings.livesearch_data.timerange_second",
-                "settings.time_range_seconds",
-            )
-        ):
+                for c in (
+                    "settings.livesearch_data.timerange_minute",
+                    "settings.livesearch_data.timerange_hour",
+                    "settings.livesearch_data.timerange_day",
+                    "settings.livesearch_data.timerange_second",
+                    "settings.time_range_seconds",
+                    )
+                ):
             raise ValidationError(
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
+        self._repo_map = self._build_repo_name_map(sheets)
 
     # ------------------------ desired rows ------------------------
 
@@ -354,25 +367,24 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------ repos expansion ------------------------
 
-    def _collect_backend_ips(self, node: NodeRef) -> List[str]:
+    def _collect_backend_ips(self) -> List[str]:
         """
         Collect private OpenVPN IPs from tenant nodes (backend/all_in_one).
         Runner should set self.tenant_nodes.
         """
         ips: List[str] = []
-        if isinstance(self.tenant_nodes, list) and self.tenant_nodes:
-            for n in self.tenant_nodes:
-                typ = (n.get("type") or n.get("node_type") or "").lower()
-                if typ in ("backend", "all_in_one", "all-in-one", "allinone"):
-                    ip_priv = (n.get("ip_private") or n.get("ip_priv") or "").strip()
+        tenant_siems = self.tenant_ctx.siems if isinstance(self.tenant_ctx.siems, Dict[str, List[NodeRef]]) and self.tenant_ctx.siems else None
+        
+        if tenant_siems:
+            siem_types = ("backend", "all_in_one", "all-in-one", "allinone")
+            for siem_type in siem_types:
+                for node in tenant_siems.get(siem_type, []):
+                    ip_priv = node.ip_private
                     if ip_priv:
                         ips.append(ip_priv)
         else:
-            # minimal fallback: try node.ip_private
-            ip_priv = getattr(node, "ip_private", None) or getattr(node, "ip_priv", None) or ""
-            if isinstance(ip_priv, str) and ip_priv.strip():
-                ips.append(ip_priv.strip())
-
+            log.error(f"no siems defined for this tenant: {self.tenant_name}")
+            
         # dedupe
         seen, out = set(), []
         for ip in ips:
@@ -391,34 +403,31 @@ class AlertRulesImporter(BaseImporter):
             return []
 
         port = _get_repo_port_from_profiles()
-        backend_ips = self._collect_backend_ips(node)
-        special_local = {"default", "_logpoint", "_logpointalert"}
+        backend_ips = self._collect_backend_ips()
+        special_local = {"default", "_logpoint", "_LogPointAlerts"}
 
         final: List[str] = []
         for t in tokens:
             tt = t.strip()
             if not tt:
                 continue
-
-            # literal 'IP:port[/name]'
+            
             if _is_literal_repo_path(tt):
-                final.append(tt)
-                continue
-
-            low = tt.lower()
-            if low in special_local:
-                final.append(_expand_local_repo(tt, port))
-                continue
-
-            # token is a repo name: remap & expand
-            repo_token = self.repo_name_map.get(tt, tt)
-            if backend_ips:
-                expanded = _build_repo_paths_for_backends(repo_token, backend_ips, port)
-                final.extend(expanded)
-                log.debug("repo token '%s' -> expanded=%s", tt, expanded)
-            else:
-                final.append(repo_token)
-                log.debug("repo token '%s' -> no backend IPs; kept as='%s'", tt, repo_token)
+                m = _RE_IP_PORT.match(tt)
+                if isinstance(m, str) and m:
+                    if not m in special_local:
+                        final.append(_expand_local_repo(tt, port))
+                    else:
+                        repo_token = self.repo_name_map.get(m, m)
+                        if backend_ips:
+                            expanded = _build_repo_paths_for_backends(repo_token, backend_ips, port)
+                            final.extend(expanded)
+                            log.debug("repo token '%s' -> expanded=%s", m, expanded)
+                        else:
+                            final.append(tt)
+                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, repo_token)
+                else:
+                    continue
 
         # dedupe preserving order
         seen, out = set(), []

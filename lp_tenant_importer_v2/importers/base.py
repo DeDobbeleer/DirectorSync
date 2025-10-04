@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import pandas as pd
 
-from ..core.config import NodeRef
+from ..core.config import NodeRef, TenantConfig
 from ..core.director_client import DirectorClient
 from ..utils.diff_engine import Decision, decide
 from ..utils.validators import require_sheets, require_columns, ValidationError
@@ -112,6 +112,8 @@ class BaseImporter:
         nodes: List[NodeRef],
         xlsx_path: str,
         dry_run: bool,
+        tenant_name: str = None,
+        tenant_ctx: TenantConfig = None
     ) -> ImportResult:
         """Run the importer for a set of nodes.
 
@@ -121,6 +123,10 @@ class BaseImporter:
             3) Diff desired vs existing to produce a plan
             4) Apply (unless dry-run), record results
         """
+        
+        self.tenant_name=tenant_name.strip() if isinstance(tenant_name,str) and tenant_name else ""
+        self.tenant_ctx = tenant_ctx if isinstance(tenant_ctx, TenantConfig) and tenant_ctx else None
+        
         sheets = self.load_xlsx(xlsx_path)
         self.validate(sheets)
 

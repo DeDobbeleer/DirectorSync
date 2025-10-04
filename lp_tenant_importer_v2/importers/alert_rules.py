@@ -397,7 +397,7 @@ class AlertRulesImporter(BaseImporter):
         """
         ips: List[str] = []
         tenant_siems = self.tenant_ctx.siems if self.tenant_ctx.siems else None
-        
+        log.debug(f"tenant siems content: {tenant_siems}")
         if tenant_siems:
             siem_types = ("backend", "all_in_one", "all-in-one", "allinone")
             for siem_type in siem_types:

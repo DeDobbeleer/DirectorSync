@@ -39,6 +39,7 @@ def _s(v: Any) -> str:
     """Return trimmed string, or empty string for None."""
     return str(v).strip() if v is not None else ""
 
+
 def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     """Coerce common spreadsheet values to int."""
     if v is None or v == "":
@@ -52,6 +53,7 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         return int(f)
     except Exception:
         raise ValidationError(f"invalid integer value: {v!r}")
+
 
 def _parse_list_field(raw: Any) -> List[str]:
     """
@@ -117,9 +119,11 @@ _RE_IP_PORT = re.compile(
     r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})(?P<repo>/.*)?\s*$"
 )
 
+
 def _is_literal_repo_path(token: str) -> bool:
     """True if token is already 'IP:port[/name]'."""
     return bool(_RE_IP_PORT.match(token))
+
 
 def _get_repo_port_from_profiles() -> int:
     """
@@ -148,20 +152,34 @@ def _get_repo_port_from_profiles() -> int:
         pass
     return 5504
 
+
 def _expand_local_repo(token: str, port: int) -> str:
     """Map 'default'/'_logpoint'/'_logpointAlert' to 127.0.0.1:<port>/<name>."""
     name = token.strip()
     return f"127.0.0.1:{port}/{name}"
 
-def _build_repo_paths_for_backends(repo_name: str, backend_ips: List[str], port: int) -> List[str]:
-    """Generate '<ip>:<port>/<repo_name>' for each backend/private IP."""
-    paths = [f"{ip}:{port}/{repo_name}" for ip in backend_ips if ip]
+
+def _build_repo_paths_for_backends(repo_name: str | None, backend_ips: List[str], port: int) -> List[str]:
+    """
+    Generate '<ip>:<port>/<repo_name>' for each backend/private IP.
+    If repo_name is falsy (None/empty), generate '<ip>:<port>' to target all repos.
+    """
+    paths: List[str] = []
+    for ip in backend_ips:
+        if not ip:
+            continue
+        if repo_name:
+            paths.append(f"{ip}:{port}/{repo_name}")
+        else:
+            paths.append(f"{ip}:{port}")
+    # dedupe while preserving order
     seen, out = set(), []
     for p in paths:
         if p not in seen:
             out.append(p)
             seen.add(p)
     return out
+
 
 # ------------------------ importer ------------------------
 
@@ -189,6 +207,11 @@ class AlertRulesImporter(BaseImporter):
         self._repo_map: Dict[str, str] = {}     # original -> cleaned name
         self.tenant_nodes: List[Dict[str, Any]] | None = None  # nodes of tenant (to collect ip_private)
 
+    @property
+    def repo_name_map(self) -> Dict[str, str]:
+        """Shortcut to the 'original -> cleaned' repository name map."""
+        return self._repo_map
+
     # ------------------------ validation ------------------------
 
     def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
@@ -209,7 +232,7 @@ class AlertRulesImporter(BaseImporter):
             if k and v:
                 mapping[k] = v
         return mapping
-    
+
     def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
             raise ValidationError("Missing required sheet: Alert")
@@ -228,14 +251,14 @@ class AlertRulesImporter(BaseImporter):
         need("settings.repos")
         if not any(
             c in df.columns
-                for c in (
-                    "settings.livesearch_data.timerange_minute",
-                    "settings.livesearch_data.timerange_hour",
-                    "settings.livesearch_data.timerange_day",
-                    "settings.livesearch_data.timerange_second",
-                    "settings.time_range_seconds",
-                    )
-                ):
+            for c in (
+                "settings.livesearch_data.timerange_minute",
+                "settings.livesearch_data.timerange_hour",
+                "settings.livesearch_data.timerange_day",
+                "settings.livesearch_data.timerange_second",
+                "settings.time_range_seconds",
+            )
+        ):
             raise ValidationError(
                 "Alert: missing timerange column (minute/hour/day/second)"
             )
@@ -370,27 +393,38 @@ class AlertRulesImporter(BaseImporter):
     def _collect_backend_ips(self) -> List[str]:
         """
         Collect private OpenVPN IPs from tenant nodes (backend/all_in_one).
-        Runner should set self.tenant_nodes.
+        Runner should set self.tenant_nodes or self.tenant_ctx.siems, depending on the framework wiring.
         """
         ips: List[str] = []
-        tenant_siems = self.tenant_ctx.siems if isinstance(self.tenant_ctx.siems, Dict[str, List[NodeRef]]) and self.tenant_ctx.siems else None
-        
-        if tenant_siems:
-            siem_types = ("backend", "all_in_one", "all-in-one", "allinone")
-            for siem_type in siem_types:
-                for node in tenant_siems.get(siem_type, []):
-                    ip_priv = node.ip_private
-                    if ip_priv:
-                        ips.append(ip_priv)
-        else:
-            log.error(f"no siems defined for this tenant: {self.tenant_name}")
-            
+
+        # Prefer tenant_ctx.siems if present and is a dict-like structure
+        tenant_siems = getattr(self, "tenant_ctx", None)
+        if tenant_siems is not None:
+            siems_attr = getattr(tenant_siems, "siems", None)
+            if isinstance(siems_attr, dict):
+                for key in ("backend", "all_in_one", "all-in-one", "allinone"):
+                    for node in siems_attr.get(key, []) or []:
+                        ip_priv = getattr(node, "ip_private", None)
+                        if ip_priv:
+                            ips.append(ip_priv)
+
+        # Fallback to self.tenant_nodes if provided as a list of dicts/objects
+        if not ips and self.tenant_nodes:
+            for n in self.tenant_nodes:
+                # allow dict or object
+                ip_priv = n.get("ip_private") if isinstance(n, dict) else getattr(n, "ip_private", None)
+                typ = n.get("type") if isinstance(n, dict) else getattr(n, "type", None)
+                if ip_priv and str(typ).lower() in {"backend", "all_in_one", "all-in-one", "allinone"}:
+                    ips.append(ip_priv)
+
         # dedupe
         seen, out = set(), []
         for ip in ips:
             if ip and ip not in seen:
                 out.append(ip)
                 seen.add(ip)
+
+        log.debug("backend private IPs collected: %s", out)
         return out
 
     def _normalize_and_expand_repos(self, raw_value: Any, node: NodeRef) -> List[str]:
@@ -404,35 +438,52 @@ class AlertRulesImporter(BaseImporter):
 
         port = _get_repo_port_from_profiles()
         backend_ips = self._collect_backend_ips()
-        special_local = {"default", "_logpoint", "_LogPointAlerts"}
+        special_local = {"default", "_logpoint", "_logpointalert"}  # compare lowercase
 
         final: List[str] = []
+
         for t in tokens:
             tt = t.strip()
             if not tt:
                 continue
-            
-            if _is_literal_repo_path(tt):
-                m = _RE_IP_PORT.match(tt)
-                if isinstance(m, str) and m:
-                    if not m in special_local:
-                        final.append(_expand_local_repo(tt, port))
-                    else:
-                        repo_token = self.repo_name_map.get(m, m)
-                        if backend_ips:
-                            expanded = _build_repo_paths_for_backends(repo_token, backend_ips, port)
-                            final.extend(expanded)
-                            log.debug("repo token '%s' -> expanded=%s", m, expanded)
-                        else:
-                            final.append(tt)
-                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, repo_token)
-                else:
-                    continue
+
+            # 1) Already literal: IP:port[/name] -> keep as-is
+            m = _RE_IP_PORT.match(tt)
+            if m:
+                ip = m.group("ip")
+                repo = m.group("repo") or ""
+                repo = repo.lstrip("/")  # remove leading slash in group
+                # keep literal as entered (normalize spacing only)
+                literal = f"{ip}:{m.group('port')}"
+                if repo:
+                    literal = f"{literal}/{repo}"
+                final.append(literal)
+                log.debug("repo literal kept: %s -> %s", tt, literal)
+                continue
+
+            # 2) Special local names -> 127.0.0.1:<port>/<name>
+            if tt.lower() in special_local:
+                mapped = _expand_local_repo(tt, port)
+                final.append(mapped)
+                log.debug("repo special-local: %s -> %s", tt, mapped)
+                continue
+
+            # 3) Pure repo name (original). Remap and expand across backend IPs.
+            repo_token = self.repo_name_map.get(tt, tt)
+            if backend_ips:
+                expanded = _build_repo_paths_for_backends(repo_token, backend_ips, port)
+                final.extend(expanded)
+                log.debug("repo token '%s' (mapped='%s') -> expanded=%s", tt, repo_token, expanded)
+            else:
+                # No backend IPs known: keep token as-is (won't be valid for POST,
+                # but DEBUG will show clearly why)
+                final.append(repo_token)
+                log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, repo_token)
 
         # dedupe preserving order
         seen, out = set(), []
         for p in final:
-            if p not in seen:
+            if p and p not in seen:
                 out.append(p)
                 seen.add(p)
 

@@ -393,38 +393,28 @@ class AlertRulesImporter(BaseImporter):
     def _collect_backend_ips(self) -> List[str]:
         """
         Collect private OpenVPN IPs from tenant nodes (backend/all_in_one).
-        Runner should set self.tenant_nodes or self.tenant_ctx.siems, depending on the framework wiring.
+        Runner should set self.tenant_nodes.
         """
         ips: List[str] = []
-
-        # Prefer tenant_ctx.siems if present and is a dict-like structure
-        tenant_siems = getattr(self, "tenant_ctx", None)
-        if tenant_siems is not None:
-            siems_attr = getattr(tenant_siems, "siems", None)
-            if isinstance(siems_attr, dict):
-                for key in ("backend", "all_in_one", "all-in-one", "allinone"):
-                    for node in siems_attr.get(key, []) or []:
-                        ip_priv = getattr(node, "ip_private", None)
-                        if ip_priv:
-                            ips.append(ip_priv)
-
-        # Fallback to self.tenant_nodes if provided as a list of dicts/objects
-        if not ips and self.tenant_nodes:
-            for n in self.tenant_nodes:
-                # allow dict or object
-                ip_priv = n.get("ip_private") if isinstance(n, dict) else getattr(n, "ip_private", None)
-                typ = n.get("type") if isinstance(n, dict) else getattr(n, "type", None)
-                if ip_priv and str(typ).lower() in {"backend", "all_in_one", "all-in-one", "allinone"}:
-                    ips.append(ip_priv)
-
+        tenant_siems = self.tenant_ctx.siems if self.tenant_ctx.siems else None
+        
+        if tenant_siems:
+            siem_types = ("backend", "all_in_one", "all-in-one", "allinone")
+            for siem_type in siem_types:
+                for node in tenant_siems.get(siem_type, []):
+                    ip_priv = node.ip_private
+                    if ip_priv:
+                        ips.append(ip_priv)
+            log.debug(f"siems private IPs list: {self.tenant_name}")
+        else:
+            log.error(f"no siems defined for this tenant: {self.tenant_name}")
+            
         # dedupe
         seen, out = set(), []
         for ip in ips:
             if ip and ip not in seen:
                 out.append(ip)
                 seen.add(ip)
-
-        log.debug("backend private IPs collected: %s", out)
         return out
 
     def _normalize_and_expand_repos(self, raw_value: Any, node: NodeRef) -> List[str]:

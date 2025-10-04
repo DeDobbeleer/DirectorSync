@@ -329,6 +329,20 @@ class AlertRulesImporter(BaseImporter):
             "timerange_minute": _to_int(desired_row.get("timerange_minute")),
             "searchname": _s(desired_row.get("searchname")),
         }
+    
+    def canon_existing(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "risk": _s(row.get("risk")).lower(),
+            "repos_csv": ",".join(sorted([_s(x) for x in row.get("repos") or []])),
+            "aggregate": _s(row.get("aggregate")).lower(),
+            "condition_option": _s(row.get("condition_option")).lower(),
+            "condition_value": _to_int(row.get("condition_value")),
+            "limit": _to_int(row.get("limit")),
+            "timerange_day": _to_int(row.get("timerange_day")),
+            "timerange_hour": _to_int(row.get("timerange_hour")),
+            "timerange_minute": _to_int(row.get("timerange_minute")),
+            "searchname": _s(row.get("searchname")),
+        }
 
     # ------------------------ users/owner ------------------------
 

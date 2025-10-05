@@ -650,7 +650,8 @@ class AlertRulesImporter(BaseImporter):
             branch = res.get("monitor_branch")
             mon_ok = res.get("monitor_ok")
             status = res.get("status") or status
+            error = res.get("result")
 
-        return {"status": status, "monitor_ok": mon_ok, "monitor_branch": branch}
+        return {"status": status, "monitor_ok": mon_ok, "monitor_branch": branch, "error": error}
 
 __all__ = ["AlertRulesImporter"]

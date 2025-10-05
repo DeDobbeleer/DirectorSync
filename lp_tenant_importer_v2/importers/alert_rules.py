@@ -440,53 +440,37 @@ class AlertRulesImporter(BaseImporter):
             return []
 
         port = _get_repo_port_from_profiles()
-        
-        special_local = {"default", "_logpoint", "_logpointalert"}  # compare lowercase
+        backend_ips = self._collect_backend_ips()
+        special_local = {"default", "_logpoint", "_LogPointAlerts"}
 
         final: List[str] = []
-
         for t in tokens:
             tt = t.strip()
             if not tt:
                 continue
-
-            # 1) Already literal: IP:port[/name] -> keep as-is
-            m = _RE_IP_PORT.match(tt)
-            if m:
-                ip = m.group("ip")
-                repo = m.group("repo") or ""
-                repo = repo.lstrip("/")  # remove leading slash in group
-                # keep literal as entered (normalize spacing only)
-                literal = f"{ip}:{m.group('port')}"
-                if repo:
-                    literal = f"{literal}/{repo}"
-                final.append(literal)
-                log.debug("repo literal kept: %s -> %s", tt, literal)
-
-            # 2) Special local names -> 127.0.0.1:<port>/<name>
-            if tt.lower() in special_local:
-                mapped = _expand_local_repo(tt, port)
-                final.append(mapped)
-                log.debug("repo special-local: %s -> %s", tt, mapped)
-                continue
-
-            # 3) Pure repo name (original). Remap and expand across backend IPs.
-            repo_token = self.repo_name_map.get(m, m)
-            log.debug(f"remapped repo_name from {m} to {repo_token}")
-            if self.backend_ips:
-                expanded = _build_repo_paths_for_backends(repo_token, self.backend_ips, port)
-                final.extend(expanded)
-                log.debug("repo token '%s' (mapped='%s') -> expanded=%s", tt, repo_token, expanded)
-            else:
-                # No backend IPs known: keep token as-is (won't be valid for POST,
-                # but DEBUG will show clearly why)
-                final.append(repo_token)
-                log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, repo_token)
+            
+            if _is_literal_repo_path(tt):
+                m = _RE_IP_PORT.match(tt)
+                mRepo = m.group("repo","")
+                if isinstance(mRepo, str) and mRepo:
+                    if not mRepo in special_local:
+                        final.append(_expand_local_repo(mRepo, port))
+                    else:
+                        repo_token = self.repo_name_map.get(mRepo, mRepo)
+                        if backend_ips:
+                            expanded = _build_repo_paths_for_backends(mRepo, backend_ips, port)
+                            final.extend(expanded)
+                            log.debug("repo token '%s' -> expanded=%s", mRepo, expanded)
+                        else:
+                            final.append(tt)
+                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, mRepo)
+                else:
+                    continue
 
         # dedupe preserving order
         seen, out = set(), []
         for p in final:
-            if p and p not in seen:
+            if p not in seen:
                 out.append(p)
                 seen.add(p)
 

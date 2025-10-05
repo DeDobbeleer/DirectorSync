@@ -131,7 +131,12 @@ def cmd_import_generic(args):
 
         # Enrich rows for nicer table output (skip reason, monitor)
         rows = _enrich_rows_for_output(result.rows)
-        print_rows(rows, args.format)
+        recap = print_rows(rows, args.format)
+        
+        if args.format == 'json':
+            log.info(recap)
+        else:
+            log.info("\n" + recap)
 
         if result.any_error:
             raise RuntimeError("One or more operations failed; see rows above.")

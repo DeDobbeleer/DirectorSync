@@ -108,7 +108,7 @@ def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
 
     if fmt == "json":
         print(json.dumps(norm_rows, indent=2))
-        return
+        return json.dumps(norm_rows, indent=2)
 
     # Table mode
     cols: List[str] = []
@@ -132,10 +132,18 @@ def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
         for c in cols:
             w = len(_fmt(r.get(c), c))
             widths[c] = max(widths[c], w)
-
+            
+    
+    
     header = "| " + " | ".join(c.ljust(widths[c]) for c in cols) + " |"
     sep = "| " + " | ".join("-" * widths[c] for c in cols) + " |"
     print(header)
     print(sep)
+    
+    lines = [header, sep]
     for r in norm_rows:
-        print("| " + " | ".join(_fmt(r.get(c), c).ljust(widths[c]) for c in cols) + " |")
+        line = "| " + " | ".join(_fmt(r.get(c), c).ljust(widths[c]) for c in cols) + " |"
+        print(line)
+        lines.append(line)
+    
+    return "\n".join(lines)

@@ -1,4 +1,4 @@
-# lp_tenant_importer_v2/main.py (refactor — generic importer wiring)
+# lp_tenant_importer_v2/main.py
 """CLI — generic wiring for all importers via a central registry.
 
 End-user UX remains identical. Each importer declares itself in
@@ -10,11 +10,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 
 import requests
 
-from .core.config import Config, NodeRef, ConfigError
+from .core.config import Config, ConfigError
 from .core.director_client import DirectorClient
 from .core.logging_utils import setup_logging, get_logger
 from .utils.reporting import print_rows
@@ -22,8 +22,7 @@ from .utils.validators import ValidationError
 from .importers.registry import get_spec_by_key, iter_specs
 
 
-setup_logging()
-log = get_logger(__name__)
+
 
 EXIT_OK = 0
 EXIT_GENERIC_ERROR = 1
@@ -31,6 +30,7 @@ EXIT_CONFIG_ERROR = 2
 EXIT_VALIDATION_ERROR = 3
 EXIT_NETWORK_ERROR = 4
 
+log = get_logger(__name__)
 
 def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     """Resolve environment/config and return runtime artifacts.
@@ -48,6 +48,8 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
 
     try:
         cfg = Config.from_env()
+        setup_logging()
+        log = get_logger(__name__)
     except ConfigError as exc:
         log.error("Configuration error: %s", exc)
         raise
@@ -55,12 +57,42 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     client = DirectorClient(
         cfg.director_url,
         os.getenv("LP_DIRECTOR_API_TOKEN", ""),
-        verify=not args.no_verify,
+        verify=args.no_verify,
     )
 
     tenant = cfg.get_tenant(args.tenant)
     pool_uuid = tenant.pool_uuid
     return client, pool_uuid, tenant.name, args.xlsx, cfg
+
+
+def _enrich_rows_for_output(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalize a few fields for nicer table output:
+      - If 'error' is a list (e.g., missing repos), stringify as 'missing repos: a, b'.
+      - Ensure monitor_ok / monitor_branch are printable (fallback to '—' if None/empty).
+    """
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        rr = dict(r)  # shallow copy
+
+        err = rr.get("error")
+        if isinstance(err, list):
+            rr["error"] = f"missing repos: {', '.join(err)}" if err else "—"
+        elif err in (None, ""):
+            # try to synthesize from nested result if present (defensive)
+            res = rr.get("result_detail") or rr.get("details") or {}
+            if isinstance(res, dict) and "missing_repos" in res:
+                m = res.get("missing_repos") or []
+                rr["error"] = f"missing repos: {', '.join(m)}" if m else "—"
+
+        mon = rr.get("monitor_ok")
+        rr["monitor_ok"] = "—" if mon is None or mon == "" else str(mon)
+
+        br = rr.get("monitor_branch")
+        rr["monitor_branch"] = br or "—"
+
+        out.append(rr)
+    return out
 
 
 # ----------------------- Generic command handler ----------------------------
@@ -85,16 +117,18 @@ def cmd_import_generic(args):
 
         client, pool_uuid, tenant_name, xlsx_path, cfg = _prepare_context(args)
         # Resolve target nodes from global defaults.target
-        nodes = cfg.get_targets(cfg.get_tenant(tenant_name), spec.element_key)
+        tenant_ctx = cfg.get_tenant(tenant_name)
+        nodes = cfg.get_targets(tenant_ctx, spec.element_key)
 
         # Lazy-load the importer class and run
         importer_cls = spec.load_class()
         importer = importer_cls()
-        result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run)
-        
-        
+        result = importer.run_for_nodes(client, pool_uuid, nodes, xlsx_path, args.dry_run, tenant_name, tenant_ctx)
 
-        print_rows(result.rows, args.format)
+        # Enrich rows for nicer table output (skip reason, monitor)
+        rows = _enrich_rows_for_output(result.rows)
+        print_rows(rows, args.format)
+
         if result.any_error:
             raise RuntimeError("One or more operations failed; see rows above.")
 
@@ -105,7 +139,7 @@ def cmd_import_generic(args):
         log.error("File not found: %s", exc)
         sys.exit(EXIT_VALIDATION_ERROR)
     except ValidationError as exc:
-        log.error("Validation error: %s", exc)
+        log.exception("Validation error (%s): %r", type(exc).__name__, exc)
         sys.exit(EXIT_VALIDATION_ERROR)
     except requests.RequestException as exc:
         log.error("Network/HTTP error: %s", exc)

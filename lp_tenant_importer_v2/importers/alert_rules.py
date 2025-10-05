@@ -467,6 +467,8 @@ class AlertRulesImporter(BaseImporter):
                             log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, mRepo)
                 else:
                     continue
+            else:
+                log.debug("repo litteral not found '%s'", tt)
 
         # dedupe preserving order
         seen, out = set(), []

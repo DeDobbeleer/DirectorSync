@@ -618,7 +618,7 @@ class AlertRulesImporter(BaseImporter):
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
                 res = client.create_resource(pool_uuid, node.id, RESOURCE, payload)
-                log.debug("*********res*******",res)
+                log.debug("*********res*******",str(res))
                 return self._monitor_result(client, node, res, "create")
 
             if decision.op == "UPDATE" and existing_id:

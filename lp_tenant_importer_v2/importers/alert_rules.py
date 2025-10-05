@@ -39,7 +39,6 @@ def _s(v: Any) -> str:
     """Return trimmed string, or empty string for None."""
     return str(v).strip() if v is not None else ""
 
-
 def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     """Coerce common spreadsheet values to int."""
     if v is None or v == "":
@@ -53,7 +52,6 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         return int(f)
     except Exception:
         raise ValidationError(f"invalid integer value: {v!r}")
-
 
 def _parse_list_field(raw: Any) -> List[str]:
     """
@@ -122,7 +120,6 @@ def _is_literal_repo_path(token: str) -> bool:
     """True if token is already 'IP:port[/name]'."""
     return bool(_RE_IP_PORT.match(token))
 
-
 def _get_repo_port_from_profiles() -> int:
     """
     Optional override from resources/profiles.yml:
@@ -150,12 +147,10 @@ def _get_repo_port_from_profiles() -> int:
         pass
     return 5504
 
-
 def _expand_local_repo(token: str, port: int) -> str:
     """Map 'default'/'_logpoint'/'_logpointAlert' to 127.0.0.1:<port>/<name>."""
     name = token.strip()
     return f"127.0.0.1:{port}/{name}"
-
 
 def _build_repo_paths_for_backends(repo_name: str | None, backend_ips: List[str], port: int) -> List[str]:
     """
@@ -440,7 +435,7 @@ class AlertRulesImporter(BaseImporter):
             return []
 
         port = _get_repo_port_from_profiles()
-        backend_ips = self._collect_backend_ips()
+        backend_ips = self.backend_ips or []
         special_local = {"default", "_logpoint", "_LogPointAlerts"}
 
         final: List[str] = []
@@ -622,13 +617,15 @@ class AlertRulesImporter(BaseImporter):
                 payload = self.build_payload_create(desired, node=node)
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
-                return client.create_resource(pool_uuid, node.id, RESOURCE, payload)
+                res = client.create_resource(pool_uuid, node.id, RESOURCE, payload)
+                return self._monitor_result(client, node, res, "create")
 
             if decision.op == "UPDATE" and existing_id:
                 payload = self.build_payload_update(desired, {"id": existing_id}, node=node)
                 log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
                 log.debug("UPDATE payload=%s", payload)
-                return client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
+                res = client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
+                return self._monitor_result(client, node, res, "update")
 
             log.info("NOOP alert=%s [node=%s]", name, node.name)
             return {"status": "Success"}
@@ -638,5 +635,21 @@ class AlertRulesImporter(BaseImporter):
             log.error("APPLY FAILED alert=%s [node=%s]: %s", name, node.name, msg)
             return {"status": "Failed", "error": msg}
 
+    @staticmethod
+    def _monitor_result(
+        client: DirectorClient,  # noqa: ARG002 (kept for parity with Repos importer)
+        node: NodeRef,           # noqa: ARG002
+        res: Dict[str, Any],
+        action: str,             # noqa: ARG002
+    ) -> Dict[str, Any]:
+        """Normalize async monitor result (kept minimal and consistent)."""
+        status = "Success"
+        mon_ok = None
+        branch = None
+        if isinstance(res, dict):
+            branch = res.get("monitor_branch")
+            mon_ok = res.get("monitor_ok")
+            status = res.get("status") or status
+        return {"status": status, "monitor_ok": mon_ok, "monitor_branch": branch}
 
 __all__ = ["AlertRulesImporter"]

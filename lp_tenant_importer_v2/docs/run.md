@@ -55,8 +55,7 @@ python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \
   --xlsx samples/core_config.xlsx \
-  --no-verify \
-  import-repos
+  import-alert-rules
 ```
 
 ### Vérif rapide

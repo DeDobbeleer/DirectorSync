@@ -445,6 +445,7 @@ class AlertRulesImporter(BaseImporter):
 
         final: List[str] = []
         for t in tokens:
+            log.debug("repo start for loop '%s'", t)
             tt = t.strip()
             if not tt:
                 continue

@@ -450,7 +450,7 @@ class AlertRulesImporter(BaseImporter):
             
             if _is_literal_repo_path(t):
                 m = _RE_IP_PORT.match(t)
-                mRepo = m.group("repo","")
+                mRepo = m.group("repo")
                 log.debug("repo token found '%s'", mRepo)
                 if isinstance(mRepo, str) and mRepo:
                     if not mRepo in special_local:

@@ -447,8 +447,6 @@ class AlertRulesImporter(BaseImporter):
         for t in tokens:
             log.debug("repo start for loop '%s'", t)
             tt = t.strip()
-            if not tt:
-                continue
             
             if _is_literal_repo_path(tt):
                 m = _RE_IP_PORT.match(tt)

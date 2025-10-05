@@ -453,17 +453,17 @@ class AlertRulesImporter(BaseImporter):
                 mRepo = m.group("repo")
                 log.debug("repo token found '%s'", mRepo)
                 if isinstance(mRepo, str) and mRepo:
-                    if not mRepo in special_local:
+                    if mRepo in special_local:
                         final.append(_expand_local_repo(mRepo, port))
                     else:
-                        repo_token = self.repo_name_map.get(mRepo, mRepo)
+                        mRepoMap = self.repo_name_map.get(mRepo, mRepo)
                         if backend_ips:
-                            expanded = _build_repo_paths_for_backends(mRepo, backend_ips, port)
+                            expanded = _build_repo_paths_for_backends(mRepoMap, backend_ips, port)
                             final.extend(expanded)
-                            log.debug("repo token '%s' -> expanded=%s", mRepo, expanded)
+                            log.debug("repo token '%s' -> expanded=%s", mRepoMap, expanded)
                         else:
                             final.append(t)
-                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", t, mRepo)
+                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", t, mRepoMap)
                 else:
                     continue
             else:

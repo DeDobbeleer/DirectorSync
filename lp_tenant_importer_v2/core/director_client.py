@@ -373,7 +373,7 @@ class DirectorClient:
             log.debug("CREATE[%s] response=%s", corr, _short_json(_redact(res)))
         except Exception as e:
             log.exception("CREATE[%s] HTTP POST failed", e)
-            raise
+            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}

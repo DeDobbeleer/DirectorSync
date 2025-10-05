@@ -54,7 +54,7 @@ cd lp_tenant_importer_v2
 python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \
-  --xlsx samples/core_config.xlsx \
+  --xlsx samples/core_config_light.xlsx \
   --no-verify \
   import-alert-rules
 ```

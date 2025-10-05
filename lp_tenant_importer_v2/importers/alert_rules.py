@@ -114,11 +114,9 @@ def _parse_list_field(raw: Any) -> List[str]:
             seen.add(v)
     return out
 
-
 _RE_IP_PORT = re.compile(
-    r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})(?P<repo>/.*)?\s*$"
+    r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})/(?P<repo>.*)?\s*$"
 )
-
 
 def _is_literal_repo_path(token: str) -> bool:
     """True if token is already 'IP:port[/name]'."""

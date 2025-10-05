@@ -381,13 +381,13 @@ class DirectorClient:
         mon_path = self._extract_monitor_path(res)
         if mon_path:
             log.info("CREATE[%s] monitor via URL: %s", corr, mon_path)
-            ok = self.monitor_job_url(mon_path)
+            ok, res = self.monitor_job_url(mon_path)
             return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         job = self._extract_job_id(res)
         if job:
             log.info("CREATE[%s] monitor via job id: %s", corr, job)
-            ok = self.monitor_job(pool_uuid, node_id, job)
+            ok, res = self.monitor_job(pool_uuid, node_id, job)
             return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
         log.info("CREATE[%s] no monitor info, treating as synchronous", corr)
@@ -424,13 +424,13 @@ class DirectorClient:
         mon_path = self._extract_monitor_path(res)
         if mon_path:
             log.info("UPDATE[%s] monitor via URL: %s", corr, mon_path)
-            ok = self.monitor_job_url(mon_path)
+            ok, res = self.monitor_job_url(mon_path)
             return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
 
         job = self._extract_job_id(res)
         if job:
             log.info("UPDATE[%s] monitor via job id: %s", corr, job)
-            ok = self.monitor_job(pool_uuid, node_id, job)
+            ok, res = self.monitor_job(pool_uuid, node_id, job)
             return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
         log.info("UPDATE[%s] no monitor info, treating as synchronous", corr)

@@ -445,11 +445,11 @@ class AlertRulesImporter(BaseImporter):
 
         final: List[str] = []
         for t in tokens:
-            log.debug("repo start for loop '%s'", t)
-            tt = t.strip()
             
-            if _is_literal_repo_path(tt):
-                m = _RE_IP_PORT.match(tt)
+            log.debug("repo start for loop '%s'", t)
+            
+            if _is_literal_repo_path(t):
+                m = _RE_IP_PORT.match(t)
                 mRepo = m.group("repo","")
                 log.debug("repo token found '%s'", mRepo)
                 if isinstance(mRepo, str) and mRepo:
@@ -462,12 +462,12 @@ class AlertRulesImporter(BaseImporter):
                             final.extend(expanded)
                             log.debug("repo token '%s' -> expanded=%s", mRepo, expanded)
                         else:
-                            final.append(tt)
-                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", tt, mRepo)
+                            final.append(t)
+                            log.warning("repo token '%s' -> no backend IPs; kept as='%s'", t, mRepo)
                 else:
                     continue
             else:
-                log.debug("repo litteral not found '%s'", tt)
+                log.debug("repo litteral not found '%s'", t)
 
         # dedupe preserving order
         seen, out = set(), []

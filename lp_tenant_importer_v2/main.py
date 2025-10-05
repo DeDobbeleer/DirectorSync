@@ -57,7 +57,7 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     client = DirectorClient(
         cfg.director_url,
         os.getenv("LP_DIRECTOR_API_TOKEN", ""),
-        verify=not args.no_verify,
+        verify=args.no_verify,
     )
 
     tenant = cfg.get_tenant(args.tenant)

@@ -389,7 +389,7 @@ class DirectorClient:
             log.info("CREATE[%s] monitor via job id: %s", corr, job)
             ok, res = self.monitor_job(pool_uuid, node_id, job)
             result = res.get("response", {}).get("message")
-            return {"status": "Success" if ok else "Faiiiiiled", "result": result, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
+            return {"status": "Success" if ok else "Failed", "result": result, "monitor_ok": ok, "monitor_branch": "job", "corr": corr}
 
         log.info("CREATE[%s] no monitor info, treating as synchronous", corr)
         return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "sync", "corr": corr}

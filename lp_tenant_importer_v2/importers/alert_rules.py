@@ -618,6 +618,7 @@ class AlertRulesImporter(BaseImporter):
                 log.info("CREATE alert=%s [node=%s]", name, node.name)
                 log.debug("CREATE payload=%s", payload)
                 res = client.create_resource(pool_uuid, node.id, RESOURCE, payload)
+                log.debug("*********res*******",res)
                 return self._monitor_result(client, node, res, "create")
 
             if decision.op == "UPDATE" and existing_id:
@@ -625,6 +626,7 @@ class AlertRulesImporter(BaseImporter):
                 log.info("UPDATE alert=%s id=%s [node=%s]", name, existing_id, node.name)
                 log.debug("UPDATE payload=%s", payload)
                 res = client.update_resource(pool_uuid, node.id, RESOURCE, existing_id, payload)
+                log.debug("*********res*******",res)
                 return self._monitor_result(client, node, res, "update")
 
             log.info("NOOP alert=%s [node=%s]", name, node.name)
@@ -650,6 +652,7 @@ class AlertRulesImporter(BaseImporter):
             branch = res.get("monitor_branch")
             mon_ok = res.get("monitor_ok")
             status = res.get("status") or status
+
         return {"status": status, "monitor_ok": mon_ok, "monitor_branch": branch}
 
 __all__ = ["AlertRulesImporter"]

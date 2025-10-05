@@ -462,7 +462,6 @@ class AlertRulesImporter(BaseImporter):
                     literal = f"{literal}/{repo}"
                 final.append(literal)
                 log.debug("repo literal kept: %s -> %s", tt, literal)
-                continue
 
             # 2) Special local names -> 127.0.0.1:<port>/<name>
             if tt.lower() in special_local:

@@ -373,7 +373,7 @@ class DirectorClient:
             log.debug("CREATE[%s] response=%s", corr, _short_json(_redact(res)))
         except Exception as e:
             log.exception("CREATE[%s] HTTP POST failed", e)
-            return {"status": "Success" if ok else "Failed", "result": res, "monitor_ok": ok, "monitor_branch": "url", "corr": corr}
+            return {"status": "failed", "result": res, "monitor_ok": '-', "monitor_branch": "POST", "corr": corr}
 
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}
@@ -416,7 +416,7 @@ class DirectorClient:
             log.debug("UPDATE[%s] response=%s", corr, _short_json(_redact(res)))
         except Exception:
             log.exception("UPDATE[%s] HTTP PUT failed", corr)
-            raise
+           return {"status": "failed", "result": res, "monitor_ok": '-', "monitor_branch": "PUT", "corr": corr}
 
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}

@@ -416,7 +416,7 @@ class DirectorClient:
             log.debug("UPDATE[%s] response=%s", corr, _short_json(_redact(res)))
         except Exception:
             log.exception("UPDATE[%s] HTTP PUT failed", corr)
-           return {"status": "failed", "result": res, "monitor_ok": '-', "monitor_branch": "PUT", "corr": corr}
+            return {"status": "failed", "result": res, "monitor_ok": '-', "monitor_branch": "PUT", "corr": corr}
 
         if not monitor or not self.options.monitor_enabled:
             return {"status": "Success", "result": res, "monitor_ok": None, "monitor_branch": "disabled", "corr": corr}

@@ -344,6 +344,188 @@ class DevicesImporter(BaseImporter):
             p["id"] = _to_str(existing_obj["id"])
         return p
 
+    # ---------------------------------DeviceGrouos ---------------------------
+    
+    def reconcile_devicegroup_membership(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+    ) -> dict:
+        """
+        Rebuild DeviceGroup membership from *current* devices on the target node.
+
+        Logic:
+        1) List devices → read `device_groups` (IDs) → build target mapping:
+            group_id -> set(device_id).
+        2) List device groups → resolve {id -> (name, description, current_members)}.
+        3) For each known group_id in the target mapping:
+            - If desired == current  -> NOOP
+            - Else PUT DeviceGroups/{id} with {name, description, devices=[...]}.
+        4) Best-effort & idempotent; logs a compact summary.
+
+        Returns:
+            dict stats: {"updated": int, "noop": int, "missing": int, "errors": int}
+        """
+        from collections import defaultdict
+        from typing import DefaultDict, Set, Dict, Any, List
+
+        log.info("device_groups: reconciling memberships [node=%s]", node.name)
+
+        stats = {"updated": 0, "noop": 0, "missing": 0, "errors": 0}
+
+        # Build maps for DeviceGroups (id <-> name) if not already done.
+        self._ensure_dg_maps(client, pool_uuid, node)
+        dg_id_to_name = self._dg_id_to_name.get(node.id, {})  # id -> name
+
+        # -------------------------
+        # 1) Collect desired state
+        # -------------------------
+        dev_payload = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
+        if isinstance(dev_payload, list):
+            dev_items = [x for x in dev_payload if isinstance(x, dict)]
+        elif isinstance(dev_payload, dict):
+            dev_items_any = (
+                dev_payload.get("items")
+                or dev_payload.get("data")
+                or dev_payload.get("devices")
+                or dev_payload.get("results")
+                or []
+            )
+            dev_items = [x for x in dev_items_any if isinstance(x, dict)]
+        else:
+            dev_items = []
+
+        target: DefaultDict[str, Set[str]] = defaultdict(set)  # group_id -> {device_id}
+        for it in dev_items:
+            dev_id = _to_str(it.get("id"))
+            if not dev_id:
+                continue
+            grp_ids = it.get("device_groups") or it.get("devicegroup") or []
+            if isinstance(grp_ids, dict):
+                grp_ids = grp_ids.get("ids") or []  # tolerate odd shapes defensively
+            for gid in grp_ids or []:
+                g = _to_str(gid)
+                if g:
+                    target[g].add(dev_id)
+
+        # Quick exit if nothing to do
+        if not target:
+            log.info("device_groups: no memberships detected from devices [node=%s]", node.name)
+            return stats
+
+        # -------------------------
+        # 2) Read current DG state
+        # -------------------------
+        dg_payload = client.list_resource(pool_uuid, node.id, self.DG_RESOURCE) or []
+        if isinstance(dg_payload, list):
+            dg_items = [x for x in dg_payload if isinstance(x, dict)]
+        elif isinstance(dg_payload, dict):
+            dg_items_any = (
+                dg_payload.get("data")
+                or dg_payload.get("items")
+                or dg_payload.get("device_groups")
+                or []
+            )
+            dg_items = [x for x in dg_items_any if isinstance(x, dict)]
+        else:
+            dg_items = []
+
+        # id -> {"name": str, "description": str, "devices": set(str)}
+        current_by_id: Dict[str, Dict[str, Any]] = {}
+        for g in dg_items:
+            gid = _to_str(g.get("id"))
+            if not gid:
+                continue
+            name = _to_str(g.get("name"))
+            desc = _to_str(g.get("description"))
+            cur = g.get("devices") or []
+            if isinstance(cur, dict):
+                cur = cur.get("ids") or []
+            cur_ids = { _to_str(x) for x in (cur or []) if _to_str(x) }
+            current_by_id[gid] = {"name": name, "description": desc, "devices": cur_ids}
+
+        # ----------------------------------------
+        # 3) Diff & apply (PUT) on DeviceGroups/*
+        # ----------------------------------------
+        for gid, desired_set in target.items():
+            meta = current_by_id.get(gid)
+            if not meta:
+                stats["missing"] += 1
+                log.warning(
+                    "device_groups: target references unknown group id=%s name=%s [node=%s]",
+                    gid, dg_id_to_name.get(gid, "?"), node.name
+                )
+                continue
+
+            current_set = meta.get("devices") or set()
+            if current_set == desired_set:
+                stats["noop"] += 1
+                log.debug(
+                    "device_groups: NOOP id=%s name=%s members=%d [node=%s]",
+                    gid, meta.get("name"), len(desired_set), node.name
+                )
+                continue
+
+            payload = {
+                # API requires name + (optionally) description to be sent back
+                "name": meta.get("name") or dg_id_to_name.get(gid) or "",
+                "description": meta.get("description") or "",
+                "devices": sorted({x for x in desired_set if x}),
+            }
+
+            try:
+                res = client.update_resource(
+                    pool_uuid, node.id, self.DG_RESOURCE, gid, payload
+                )
+                ok = res.get("monitor_ok")
+                status = res.get("status")
+                if ok is False or status == "Failed":
+                    stats["errors"] += 1
+                    log.error(
+                        "device_groups: UPDATE failed id=%s name=%s status=%s branch=%s [node=%s]",
+                        gid, payload["name"], status, res.get("monitor_branch"), node.name
+                    )
+                else:
+                    stats["updated"] += 1
+                    log.info(
+                        "device_groups: UPDATE id=%s name=%s members=%d [node=%s]",
+                        gid, payload["name"], len(payload["devices"]), node.name
+                    )
+            except Exception:
+                stats["errors"] += 1
+                log.exception(
+                    "device_groups: UPDATE threw exception id=%s name=%s [node=%s]",
+                    gid, payload.get("name"), node.name
+                )
+
+        log.info(
+            "device_groups: reconcile summary updated=%d noop=%d missing=%d errors=%d [node=%s]",
+            stats["updated"], stats["noop"], stats["missing"], stats["errors"], node.name
+        )
+        return stats
+
+    # ---------------------------------Post Actions ---------------------------
+    
+    def post_actions(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+    ) -> dict:
+        """Performs post actions: rebuild Device Groups membership"""
+        # Respect dry-run if BaseImporter set it
+        if getattr(self, "_dry_run", False):
+            log.info("device_groups: reconcile skipped (dry-run) [node=%s]", node.name)
+            return {"skipped": "dry_run"}
+
+        try:
+            stats = self.reconcile_devicegroup_membership(client, pool_uuid, node)
+            return stats or {}
+        except Exception:
+            log.warning("device_groups: reconcile failed [node=%s]", node.name, exc_info=True)
+            return {"error": "reconcile_failed"}
+        
     # -------------------------------- apply ----------------------------------
 
     def apply(

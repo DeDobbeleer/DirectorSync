@@ -93,6 +93,15 @@ class BaseImporter:
         """Build the API update payload for a desired row given the existing object."""
         raise NotImplementedError
 
+    def post_actions(
+        self,
+        client: DirectorClient,
+        pool_uuid: str,
+        node: NodeRef,
+    ) -> dict:
+        """Performs post actions if needed"""
+        pass
+
     def apply(
         self,
         client: DirectorClient,
@@ -200,5 +209,7 @@ class BaseImporter:
                     any_error = True
 
                 rows.append(row)
-
+            # Perform post Actions if needed
+            self.post_actions(client, pool_uuid, node)
+            
         return ImportResult(rows=rows, any_error=any_error)

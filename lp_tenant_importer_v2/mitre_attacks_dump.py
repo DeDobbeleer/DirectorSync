@@ -280,31 +280,6 @@ def _is_list_of_dicts(value: Any) -> bool:
     return isinstance(value, list) and (not value or isinstance(value[0], dict))
 
 
-def extract_tables(payload: Mapping[str, Any]) -> Dict[str, List[Mapping[str, Any]]]:
-    """Extract top-level tables from an API payload.
-
-    Strategy: look for any top-level key whose value is a list of objects.
-    If the payload nests under a `data` key (common pattern), we prefer that level.
-
-    Returns a mapping of table_name -> list of rows (dicts).
-    """
-    root = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
-
-    tables: Dict[str, List[Mapping[str, Any]]] = {}
-    if isinstance(root, Mapping):
-        for key, val in root.items():  # type: ignore[assignment]
-            if _is_list_of_dicts(val):
-                name = str(key).strip()
-                tables[name] = val  # type: ignore[assignment]
-
-    # Heuristics: if no obvious list-of-dicts found, but a single list exists
-    # (e.g., data: [ {...}, {...} ]), treat it as a generic table.
-    if not tables and _is_list_of_dicts(root):  # type: ignore[arg-type]
-        tables["items"] = root  # type: ignore[assignment]
-
-    return tables
-
-
 def _json_serializeable(val: Any) -> Any:
     """Ensure nested structures remain JSON-serializable for CSV/XLSX.
 
@@ -341,7 +316,7 @@ def write_json(payload: Mapping[str, Any], out_path: Optional[Path]) -> None:
         print(text)
 
 
-def write_csv_tables(tables: Mapping[str, List[Mapping[str, Any]]], out: Path) -> None:
+def write_csv_tables(tables: List[Mapping[str, Any]], out: Path) -> None:
     if pd is None:
         raise SystemExit(
             "pandas is required for CSV/XLSX export. Install with: pip install pandas openpyxl"
@@ -361,12 +336,10 @@ def write_csv_tables(tables: Mapping[str, List[Mapping[str, Any]]], out: Path) -
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = out.stem if out.suffix else out.name
 
-    for name, rows in tables.items():
-        safe = name.replace("/", "_").replace("\\", "_")
-        csv_path = out_dir / f"{prefix}_{safe}.csv"
-        df = pd.DataFrame(normalize_rows(rows))
-        df.to_csv(csv_path, index=False)
-        LOG.info("Wrote CSV: %s (%d rows)", csv_path, len(df))
+    csv_path = out_dir / f"{prefix}.csv"
+    df = pd.DataFrame(tables)
+    df.to_csv(csv_path, index=False)
+    LOG.info("Wrote CSV: %s (%d rows)", csv_path, len(df))
 
 
 def write_xlsx_tables(tables: Mapping[str, List[Mapping[str, Any]]], out_path: Path) -> None:
@@ -549,8 +522,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         write_json(payload, args.out)
         return 0
 
-    tables = extract_tables(payload)
-    if not tables:
+    
+    if not payload:
         LOG.warning("No tabular data found in response; writing raw JSON instead.")
         # Fallback: write JSON
         if args.out is None:
@@ -563,13 +536,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.out is None:
             # default to cwd directory name
             args.out = Path("mitre_attacks_csv")
-        write_csv_tables(tables, args.out)
+        write_csv_tables(payload, args.out)
         return 0
 
     if args.format == "xlsx":
         if args.out is None:
             args.out = Path("mitre_attacks.xlsx")
-        write_xlsx_tables(tables, args.out)
+        write_xlsx_tables(payload, args.out)
         return 0
 
     return 0

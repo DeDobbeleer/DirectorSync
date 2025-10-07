@@ -268,18 +268,18 @@ def fetch_mitre_attacks(
     
     msg = first.get("message", "")
     status = str(first.get("status", "")).lower()
-    if "/monitorapi/" in msg:
-        LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
-        return _follow_monitor_order(
-            base_url=base_url,
-            monitor_path=msg,
-            headers=headers,
-            verify=verify,
-            sess=sess,
-            req_timeout=timeout,
-            poll_timeout=poll_timeout,
-            poll_interval=poll_interval,
-        )
+    
+    LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
+    return _follow_monitor_order(
+        base_url=base_url,
+        monitor_path=msg,
+        headers=headers,
+        verify=verify,
+        sess=sess,
+        req_timeout=timeout,
+        poll_timeout=poll_timeout,
+        poll_interval=poll_interval,
+    )
 
     LOG.debug("Response keys: %s", list(first.keys()) if isinstance(first, Mapping) else type(first))
     return first  # already the final payload

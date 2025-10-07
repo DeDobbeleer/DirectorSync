@@ -193,7 +193,7 @@ def _follow_monitor_order(
             LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
             return {"data": resp.text}
 
-        if isinstance(body, Mapping):
+        if sucess == "pipo":
             status = str(body.get("status", "")).lower()
             # Follow nested pointer if still processing and new message provided
             msg = body.get("message")

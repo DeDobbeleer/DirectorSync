@@ -266,9 +266,9 @@ def fetch_mitre_attacks(
         raise SystemExit(3) from exc
 
     
-    msg = first.get("message")
+    msg = first.get("message", "")
     status = str(first.get("status", "")).lower()
-    if isinstance(msg, str) and "/monitorapi/" in msg:
+    if "/monitorapi/" in msg:
         LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
         return _follow_monitor_order(
             base_url=base_url,

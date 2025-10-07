@@ -12,6 +12,9 @@ Key points:
     * Otherwise treat token as repo name (old/original). Remap with repo_name_map
       if present, then expand across tenant backend/all_in_one private IPs.
 - Extensive DEBUG logging to trace transformations and payload building.
+- NEW: settings.attack_tag in XLSX may contain MITRE hashes (or technique IDs or labels);
+  we now resolve these tokens to the final attack tag IDs expected by the API using the
+  MitreAttacks catalog (FetchMitreAttacks) cached per pool.
 """
 
 from typing import Any, Dict, Iterable, List, Tuple
@@ -39,6 +42,7 @@ def _s(v: Any) -> str:
     """Return trimmed string, or empty string for None."""
     return str(v).strip() if v is not None else ""
 
+
 def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     """Coerce common spreadsheet values to int."""
     if v is None or v == "":
@@ -53,6 +57,7 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
     except Exception:
         raise ValidationError(f"invalid integer value: {v!r}")
 
+
 def _parse_list_field(raw: Any) -> List[str]:
     """
     Parse a cell value into a clean list[str].
@@ -64,6 +69,7 @@ def _parse_list_field(raw: Any) -> List[str]:
 
     Trims stray quotes/brackets and dedupes while preserving order.
     """
+
     def _soft_clean(s: str) -> str:
         s = (s or "").strip()
         s = s.strip().lstrip("[").rstrip("]").strip()
@@ -112,13 +118,16 @@ def _parse_list_field(raw: Any) -> List[str]:
             seen.add(v)
     return out
 
+
 _RE_IP_PORT = re.compile(
     r"^\s*(?P<ip>(?:\d{1,3}\.){3}\d{1,3})\s*:\s*(?P<port>\d{2,5})/(?P<repo>.*)?\s*$"
 )
 
+
 def _is_literal_repo_path(token: str) -> bool:
     """True if token is already 'IP:port[/name]'."""
     return bool(_RE_IP_PORT.match(token))
+
 
 def _get_repo_port_from_profiles() -> int:
     """
@@ -147,10 +156,12 @@ def _get_repo_port_from_profiles() -> int:
         pass
     return 5504
 
+
 def _expand_local_repo(token: str, port: int) -> str:
     """Map 'default'/'_logpoint'/'_logpointAlert' to 127.0.0.1:<port>/<name>."""
     name = token.strip()
     return f"127.0.0.1:{port}/{name}"
+
 
 def _build_repo_paths_for_backends(repo_name: str | None, backend_ips: List[str], port: int) -> List[str]:
     """
@@ -265,26 +276,41 @@ class AlertRulesImporter(BaseImporter):
         return uniq
 
     def _load_mitre_attacks(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
-        """Fetch MITRE catalog once per pool; map various tokens (id/name/id|name) -> id."""
+        """Fetch MITRE catalog once per pool; map various tokens (id/name/technique/hash) -> id."""
         if pool_uuid in self._mitre_loaded_pools:
             return
         mapping: Dict[str, str] = {}
         try:
             # Standardized fetch via monitor API, similar to other fetch_* flows
-            res = client.fetch_resource(pool_uuid=pool_uuid, node_id=node.id, resource="MitreAttacks/FetchMitreAttacks", data={}) or {}
+            res = client.fetch_resource(
+                pool_uuid=pool_uuid,
+                node_id=node.id,
+                resource="MitreAttacks/FetchMitreAttacks",
+                data={},
+            ) or {}
             mon = res.get("monitor_ok")
             rows = []
             if isinstance(mon, tuple) and mon[0] and mon[1]:
                 payload = mon[1] or {}
                 rows = (payload.get("response") or {}).get("rows") or []
+            # Build index
             for r in rows:
                 attack_id = _s(r.get("id")) or _s(r.get("attack_id")) or _s(r.get("name"))
-                label = _s(r.get("name")) or _s(r.get("label"))
                 if not attack_id:
                     continue
+                label = _s(r.get("name")) or _s(r.get("label"))
+                tech = _s(r.get("technique_id")) or _s(r.get("attack_id"))
+                # Common hash key variants in catalog
+                for hk in ("hash", "hash_id", "mitre_hash", "id_hash"):
+                    hval = _s(r.get(hk))
+                    if hval:
+                        mapping[hval.lower()] = attack_id
+                # Primary keys
                 mapping[_s(attack_id).lower()] = attack_id
                 if label:
                     mapping[_s(label).lower()] = attack_id
+                if tech:
+                    mapping[_s(tech).lower()] = attack_id
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
         self._mitre_cache_by_pool[pool_uuid] = mapping
@@ -292,7 +318,7 @@ class AlertRulesImporter(BaseImporter):
         log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
 
     def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
-        """Resolve mixed tokens (id/name or 'id|label') to MITRE ids; drop unknown with WARNING."""
+        """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""
         self._load_mitre_attacks(client, pool_uuid, node)
         idx = self._mitre_cache_by_pool.get(pool_uuid) or {}
         out: List[str] = []
@@ -300,16 +326,14 @@ class AlertRulesImporter(BaseImporter):
             token = _s(it)
             if not token:
                 continue
-            # allow 'T1110|Brute Force'
+            # Allow 'X|Y' forms where X is the canonical token (hash or technique)
             if "|" in token:
                 token = token.split("|", 1)[0].strip()
             key = token.lower()
             if key in idx:
                 out.append(idx[key])
             else:
-                out.append(token) if token.upper().startswith("T") else None
-                if key not in idx:
-                    log.warning("Unknown MITRE attack token '%s' (pool=%s) - ignored", it, pool_uuid)
+                log.warning("Unknown MITRE attack token '%s' (pool=%s) - ignored", it, pool_uuid)
         # keep only known IDs (those present in idx.values())
         valid_ids = set(idx.values())
         out = [v for v in out if v in valid_ids]
@@ -373,7 +397,6 @@ class AlertRulesImporter(BaseImporter):
             dedup[it["field"]] = it["value"]
         canon = [{"field": k, "value": dedup[k]} for k in sorted(dedup)]
         return canon
-
 
     @property
     def repo_name_map(self) -> Dict[str, str]:
@@ -464,6 +487,8 @@ class AlertRulesImporter(BaseImporter):
                 # NEW FIELDS
                 "apply_jinja_template": self._to_bool(r.get("settings.apply_jinja_template")),
                 "assigned_to": _s(r.get("settings.assigned_to")),
+                # NOTE: In XLSX, settings.attack_tag may contain hashes/technique IDs/labels.
+                # Resolution to final IDs happens later in apply() using _resolve_attack_tags().
                 "attack_tag": _parse_list_field(r.get("settings.attack_tag")),
                 "manageable_by": _parse_list_field(r.get("settings.manageable_by")),
                 "metadata": _s(r.get("settings.metadata")),
@@ -833,7 +858,6 @@ class AlertRulesImporter(BaseImporter):
         if "original_data" in desired_row:
             payload["original_data"] = bool(desired_row.get("original_data"))
 
-
         log.debug("build_payload_create: payload_keys=%s", sorted(payload.keys()))
         return payload
 
@@ -869,7 +893,6 @@ class AlertRulesImporter(BaseImporter):
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
             desired["owner"] = owner_resolved
 
-
             # assigned_to (user id)
             assignee_raw = _s(desired.get("assigned_to"))
             if assignee_raw:
@@ -889,7 +912,7 @@ class AlertRulesImporter(BaseImporter):
                 else:
                     desired.pop("manageable_by", None)
 
-            # attack_tag (MITRE)
+            # attack_tag (MITRE): resolve XLSX tokens (hash/technique/name) -> final IDs
             attack_raw = desired.get("attack_tag") or []
             if attack_raw:
                 attack_ids = self._resolve_attack_tags(client, pool_uuid, node, attack_raw)

@@ -199,6 +199,181 @@ class AlertRulesImporter(BaseImporter):
         # Provided/filled by runner if needed:
         self._repo_map: Dict[str, str] = {}     # original -> cleaned name
         self.tenant_nodes: List[Dict[str, Any]] | None = None  # nodes of tenant (to collect ip_private)
+        self._incident_groups_cache: Dict[str, Dict[str, str]] = {}  # node.id -> lower_name_or_id -> id
+        self._incident_groups_loaded: set[str] = set()
+        self._mitre_cache_by_pool: Dict[str, Dict[str, str]] = {}     # pool_uuid -> lower_token -> attack_id
+        self._mitre_loaded_pools: set[str] = set()
+
+    def _resolve_user_id(self, client: DirectorClient, pool_uuid: str, node: NodeRef, lookup: str) -> str:
+        """Generic user resolver: accepts id/username/display_name/email; returns id or ''."""
+        self._load_users_for_node(client, pool_uuid, node)
+        lk = _s(lookup)
+        if not lk:
+            return ""
+        idx = self._users_cache.get(node.id) or {}
+        if lk in idx.values():  # already an id
+            return lk
+        return idx.get(lk.lower(), "")
+
+    def _load_incident_groups_for_node(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
+        """Build cache name/id -> id for incident user groups. Tries common resource names safely."""
+        if node.id in self._incident_groups_loaded:
+            return
+        candidates = ("IncidentUserGroups", "IncidentGroups", "IncidentGroup")
+        raw = []
+        for res in candidates:
+            try:
+                raw = client.list_resource(pool_uuid, node.id, res) or []
+                if raw:
+                    break
+            except Exception:
+                raw = []
+        idx: Dict[str, str] = {}
+        for g in raw:
+            gid = _s(g.get("id"))
+            if not gid:
+                continue
+            for k in (g.get("id"), g.get("name"), g.get("display_name")):
+                key = _s(k).lower()
+                if key:
+                    idx[key] = gid
+        self._incident_groups_cache[node.id] = idx
+        self._incident_groups_loaded.add(node.id)
+        log.debug("Incident groups cache loaded: node=%s size=%d", node.name, len(idx))
+
+    def _resolve_incident_group_ids(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
+        """Resolve list of names/ids into list of ids; quietly drop unknown with WARNING."""
+        self._load_incident_groups_for_node(client, pool_uuid, node)
+        idx = self._incident_groups_cache.get(node.id) or {}
+        out: List[str] = []
+        for it in (items or []):
+            key = _s(it).lower()
+            if not key:
+                continue
+            if key in idx:
+                out.append(idx[key])
+            elif it in idx.values():  # already an id
+                out.append(it)
+            else:
+                log.warning("Unknown incident group '%s' [node=%s] - ignored", it, node.name)
+        # dedupe / stable
+        seen, uniq = set(), []
+        for gid in out:
+            if gid not in seen:
+                uniq.append(gid)
+                seen.add(gid)
+        return uniq
+
+    def _load_mitre_attacks(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
+        """Fetch MITRE catalog once per pool; map various tokens (id/name/id|name) -> id."""
+        if pool_uuid in self._mitre_loaded_pools:
+            return
+        mapping: Dict[str, str] = {}
+        try:
+            # Standardized fetch via monitor API, similar to other fetch_* flows
+            res = client.fetch_resource(pool_uuid=pool_uuid, node_id=node.id, resource="MitreAttacks/FetchMitreAttacks", data={}) or {}
+            mon = res.get("monitor_ok")
+            rows = []
+            if isinstance(mon, tuple) and mon[0] and mon[1]:
+                payload = mon[1] or {}
+                rows = (payload.get("response") or {}).get("rows") or []
+            for r in rows:
+                attack_id = _s(r.get("id")) or _s(r.get("attack_id")) or _s(r.get("name"))
+                label = _s(r.get("name")) or _s(r.get("label"))
+                if not attack_id:
+                    continue
+                mapping[_s(attack_id).lower()] = attack_id
+                if label:
+                    mapping[_s(label).lower()] = attack_id
+        except Exception as exc:
+            log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
+        self._mitre_cache_by_pool[pool_uuid] = mapping
+        self._mitre_loaded_pools.add(pool_uuid)
+        log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
+
+    def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
+        """Resolve mixed tokens (id/name or 'id|label') to MITRE ids; drop unknown with WARNING."""
+        self._load_mitre_attacks(client, pool_uuid, node)
+        idx = self._mitre_cache_by_pool.get(pool_uuid) or {}
+        out: List[str] = []
+        for it in (items or []):
+            token = _s(it)
+            if not token:
+                continue
+            # allow 'T1110|Brute Force'
+            if "|" in token:
+                token = token.split("|", 1)[0].strip()
+            key = token.lower()
+            if key in idx:
+                out.append(idx[key])
+            else:
+                out.append(token) if token.upper().startswith("T") else None
+                if key not in idx:
+                    log.warning("Unknown MITRE attack token '%s' (pool=%s) - ignored", it, pool_uuid)
+        # keep only known IDs (those present in idx.values())
+        valid_ids = set(idx.values())
+        out = [v for v in out if v in valid_ids]
+        # dedupe / stable
+        seen, uniq = set(), []
+        for v in out:
+            if v not in seen:
+                uniq.append(v)
+                seen.add(v)
+        return uniq
+
+    @staticmethod
+    def _to_bool(v: Any) -> bool:
+        """Normalize common truthy/falsey spreadsheet tokens to bool."""
+        s = _s(v).lower()
+        if isinstance(v, bool):
+            return v
+        return s in {"1", "y", "yes", "true", "on"}
+
+    @staticmethod
+    def _parse_metadata(raw: Any) -> List[Dict[str, str]]:
+        """
+        Accept JSON array of {field,value} objects or 'k=v; k2=v2' csv-ish string.
+        Return a list sorted by 'field' for stable diffs; invalid pairs are ignored with WARNING.
+        """
+        items: List[Dict[str, str]] = []
+        if raw is None:
+            return items
+        txt = str(raw).strip()
+        if not txt:
+            return items
+        parsed = None
+        # JSON first
+        try:
+            parsed = json.loads(txt)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            for obj in parsed:
+                f = _s((obj or {}).get("field"))
+                val = _s((obj or {}).get("value"))
+                if f and val:
+                    items.append({"field": f, "value": val})
+                else:
+                    log.warning("metadata item missing field/value -> skipped: %r", obj)
+        else:
+            # key=value; key2=value2
+            tmp = txt.replace("\n", ";").replace("|", ";").replace(",", ";")
+            for chunk in tmp.split(";"):
+                if "=" not in chunk:
+                    continue
+                k, v = chunk.split("=", 1)
+                k, v = _s(k), _s(v)
+                if k and v:
+                    items.append({"field": k, "value": v})
+                else:
+                    log.warning("metadata kv missing field/value -> skipped: %r", chunk)
+        # sort by field and dedupe (last wins)
+        dedup: Dict[str, str] = {}
+        for it in items:
+            dedup[it["field"]] = it["value"]
+        canon = [{"field": k, "value": dedup[k]} for k in sorted(dedup)]
+        return canon
+
 
     @property
     def repo_name_map(self) -> Dict[str, str]:
@@ -286,6 +461,14 @@ class AlertRulesImporter(BaseImporter):
                 "search_interval_minute": _s(r.get("settings.search_interval_minute")),
                 "context_template": _s(r.get("settings.alert_context_template")) or _s(r.get("settings.context_template")),
                 "query": _s(r.get("settings.extra_config.query")),
+                # NEW FIELDS
+                "apply_jinja_template": self._to_bool(r.get("settings.apply_jinja_template")),
+                "assigned_to": _s(r.get("settings.assigned_to")),
+                "attack_tag": _parse_list_field(r.get("settings.attack_tag")),
+                "manageable_by": _parse_list_field(r.get("settings.manageable_by")),
+                "metadata": _s(r.get("settings.metadata")),
+                "original_data": self._to_bool(r.get("settings.original_data")),
+                "description": _s(r.get("settings.description")),
             }
 
             if d.get("time_range_seconds") and not any(
@@ -310,7 +493,7 @@ class AlertRulesImporter(BaseImporter):
         return _s(desired_row.get("name"))
 
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        base = {
             "risk": _s(desired_row.get("risk")).lower(),
             "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos") or []])),
             "aggregate": _s(desired_row.get("aggregate")).lower(),
@@ -322,9 +505,30 @@ class AlertRulesImporter(BaseImporter):
             "timerange_minute": _to_int(desired_row.get("timerange_minute")),
             "searchname": _s(desired_row.get("searchname")),
         }
+        # NEW FIELDS added to diff to trigger UPDATE on changes
+        if desired_row.get("apply_jinja_template"):
+            base["apply_jinja_template"] = "on"
+        if _s(desired_row.get("description")):
+            base["description"] = _s(desired_row.get("description"))
+        base["original_data"] = bool(desired_row.get("original_data"))
+        # manageable_by / attack_tag / assigned_to: we compare raw tokens (best-effort)
+        # (they are further resolved to IDs in apply())
+        mb = _parse_list_field(desired_row.get("manageable_by"))
+        at = _parse_list_field(desired_row.get("attack_tag"))
+        if mb:
+            base["manageable_by_csv"] = ",".join(sorted([_s(x).lower() for x in mb]))
+        if at:
+            base["attack_tag_csv"] = ",".join(sorted([_s(x).lower() for x in at]))
+        if _s(desired_row.get("assigned_to")):
+            base["assigned_to_raw"] = _s(desired_row.get("assigned_to")).lower()
+        # metadata normalized deterministically
+        meta = self._parse_metadata(desired_row.get("metadata"))
+        if meta:
+            base["metadata_json"] = json.dumps(meta, separators=(",", ":"), ensure_ascii=False)
+        return base        
     
     def canon_existing(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        base = {
             "risk": _s(row.get("risk")).lower(),
             "repos_csv": ",".join(sorted([_s(x) for x in row.get("repos") or []])),
             "aggregate": _s(row.get("aggregate")).lower(),
@@ -336,6 +540,31 @@ class AlertRulesImporter(BaseImporter):
             "timerange_minute": _to_int(row.get("timerange_minute")),
             "searchname": _s(row.get("searchname")),
         }
+        # Mirror new fields if present in existing rows
+        if _s(row.get("apply_jinja_template")) == "on":
+            base["apply_jinja_template"] = "on"
+        if _s(row.get("description")):
+            base["description"] = _s(row.get("description"))
+        base["original_data"] = bool(row.get("original_data"))
+        mb = row.get("manageable_by") or []
+        at = row.get("attack_tag") or []
+        if mb:
+            base["manageable_by_csv"] = ",".join(sorted([_s(x).lower() for x in mb]))
+        if at:
+            base["attack_tag_csv"] = ",".join(sorted([_s(x).lower() for x in at]))
+        if _s(row.get("assigned_to")):
+            base["assigned_to_raw"] = _s(row.get("assigned_to")).lower()
+        meta = row.get("metadata") or []
+        if isinstance(meta, list) and meta:
+            # normalize to our canonical shape
+            meta_norm = [{"field": _s(m.get("field")), "value": _s(m.get("value"))} for m in meta if _s(m.get("field")) and _s(m.get("value"))]
+            # sort/dedupe by field
+            dedup: Dict[str, str] = {}
+            for it in meta_norm:
+                dedup[it["field"]] = it["value"]
+            meta_canon = [{"field": k, "value": dedup[k]} for k in sorted(dedup)]
+            base["metadata_json"] = json.dumps(meta_canon, separators=(",", ":"), ensure_ascii=False)
+        return base        
 
     # ------------------------ users/owner ------------------------
 
@@ -570,6 +799,12 @@ class AlertRulesImporter(BaseImporter):
         if desired_row.get("search_interval_minute"):
             payload["search_interval_minute"] = _to_int(desired_row.get("search_interval_minute"))
 
+        # apply_jinja_template flag (string "on")
+        if desired_row.get("apply_jinja_template"):
+            if not payload.get("alert_context_template"):
+                log.warning("apply_jinja_template='on' but no alert_context_template provided - keeping flag anyway")
+            payload["apply_jinja_template"] = "on"
+
         # context template
         if _s(desired_row.get("context_template")):
             payload["alert_context_template"] = _s(desired_row.get("context_template"))
@@ -577,6 +812,27 @@ class AlertRulesImporter(BaseImporter):
         # optional query passthrough
         if _s(desired_row.get("query")):
             payload["query"] = _s(desired_row.get("query"))
+        
+        # NEW FIELDS payload
+        if _s(desired_row.get("description")):
+            payload["description"] = _s(desired_row.get("description"))
+        # Note: 'assigned_to' / 'attack_tag' / 'manageable_by' are resolved in apply() into IDs
+        if _s(desired_row.get("assigned_to")):
+            payload["assigned_to"] = _s(desired_row.get("assigned_to"))
+        atk = desired_row.get("attack_tag") or []
+        if isinstance(atk, list) and atk:
+            payload["attack_tag"] = list(atk)
+        mby = desired_row.get("manageable_by") or []
+        if isinstance(mby, list) and mby:
+            payload["manageable_by"] = list(mby)
+        # metadata normalized
+        meta = self._parse_metadata(desired_row.get("metadata"))
+        if meta:
+            payload["metadata"] = meta
+        # original_data boolean
+        if "original_data" in desired_row:
+            payload["original_data"] = bool(desired_row.get("original_data"))
+
 
         log.debug("build_payload_create: payload_keys=%s", sorted(payload.keys()))
         return payload
@@ -598,10 +854,11 @@ class AlertRulesImporter(BaseImporter):
         desired = decision.desired or {}
         name = _s(desired.get("name")) or "(unnamed)"
 
-        # Resolve owner for CREATE/UPDATE
+        # Resolve owner / assignee / groups / mitre tags for CREATE/UPDATE
         if decision.op in ("CREATE", "UPDATE"):
             owner_input = (desired.get("owner") or self._get_profile_option_default_owner())
             owner_resolved = self._resolve_owner_id(client, pool_uuid, node, owner_input or "")
+            
             if not owner_resolved:
                 log.warning(
                     "SKIP %s alert=%s [node=%s] reason=Unknown owner '%s'",
@@ -612,6 +869,34 @@ class AlertRulesImporter(BaseImporter):
                 log.info("owner resolved: '%s' -> id=%s [node=%s]", owner_input, owner_resolved, node.name)
             desired["owner"] = owner_resolved
 
+
+            # assigned_to (user id)
+            assignee_raw = _s(desired.get("assigned_to"))
+            if assignee_raw:
+                assignee_id = self._resolve_user_id(client, pool_uuid, node, assignee_raw)
+                if assignee_id:
+                    desired["assigned_to"] = assignee_id
+                else:
+                    log.warning("Unknown assignee '%s' [node=%s] - dropping field", assignee_raw, node.name)
+                    desired.pop("assigned_to", None)
+
+            # manageable_by (incident groups)
+            manageable_raw = desired.get("manageable_by") or []
+            if manageable_raw:
+                manageable_ids = self._resolve_incident_group_ids(client, pool_uuid, node, manageable_raw)
+                if manageable_ids:
+                    desired["manageable_by"] = manageable_ids
+                else:
+                    desired.pop("manageable_by", None)
+
+            # attack_tag (MITRE)
+            attack_raw = desired.get("attack_tag") or []
+            if attack_raw:
+                attack_ids = self._resolve_attack_tags(client, pool_uuid, node, attack_raw)
+                if attack_ids:
+                    desired["attack_tag"] = attack_ids
+                else:
+                    desired.pop("attack_tag", None)
         try:
             if decision.op == "CREATE":
                 payload = self.build_payload_create(desired, node=node)

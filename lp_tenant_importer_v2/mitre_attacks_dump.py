@@ -273,9 +273,6 @@ def fetch_mitre_attacks(
         poll_interval=poll_interval,
     )
 
-    LOG.debug("Response keys: %s", list(first.keys()) if isinstance(first, Mapping) else type(first))
-    return first  # already the final payload
-
 
 # ------------------------- Extraction / Tabling ------------------------- #
 

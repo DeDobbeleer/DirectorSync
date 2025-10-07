@@ -17,7 +17,7 @@ Usage examples
        BASE_URL=https://director.example.com
        POOL_UUID=a9fa7661c4f84b278b136e94a86b4ea2
        LOGPOINT_ID=506caf82de83054597d07c3c632a98ce
-       LP_DIRECTOR_API_TOKEN=eyJhbGciOi... (redacted)
+       LP_DIRECTOR_TOKEN_API=eyJhbGciOi... (redacted)
        NO_VERIFY=1  # optional
 
 2) XLSX to file with explicit env file:
@@ -33,7 +33,7 @@ Usage examples
 
 Notes
 -----
-- If --token / --token-file is omitted, the script reads LP_DIRECTOR_API_TOKEN
+- If --token / --token-file is omitted, the script reads LP_DIRECTOR_TOKEN_API
   (from .env or environment).
 - Output tables are created from any top-level list of objects found in the
   API response payload (e.g., `attack_tags`, `attack_categories`).
@@ -41,14 +41,14 @@ Notes
 """
 
 from __future__ import annotations
-import re
 
 import argparse
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import requests
 
@@ -109,8 +109,8 @@ def load_env_file(path: Optional[Path]) -> Dict[str, str]:
         cfg[key] = value
 
     # Don't log secrets; just counts and known keys presence
-    masked = {k: ("***" if "TOKEN" in k or "PASSWORD" in k else v) for k, v in cfg.items()}
-    LOG.info("Loaded .env from %s with keys: %s", path, ", ".join(sorted(masked.keys())))
+    masked_keys = ", ".join(sorted(cfg.keys()))
+    LOG.info("Loaded .env from %s with keys: %s", path, masked_keys)
     return cfg
 
 
@@ -121,6 +121,82 @@ def _build_url(base_url: str, pool_uuid: str, logpoint_id: str) -> str:
     return f"{base}/configapi/{pool_uuid}/{logpoint_id}/MitreAttacks/fetch"
 
 
+def _abs_url(base_url: str, maybe_path: str) -> str:
+    if maybe_path.startswith("http://") or maybe_path.startswith("https://"):
+        return maybe_path
+    base = base_url.rstrip("/")
+    path = ("/" + maybe_path.lstrip("/")) if maybe_path else ""
+    return base + path
+
+
+def _follow_monitor_order(
+    base_url: str,
+    monitor_path: str,
+    headers: Mapping[str, str],
+    verify: bool,
+    req_timeout: float,
+    poll_timeout: float,
+    poll_interval: float,
+) -> Mapping[str, Any]:
+    """Poll the /monitorapi order URL until completion and return JSON payload.
+
+    The initial fetch may return {"status":"Success","message":"/monitorapi/.../orders/{request_id}/{data_node}"}.
+    We then GET that URL repeatedly until the job reports completion or returns data.
+    """
+    url = _abs_url(base_url, monitor_path)
+    deadline = time.monotonic() + poll_timeout
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            resp = requests.get(url, headers=headers, verify=verify, timeout=req_timeout)
+        except requests.RequestException as exc:
+            LOG.error("Monitor GET failed: %s", exc)
+            raise SystemExit(2) from exc
+
+        LOG.debug("MONITOR GET %s -> %s", resp.url, resp.status_code)
+
+        # 4xx/5xx: hard error
+        if resp.status_code >= 400:
+            try:
+                err = resp.json()
+            except Exception:
+                err = {"text": resp.text[:500]}
+            LOG.error("Monitor API error: status=%s body=%s", resp.status_code, err)
+            raise SystemExit(1)
+
+        # Try to parse JSON
+        try:
+            body = resp.json()
+        except json.JSONDecodeError:
+            # Some monitors may stream text; treat as final string payload
+            LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
+            return {"data": resp.text}
+
+        # Common patterns: {status: Processing|Success|Error, data: {...}} or direct data
+        status = str(body.get("status", "")).lower() if isinstance(body, dict) else ""
+        if status in {"error", "failed", "fail"}:
+            LOG.error("Monitor reported failure: %s", body)
+            raise SystemExit(1)
+
+        if status in {"success", "ok", "finished", "done", "ready", "complete", "completed"}:
+            LOG.info("Monitor job completed (attempt=%d)", attempt)
+            return body
+
+        # If there is an obvious data payload without a status flag, consider it final
+        if isinstance(body, Mapping) and ("data" in body or any(isinstance(v, list) for v in body.values())):
+            LOG.info("Monitor returned data without explicit status (attempt=%d)", attempt)
+            return body
+
+        # Pending / processing: check timeout
+        if time.monotonic() >= deadline:
+            LOG.error("Monitor polling timed out after %.1fs", poll_timeout)
+            raise SystemExit(4)
+
+        time.sleep(poll_interval)
+
+
 def fetch_mitre_attacks(
     base_url: str,
     pool_uuid: str,
@@ -128,29 +204,10 @@ def fetch_mitre_attacks(
     token: str,
     verify: bool = True,
     timeout: float = 30.0,
+    poll_timeout: float = 60.0,
+    poll_interval: float = 1.5,
 ) -> Mapping[str, Any]:
-    """Call the Director API and return parsed JSON.
-
-    Parameters
-    ----------
-    base_url : str
-        Director base URL, e.g., https://director.example.com
-    pool_uuid : str
-        Pool UUID
-    logpoint_id : str
-        Logpoint identifier (UUID or search-head ID required by your API)
-    token : str
-        Bearer token (valid for ~8h, depending on configuration)
-    verify : bool
-        TLS verification (False to allow self-signed)
-    timeout : float
-        Total request timeout in seconds
-
-    Returns
-    -------
-    Mapping[str, Any]
-        Parsed JSON body from the API.
-    """
+    """Call the Director API and return parsed JSON (follows monitorapi if provided)."""
     url = _build_url(base_url, pool_uuid, logpoint_id)
     headers = {
         "Authorization": f"Bearer {token}",
@@ -177,14 +234,31 @@ def fetch_mitre_attacks(
         LOG.error("API error: status=%s body=%s", resp.status_code, err)
         raise SystemExit(1)
 
+    # Initial response may be either the data or a monitor order pointer
     try:
-        data = resp.json()
+        first = resp.json()
     except json.JSONDecodeError as exc:
         LOG.error("Invalid JSON in response: %s", exc)
         raise SystemExit(3) from exc
 
-    LOG.debug("Response keys: %s", list(data.keys()))
-    return data
+    # Follow monitor order if present
+    if isinstance(first, Mapping):
+        msg = first.get("message")
+        status = str(first.get("status", "")).lower()
+        if isinstance(msg, str) and "/monitorapi/" in msg:
+            LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
+            return _follow_monitor_order(
+                base_url=base_url,
+                monitor_path=msg,
+                headers=headers,
+                verify=verify,
+                req_timeout=timeout,
+                poll_timeout=poll_timeout,
+                poll_interval=poll_interval,
+            )
+
+    LOG.debug("Response keys: %s", list(first.keys()) if isinstance(first, Mapping) else type(first))
+    return first  # already the final payload
 
 
 # ------------------------- Extraction / Tabling ------------------------- #
@@ -304,10 +378,10 @@ def _read_token(cli_token: Optional[str], token_file: Optional[Path], env: Mappi
     if token_file and token_file.exists():
         return token_file.read_text(encoding="utf-8").strip()
     # Prefer .env-loaded env mapping first, then process env
-    tok = env.get("LP_DIRECTOR_API_TOKEN") or env.get("TOKEN") or os.getenv("DIRECTOR_TOKEN") or os.getenv("TOKEN")
+    tok = env.get("LP_DIRECTOR_TOKEN_API") or env.get("TOKEN") or os.getenv("LP_DIRECTOR_TOKEN_API") or os.getenv("TOKEN")
     if tok:
         return tok.strip()
-    raise SystemExit("Missing token. Provide --token, --token-file, or set DIRECTOR_TOKEN in .env or environment.")
+    raise SystemExit("Missing token. Provide --token, --token-file, or set LP_DIRECTOR_TOKEN_API in .env or environment.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -324,7 +398,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     envgrp.add_argument("--env-file", type=Path, help="Path to a .env file (auto-detect .env if omitted)")
 
     auth = p.add_argument_group("auth")
-    auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_API_TOKEN)")
+    auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_TOKEN_API)")
     auth.add_argument("--token-file", type=Path, help="Path to a file containing only the token")
 
     out = p.add_argument_group("output")
@@ -334,6 +408,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     net = p.add_argument_group("network")
     net.add_argument("--no-verify", action="store_true", help="Disable TLS verification (for self-signed)")
     net.add_argument("--timeout", type=float, default=30.0, help="Request timeout in seconds")
+    net.add_argument("--poll-timeout", type=float, default=60.0, help="Max seconds to poll monitor API")
+    net.add_argument("--poll-interval", type=float, default=1.5, help="Seconds between monitor polls")
 
     p.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     return p
@@ -425,6 +501,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         token=token,
         verify=verify,
         timeout=args.timeout,
+        poll_timeout=args.poll_timeout,
+        poll_interval=args.poll_interval,
     )
 
     if args.format == "json":

@@ -277,8 +277,8 @@ class AlertRulesImporter(BaseImporter):
 
     def _load_mitre_attacks(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> None:
         """Fetch MITRE catalog once per pool; map various tokens (id/name/technique/hash) -> id."""
-        if pool_uuid in self._mitre_loaded_pools:
-            return
+        # if pool_uuid in self._mitre_loaded_pools:
+        #     return
         mapping: Dict[str, str] = {}
         try:
             # Standardized fetch via monitor API, similar to other fetch_* flows

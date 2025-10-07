@@ -186,14 +186,14 @@ def _follow_monitor_order(
         # Try JSON
         body: Any
         try:
-            sucess = resp.json().get("response",{}).get("sucess", "false")
-            LOG.debug(f"response - sucess: {sucess}")
+            success = resp.json().get("response",{}).get("success", "false")
+            LOG.debug(f"response - success: {success}")
             rows: List[Dict] = resp.json().get("response",{}).get("rows", [])
         except json.JSONDecodeError:
             LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
             return {"data": resp.text}
 
-        if sucess == "pipo":
+        if success == "pipo":
             status = str(body.get("status", "")).lower()
             # Follow nested pointer if still processing and new message provided
             msg = body.get("message")

@@ -1,11 +1,150 @@
-
-
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/.gitignore
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/BUILD_EXE.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/CHANGELOG.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/DESIGN.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/HOWTO_add_importer.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/MIGRATION.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/README.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/app.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/hooks/hook-lp_tenant_importer_v2.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/.gitignore
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS_final-updated_with_expl.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS_final-updatedmd
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS_final.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/ESA_rsyslog_Load-Balancer_Implementation_FIPS_final.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/Logpoint ingestion metrics.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/Logpoint ingestion metrics.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/Logpoint migration helper tool.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/esa-rsyslog-debug.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/esa-rsyslog-debug.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/esa-rsyslog_buffer_debug.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/esa-rsyslog_buffer_debug.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/esa_rsyslog_debug.sh
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog Cheat Sheet for Debugging.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog Cheat Sheet for Debugging.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog check plan copy.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog check plan copy.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog check plan.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog check plan.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog failover and buffer corrective actions.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/Docs/Procedures/rsyslog failover timeout issue.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/collector_majority_mapping.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/config/logpoint_config_splitter-config.json
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/config/mapping.yaml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/config/splitter.json
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/data/alerts_all_fields.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/data/alerts_from_sync_config_search01.json
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/data/alerts_with_ESA_original_repos.json
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/data/sample_alerts_mixed_tenants.csv
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/data/sync_config_ESA.json
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/requirements.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/collector_majority_mapping.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/splitter.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenant_collectors_summary.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/.~lock.core_config.xlsx#
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/core_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/esait_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/esrin_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/moi_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/sccoe_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/split/tenants/tia_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/README_splitter.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/alert_export copy.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/alert_export.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/device_tenant_resolver.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/logpoint_config_splitter.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/splitter/split_cli.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/tenant_collectors_summary.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/tools/enrichment_postprocess.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/tools/getDistCollectorIDs.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_exporter_v2/tools/zip_project.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/.gitignore
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/all_raw.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/all_test_repos.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/api-documentation.pdf
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/config_loader.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/ Plan - Engineering - Specs Doc copy.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/ Plan - Engineering - Specs Doc.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Context NP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Context RP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Contexte Genéral.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Engineering PP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/Engineering PP.orig.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context PP.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context PP.orig.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-device.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-grok 01.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-grok.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context-syslog-collector.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context_DG.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/context/context_to_split.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/http.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/http_temp.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/core/nodes.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/alerts.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/device_groups.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/devices.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/enrichment_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/normalization_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/processing_policies.bak.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/processing_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/repos.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/routing_policies.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/syslog_fetcher copy.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/importers/syslog_fetcher.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/logging_utils.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/main.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/requirements.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/.env.example
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/core_config-EP-Corr.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/core_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/esait_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/esrin_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/example.core.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/moi_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/popy_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/sccoe_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tenants.full.example.yml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tenants.sample.yaml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/test_config.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/samples/tia_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_all.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_config.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_http.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/Noop.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/Update.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/create.log
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/test_log/log1.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/text
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/usefullCmds.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer/utils/github_rawlink_gen.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/__init__.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/__init__.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/config.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/director_client.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/logging_utils copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/core/logging_utils.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules Importer — Design & Operating Guide.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_Analyse.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_MigrationPlan.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_MyRules_Importer_Spec.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_QA.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_User_Dependency_Guide.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/AlertRules_V2_Implementation.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/Anlalyse-NP-migration-v1-to-v2.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/DirectorSync_v2_Framework_Deep_Dive.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/Syslog Collectors Importer - Design and Orperating Guide.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/auto-py-exe.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/developer_guide_director_sync_v_2_common_trunk.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/ep_v_2_enrichment_policies_importer_code_docs.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/pp_v2_processing_policies_importer_code_docs.md
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/docs/run.md
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/__init__.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/alert_rules copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/alert_rules.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/alert_rules_report.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/base.py
@@ -18,19 +157,32 @@ https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_import
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/repos.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/routing_policies.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/importers/syslog_collectors.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/main copy.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/main.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/my_raw_links.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/raw_links.txt
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/requirements-dev.txt
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/requirements.txt
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/resources/profiles.yml
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/.env.example.261
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/.env.example.270
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/core_config.xlsx
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/core_config_light.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/esait_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/esrin_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/example.core.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/moi_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/popy_config.xlsx
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/sccoe_config.xlsx
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/tenants.full.example-261.yml
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/tenants.full.example-270.yml
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/samples/tia_config.xlsx
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/__init__.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/diff_engine.py
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/github_rawlink_gen.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/reporting.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/resolvers.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/resource_profiles.py
 https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/lp_tenant_importer_v2/utils/validators.py
-
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/raw_links.txt
+https://raw.githubusercontent.com/DeDobbeleer/DirectorSync/main/tenants.yml

@@ -265,7 +265,7 @@ def fetch_mitre_attacks(
         LOG.error("Invalid JSON in response: %s", exc)
         raise SystemExit(3) from exc
 
-    if isinstance(first, Mapping):
+    if isinstance(first, dict):
         msg = first.get("message")
         status = str(first.get("status", "")).lower()
         if isinstance(msg, str) and "/monitorapi/" in msg:

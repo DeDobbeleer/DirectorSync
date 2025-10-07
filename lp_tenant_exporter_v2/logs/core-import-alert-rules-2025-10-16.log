@@ -1,0 +1,3 @@
+2025-10-06 16:20:06,052 ERROR lp_tenant_importer_v2.main [main.py:148 cmd_import_generic] - File not found: XLSX file not found: core_config.xlsx. Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx or provide an absolute path.
+2025-10-06 16:36:45,588 ERROR lp_tenant_importer_v2.main [main.py:148 cmd_import_generic] - File not found: XLSX file not found: core_config.xlsx. Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx or provide an absolute path.
+2025-10-06 16:37:31,860 ERROR lp_tenant_importer_v2.main [main.py:148 cmd_import_generic] - File not found: XLSX file not found: .\core_config.xlsx. Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx or provide an absolute path.

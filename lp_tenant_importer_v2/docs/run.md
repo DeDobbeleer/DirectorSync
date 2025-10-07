@@ -58,6 +58,10 @@ python -m lp_tenant_importer_v2.main \
   import-devices
 ```
 
+directorSync.exe --tenant core --tenants-file tenants.yml --xlsx core_config.xlsx  import-alert-rules
+
+python -m PyInstaller -F lp_tenant_importer_v2\main.py -n directorSync --paths . --additional-hooks-dir hooks --collect-submodules lp_tenant_importer_v2.importers --collect-all openpyxl
+
 ### Vérif rapide
 
 ```bash

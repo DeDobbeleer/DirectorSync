@@ -1,0 +1,29 @@
+2025-10-06 16:03:01,155 ERROR lp_tenant_importer_v2.main [main.py:148 cmd_import_generic] - File not found: XLSX file not found: core_config.xlsx. Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx or provide an absolute path.
+2025-10-06 16:04:12,574 ERROR lp_tenant_importer_v2.main [main.py:148 cmd_import_generic] - File not found: [Errno 2] No such file or directory: 'tenants.yml'
+2025-10-06 16:05:06,335 ERROR lp_tenant_importer_v2.main [main.py:160 cmd_import_generic] - Unexpected error: No module named 'lp_tenant_importer_v2.importers.alert_rules'
+Traceback (most recent call last):
+  File "lp_tenant_importer_v2\main.py", line 126, in cmd_import_generic
+  File "lp_tenant_importer_v2\importers\registry.py", line 21, in load_class
+  File "importlib\__init__.py", line 88, in import_module
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'lp_tenant_importer_v2.importers.alert_rules'
+2025-10-06 16:20:41,218 ERROR lp_tenant_importer_v2.main [main.py:160 cmd_import_generic] - Unexpected error: No module named 'lp_tenant_importer_v2.importers.alert_rules'
+Traceback (most recent call last):
+  File "lp_tenant_importer_v2\main.py", line 126, in cmd_import_generic
+  File "lp_tenant_importer_v2\importers\registry.py", line 21, in load_class
+  File "importlib\__init__.py", line 88, in import_module
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'lp_tenant_importer_v2.importers.alert_rules'
+2025-10-06 16:27:54,927 ERROR lp_tenant_importer_v2.main [main.py:160 cmd_import_generic] - Unexpected error: No module named 'lp_tenant_importer_v2.importers.alert_rules'
+Traceback (most recent call last):
+  File "lp_tenant_importer_v2\main.py", line 126, in cmd_import_generic
+  File "lp_tenant_importer_v2\importers\registry.py", line 21, in load_class
+  File "importlib\__init__.py", line 88, in import_module
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'lp_tenant_importer_v2.importers.alert_rules'

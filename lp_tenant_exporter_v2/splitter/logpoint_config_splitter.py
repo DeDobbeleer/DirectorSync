@@ -430,13 +430,7 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
             # === NEW: feuille Alert par tenant ===
             if alerts_df is not None and not alerts_df.empty:
                 try:
-                    write_alert_sheet_per_tenant(
-                        writer=writer,
-                        tenant_name=tenant,
-                        alerts_df=alerts_df,
-                        all_tenants=tenant_list,
-                        repo_name_to_tenant=repo_name_to_tenant
-                    )
+                    alerts_df.to_excel(writer, sheet_name=ALERT_SHEET, index=False)
                 except Exception as e:
                     logging.warning(f"Alerts: failed to write for tenant {tenant}: {e}")
 

@@ -161,6 +161,7 @@ def _follow_monitor_order(
     while True:
         attempt += 1
         try:
+            LOG.debug(f"monitorapi url: {url}")
             resp = sess.get(url, headers=headers, verify=verify, timeout=req_timeout)
             LOG.debug(f"monitorapi resp: {resp}")
         except requests.RequestException as exc:

@@ -17,7 +17,7 @@ Usage examples
        BASE_URL=https://director.example.com
        POOL_UUID=a9fa7661c4f84b278b136e94a86b4ea2
        LOGPOINT_ID=506caf82de83054597d07c3c632a98ce
-       LP_DIRECTOR_API=eyJhbGciOi... (redacted)
+       LP_DIRECTOR_API_TOKEN=eyJhbGciOi... (redacted)
        NO_VERIFY=1  # optional
 
 2) XLSX to file with explicit env file:
@@ -33,7 +33,7 @@ Usage examples
 
 Notes
 -----
-- If --token / --token-file is omitted, the script reads LP_DIRECTOR_API
+- If --token / --token-file is omitted, the script reads LP_DIRECTOR_API_TOKEN
   (from .env or environment).
 - Output tables are created from any top-level list of objects found in the
   API response payload (e.g., `attack_tags`, `attack_categories`).
@@ -378,10 +378,10 @@ def _read_token(cli_token: Optional[str], token_file: Optional[Path], env: Mappi
     if token_file and token_file.exists():
         return token_file.read_text(encoding="utf-8").strip()
     # Prefer .env-loaded env mapping first, then process env
-    tok = env.get("LP_DIRECTOR_API") or env.get("TOKEN") or os.getenv("LP_DIRECTOR_API") or os.getenv("TOKEN")
+    tok = env.get("LP_DIRECTOR_API_TOKEN") or env.get("TOKEN") or os.getenv("LP_DIRECTOR_API_TOKEN") or os.getenv("TOKEN")
     if tok:
         return tok.strip()
-    raise SystemExit("Missing token. Provide --token, --token-file, or set LP_DIRECTOR_API in .env or environment.")
+    raise SystemExit("Missing token. Provide --token, --token-file, or set LP_DIRECTOR_API_TOKEN in .env or environment.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -398,7 +398,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     envgrp.add_argument("--env-file", type=Path, help="Path to a .env file (auto-detect .env if omitted)")
 
     auth = p.add_argument_group("auth")
-    auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_API)")
+    auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_API_TOKEN)")
     auth.add_argument("--token-file", type=Path, help="Path to a file containing only the token")
 
     out = p.add_argument_group("output")

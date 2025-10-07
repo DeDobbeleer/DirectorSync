@@ -186,7 +186,9 @@ def _follow_monitor_order(
         # Try JSON
         body: Any
         try:
-            body = resp.json()
+            sucess = resp.json().get("response",{}).get("sucess", "false")
+            LOG.debug(f"response - sucess: {sucess}")
+            rows: List[Dict] = resp.json().get("response",{}).get("rows", [])
         except json.JSONDecodeError:
             LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
             return {"data": resp.text}

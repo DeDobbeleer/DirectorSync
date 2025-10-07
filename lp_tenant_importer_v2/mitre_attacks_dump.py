@@ -349,11 +349,10 @@ def write_xlsx_tables(tables: Mapping[str, List[Mapping[str, Any]]], out_path: P
         )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
-        for name, rows in tables.items():
-            sheet = name[:31] or "Sheet1"  # Excel sheet name limit
-            df = pd.DataFrame(normalize_rows(rows))
-            df.to_excel(xw, sheet_name=sheet, index=False)
-    LOG.info("Wrote XLSX: %s (sheets=%s)", out_path, ", ".join(tables.keys()))
+        sheet = "MitreAttack"  # Excel sheet name limit
+        df = pd.DataFrame(tables)
+        df.to_excel(xw, sheet_name=sheet, index=False)
+    LOG.info("Wrote XLSX: %s (sheet=%s)", out_path, sheet)
 
 
 # ------------------------- CLI ------------------------- #

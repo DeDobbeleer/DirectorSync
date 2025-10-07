@@ -163,7 +163,7 @@ def _follow_monitor_order(
         try:
             LOG.debug(f"monitorapi url: {url}")
             resp = sess.get(url, headers=headers, verify=verify, timeout=req_timeout)
-            LOG.debug(f"monitorapi resp: {resp}")
+            LOG.debug(f"monitorapi resp: {resp.json()}")
         except requests.RequestException as exc:
             LOG.error("Monitor GET failed: %s", exc)
             raise SystemExit(2) from exc

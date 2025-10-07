@@ -55,7 +55,7 @@ python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \
   --xlsx samples/core_config.xlsx \
-  import-devices
+  import-alert-rules
 ```
 
 directorSync.exe --tenant core --tenants-file tenants.yml --xlsx core_config.xlsx  import-alert-rules

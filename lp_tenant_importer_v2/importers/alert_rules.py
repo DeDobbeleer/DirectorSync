@@ -311,6 +311,7 @@ class AlertRulesImporter(BaseImporter):
                     mapping[_s(label).lower()] = attack_id
                 if tech:
                     mapping[_s(tech).lower()] = attack_id
+                log.debug(f"Mitre map entry dump: {mapping}")
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
         self._mitre_cache_by_pool[pool_uuid] = mapping

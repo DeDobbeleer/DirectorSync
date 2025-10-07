@@ -259,6 +259,7 @@ def fetch_mitre_attacks(
     # Initial response may be either the data or a monitor order pointer
     try:
         first = resp.json()
+        LOG.debug(f"POST request response: {first}")
     except json.JSONDecodeError as exc:
         LOG.error("Invalid JSON in response: %s", exc)
         raise SystemExit(3) from exc

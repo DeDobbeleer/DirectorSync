@@ -1,43 +1,32 @@
 #!/usr/bin/env python3
 """Dump MITRE ATT&CK taxonomy from Logpoint Director API.
 
-Enhancements:
-- Supports loading configuration from a .env file (auto-detected or via --env-file).
-- CLI args override .env; .env overrides process env.
+Enhancements in this revision
+-----------------------------
+- Uses **LP_DIRECTOR_API_TOKEN** as the primary token env var (also supports fallbacks).
+- Supports **LP_DIRECTOR_URL**, **LP_VERIFY**, **LP_SUPPRESS_TLS_WARNINGS**, **LP_HTTP_PROXY**, **LP_HTTPS_PROXY** from .env.
+- Robust **monitorapi** follow-up: handles async order pointer, 202 responses, and completion states.
+- .env autoload or via `--env-file` (CLI > .env > process env precedence).
 
 This mini-script calls the Director endpoint `MitreAttacks/fetch` and exports
 results to JSON (default), CSV, or XLSX.
 
-Usage examples
---------------
-1) JSON to stdout (auto-load .env if present):
+Quickstart with .env
+--------------------
+.env example:
+    LP_DIRECTOR_URL=https://10.160.144.185
+    POOL_UUID=a9fa7661c4f84b278b136e94a86b4ea2
+    LOGPOINT_ID=506caf82de83054597d07c3c632a98ce
+    LP_DIRECTOR_API_TOKEN=eyJhbGciOi... (redacted)
+    LP_VERIFY=false
+    LP_SUPPRESS_TLS_WARNINGS=1
+    LP_HTTP_TIMEOUT=45
+    LP_HTTP_PROXY=
+    LP_HTTPS_PROXY=
+
+Run:
     python mitre_attacks_dump.py --debug
 
-   Example .env:
-       BASE_URL=https://director.example.com
-       POOL_UUID=a9fa7661c4f84b278b136e94a86b4ea2
-       LOGPOINT_ID=506caf82de83054597d07c3c632a98ce
-       LP_DIRECTOR_API_TOKEN=eyJhbGciOi... (redacted)
-       NO_VERIFY=1  # optional
-
-2) XLSX to file with explicit env file:
-    python mitre_attacks_dump.py --env-file .env.local \
-        --format xlsx --out mitre_attacks.xlsx
-
-3) CSV to directory (arguments override .env):
-    python mitre_attacks_dump.py --format csv --out ./mitre_csv \
-        --base-url https://10.160.144.185 --no-verify \
-        --pool-uuid a9fa7661c4f84b278b136e94a86b4ea2 \
-        --logpoint-id 506caf82de83054597d07c3c632a98ce \
-        --token-file token.txt
-
-Notes
------
-- If --token / --token-file is omitted, the script reads LP_DIRECTOR_API_TOKEN
-  (from .env or environment).
-- Output tables are created from any top-level list of objects found in the
-  API response payload (e.g., `attack_tags`, `attack_categories`).
-- Logging is verbose with DEBUG for troubleshooting.
 """
 
 from __future__ import annotations
@@ -47,6 +36,7 @@ import json
 import logging
 import os
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -56,6 +46,11 @@ try:
     import pandas as pd  # type: ignore
 except Exception:  # pragma: no cover - optional dependency until xlsx/csv requested
     pd = None  # Will validate at runtime if user selects csv/xlsx
+
+try:  # suppress only when requested
+    import urllib3  # type: ignore
+except Exception:  # pragma: no cover
+    urllib3 = None
 
 
 LOG = logging.getLogger("mitre_dump")
@@ -108,13 +103,9 @@ def load_env_file(path: Optional[Path]) -> Dict[str, str]:
             value = value[1:-1]
         cfg[key] = value
 
-    # Don't log secrets; just counts and known keys presence
-    masked_keys = ", ".join(sorted(cfg.keys()))
-    LOG.info("Loaded .env from %s with keys: %s", path, masked_keys)
+    LOG.info("Loaded .env from %s with keys: %s", path, ", ".join(sorted(cfg.keys())))
     return cfg
 
-
-# ------------------------- HTTP / API Layer ------------------------- #
 
 def _build_url(base_url: str, pool_uuid: str, logpoint_id: str) -> str:
     base = base_url.rstrip("/")
@@ -129,19 +120,39 @@ def _abs_url(base_url: str, maybe_path: str) -> str:
     return base + path
 
 
+def _build_session(envfile_vars: Mapping[str, str]) -> requests.Session:
+    """Create a requests.Session with optional proxies from .env or OS env."""
+    sess = requests.Session()
+    # Prefer LP_* proxies from .env, then OS env HTTP(S)_PROXY
+    http_proxy = envfile_vars.get("LP_HTTP_PROXY") or os.getenv("LP_HTTP_PROXY") or os.getenv("HTTP_PROXY")
+    https_proxy = envfile_vars.get("LP_HTTPS_PROXY") or os.getenv("LP_HTTPS_PROXY") or os.getenv("HTTPS_PROXY")
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+    if proxies:
+        sess.proxies.update(proxies)
+        LOG.info("Proxies enabled (http=%s, https=%s)", bool(http_proxy), bool(https_proxy))
+    return sess
+
+
 def _follow_monitor_order(
     base_url: str,
     monitor_path: str,
     headers: Mapping[str, str],
     verify: bool,
+    sess: requests.Session,
     req_timeout: float,
     poll_timeout: float,
     poll_interval: float,
 ) -> Mapping[str, Any]:
     """Poll the /monitorapi order URL until completion and return JSON payload.
 
-    The initial fetch may return {"status":"Success","message":"/monitorapi/.../orders/{request_id}/{data_node}"}.
-    We then GET that URL repeatedly until the job reports completion or returns data.
+    Initial fetch may return:
+    {"status":"Success","message":"/monitorapi/{pool_UUID}/{logpoint_identifier}/orders/{request_id}/{data_node}"}
+
+    We'll GET that URL until status indicates completion or data is present.
     """
     url = _abs_url(base_url, monitor_path)
     deadline = time.monotonic() + poll_timeout
@@ -150,15 +161,18 @@ def _follow_monitor_order(
     while True:
         attempt += 1
         try:
-            resp = requests.get(url, headers=headers, verify=verify, timeout=req_timeout)
+            resp = sess.get(url, headers=headers, verify=verify, timeout=req_timeout)
         except requests.RequestException as exc:
             LOG.error("Monitor GET failed: %s", exc)
             raise SystemExit(2) from exc
 
         LOG.debug("MONITOR GET %s -> %s", resp.url, resp.status_code)
 
-        # 4xx/5xx: hard error
-        if resp.status_code >= 400:
+        # Accepted / processing with potential Location header
+        if resp.status_code in (202, 204) and "Location" in resp.headers:
+            url = _abs_url(base_url, resp.headers["Location"])  # follow
+            LOG.debug("Following Location to %s", url)
+        elif resp.status_code >= 400:
             try:
                 err = resp.json()
             except Exception:
@@ -166,34 +180,33 @@ def _follow_monitor_order(
             LOG.error("Monitor API error: status=%s body=%s", resp.status_code, err)
             raise SystemExit(1)
 
-        # Try to parse JSON
+        # Try JSON
+        body: Any
         try:
             body = resp.json()
         except json.JSONDecodeError:
-            # Some monitors may stream text; treat as final string payload
             LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
             return {"data": resp.text}
 
-        # Common patterns: {status: Processing|Success|Error, data: {...}} or direct data
-        status = str(body.get("status", "")).lower() if isinstance(body, dict) else ""
-        if status in {"error", "failed", "fail"}:
-            LOG.error("Monitor reported failure: %s", body)
-            raise SystemExit(1)
+        if isinstance(body, Mapping):
+            status = str(body.get("status", "")).lower()
+            # Follow nested pointer if still processing and new message provided
+            msg = body.get("message")
+            if isinstance(msg, str) and "/monitorapi/" in msg and status in {"processing", "pending", "running", "queued", "accepted"}:
+                url = _abs_url(base_url, msg)
+                LOG.debug("Monitor indicates further polling at %s", url)
+            # Completion / success
+            if status in {"success", "ok", "finished", "done", "ready", "complete", "completed"}:
+                LOG.info("Monitor job completed (attempt=%d)", attempt)
+                return body
+            # Final data payload without explicit status
+            if ("data" in body) or any(isinstance(v, list) for v in body.values()):
+                LOG.info("Monitor returned data (attempt=%d)", attempt)
+                return body
 
-        if status in {"success", "ok", "finished", "done", "ready", "complete", "completed"}:
-            LOG.info("Monitor job completed (attempt=%d)", attempt)
-            return body
-
-        # If there is an obvious data payload without a status flag, consider it final
-        if isinstance(body, Mapping) and ("data" in body or any(isinstance(v, list) for v in body.values())):
-            LOG.info("Monitor returned data without explicit status (attempt=%d)", attempt)
-            return body
-
-        # Pending / processing: check timeout
         if time.monotonic() >= deadline:
             LOG.error("Monitor polling timed out after %.1fs", poll_timeout)
             raise SystemExit(4)
-
         time.sleep(poll_interval)
 
 
@@ -206,8 +219,15 @@ def fetch_mitre_attacks(
     timeout: float = 30.0,
     poll_timeout: float = 60.0,
     poll_interval: float = 1.5,
+    envfile_vars: Optional[Mapping[str, str]] = None,
 ) -> Mapping[str, Any]:
     """Call the Director API and return parsed JSON (follows monitorapi if provided)."""
+    # Optional suppression of TLS warnings
+    if envfile_vars and _parse_bool(envfile_vars.get("LP_SUPPRESS_TLS_WARNINGS")) and urllib3 is not None:
+        warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+
+    sess = _build_session(envfile_vars or {})
+
     url = _build_url(base_url, pool_uuid, logpoint_id)
     headers = {
         "Authorization": f"Bearer {token}",
@@ -218,8 +238,8 @@ def fetch_mitre_attacks(
 
     LOG.info("FETCH MitreAttacks: POST %s", url)
     try:
-        resp = requests.post(url, headers=headers, json=payload, verify=verify, timeout=timeout)
-    except requests.RequestException as exc:  # network/SSL errors
+        resp = sess.post(url, headers=headers, json=payload, verify=verify, timeout=timeout)
+    except requests.RequestException as exc:  # network/SSL errors (DNS, connect timeout, etc.)
         LOG.error("HTTP request failed: %s", exc)
         raise SystemExit(2) from exc
 
@@ -241,7 +261,6 @@ def fetch_mitre_attacks(
         LOG.error("Invalid JSON in response: %s", exc)
         raise SystemExit(3) from exc
 
-    # Follow monitor order if present
     if isinstance(first, Mapping):
         msg = first.get("message")
         status = str(first.get("status", "")).lower()
@@ -252,6 +271,7 @@ def fetch_mitre_attacks(
                 monitor_path=msg,
                 headers=headers,
                 verify=verify,
+                sess=sess,
                 req_timeout=timeout,
                 poll_timeout=poll_timeout,
                 poll_interval=poll_interval,
@@ -377,11 +397,20 @@ def _read_token(cli_token: Optional[str], token_file: Optional[Path], env: Mappi
         return cli_token
     if token_file and token_file.exists():
         return token_file.read_text(encoding="utf-8").strip()
-    # Prefer .env-loaded env mapping first, then process env
-    tok = env.get("LP_DIRECTOR_API_TOKEN") or env.get("TOKEN") or os.getenv("LP_DIRECTOR_API_TOKEN") or os.getenv("TOKEN")
+    # Prefer .env-loaded env mapping first, then process env. Primary: LP_DIRECTOR_API_TOKEN
+    tok = (
+        env.get("LP_DIRECTOR_API_TOKEN")
+        or os.getenv("LP_DIRECTOR_API_TOKEN")
+        or env.get("DIRECTOR_TOKEN")
+        or os.getenv("DIRECTOR_TOKEN")
+        or env.get("TOKEN")
+        or os.getenv("TOKEN")
+    )
     if tok:
         return tok.strip()
-    raise SystemExit("Missing token. Provide --token, --token-file, or set LP_DIRECTOR_API_TOKEN in .env or environment.")
+    raise SystemExit(
+        "Missing token. Provide --token, --token-file, or set LP_DIRECTOR_API_TOKEN in .env or environment."
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -423,20 +452,23 @@ def configure_logging(debug: bool) -> None:
     )
 
 
-def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -> Tuple[str, str, str, bool]:
-    """Resolve base_url, pool_uuid, logpoint_id, verify flag from CLI/ENV/.env.
+def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -> Tuple[str, str, str, bool, float]:
+    """Resolve base_url, pool_uuid, logpoint_id, verify flag, and timeout from CLI/ENV/.env.
 
     Precedence: CLI > envfile_vars > process env.
-    Also supports aliases: BASE_URL/DIRECTOR_BASE_URL, POOL_UUID/DIRECTOR_POOL_UUID,
-    LOGPOINT_ID/DIRECTOR_LOGPOINT_ID. TLS verify can be controlled by NO_VERIFY/VERIFY.
+    Aliases supported:
+      - base_url: BASE_URL, DIRECTOR_BASE_URL, LP_DIRECTOR_URL
+      - verify: LP_VERIFY, VERIFY, NO_VERIFY
     """
     # Base URL
     base_url = (
         args.base_url
         or envfile_vars.get("BASE_URL")
         or envfile_vars.get("DIRECTOR_BASE_URL")
+        or envfile_vars.get("LP_DIRECTOR_URL")
         or os.getenv("BASE_URL")
         or os.getenv("DIRECTOR_BASE_URL")
+        or os.getenv("LP_DIRECTOR_URL")
     )
 
     pool_uuid = (
@@ -456,16 +488,30 @@ def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -
     )
 
     # TLS verify handling
-    no_verify_env = envfile_vars.get("NO_VERIFY") or os.getenv("NO_VERIFY")
-    verify_env = envfile_vars.get("VERIFY") or os.getenv("VERIFY")
-    # CLI --no-verify has highest precedence; otherwise derive from env
     verify = not args.no_verify if hasattr(args, "no_verify") else True
-    if not hasattr(args, "no_verify") or not args.no_verify:
-        # Only consider env when CLI didn't force no-verify
-        if verify_env is not None:
-            verify = _parse_bool(verify_env, default=True)
-        if no_verify_env is not None and _parse_bool(no_verify_env, default=False):
-            verify = False
+    if not args.no_verify:
+        # LP_VERIFY takes precedence over VERIFY/NO_VERIFY env switches
+        if envfile_vars.get("LP_VERIFY") is not None:
+            verify = _parse_bool(envfile_vars.get("LP_VERIFY"), default=True)
+        elif os.getenv("LP_VERIFY") is not None:
+            verify = _parse_bool(os.getenv("LP_VERIFY"), default=True)
+        else:
+            verify_env = envfile_vars.get("VERIFY") or os.getenv("VERIFY")
+            no_verify_env = envfile_vars.get("NO_VERIFY") or os.getenv("NO_VERIFY")
+            if verify_env is not None:
+                verify = _parse_bool(verify_env, default=True)
+            if no_verify_env is not None and _parse_bool(no_verify_env, default=False):
+                verify = False
+
+    # Timeout: allow LP_HTTP_TIMEOUT to override default unless --timeout provided
+    timeout = args.timeout
+    if timeout == 30.0:
+        t_env = envfile_vars.get("LP_HTTP_TIMEOUT") or os.getenv("LP_HTTP_TIMEOUT")
+        if t_env:
+            try:
+                timeout = float(t_env)
+            except ValueError:
+                LOG.warning("Invalid LP_HTTP_TIMEOUT value: %s", t_env)
 
     missing = [name for name, val in {
         "BASE_URL": base_url,
@@ -479,7 +525,7 @@ def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -
             ". Provide via CLI, .env, or environment."
         )
 
-    return str(base_url), str(pool_uuid), str(logpoint_id), bool(verify)
+    return str(base_url), str(pool_uuid), str(logpoint_id), bool(verify), float(timeout)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -490,7 +536,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     envfile_vars = load_env_file(args.env_file)
 
     # Resolve config values with proper precedence
-    base_url, pool_uuid, logpoint_id, verify = _resolve_config(args, envfile_vars)
+    base_url, pool_uuid, logpoint_id, verify, timeout = _resolve_config(args, envfile_vars)
 
     token = _read_token(args.token, args.token_file, envfile_vars)
 
@@ -500,9 +546,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         logpoint_id=logpoint_id,
         token=token,
         verify=verify,
-        timeout=args.timeout,
+        timeout=timeout,
         poll_timeout=args.poll_timeout,
         poll_interval=args.poll_interval,
+        envfile_vars=envfile_vars,
     )
 
     if args.format == "json":

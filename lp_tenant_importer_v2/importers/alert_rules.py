@@ -295,6 +295,7 @@ class AlertRulesImporter(BaseImporter):
                 rows = (payload.get("response") or {}).get("rows") or []
             # Build index
             for r in rows:
+                log.debug(f"dump mitre payload row: {r}")
                 attack_id = _s(r.get("id")) or _s(r.get("attack_id")) or _s(r.get("name"))
                 if not attack_id:
                     continue

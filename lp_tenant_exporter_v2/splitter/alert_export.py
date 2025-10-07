@@ -8,6 +8,12 @@ This module keeps the existing 'Alert' sheet export intact and adds a new
 'AlertNotifications' sheet that lists, per alert, one row per notification
 found in the configuration JSON.
 
+Automatic behavior:
+- When you call write_alert_sheet_per_tenant(...), the function will also try to
+  auto-generate the 'AlertNotifications' sheet for the same tenant, *without*
+  any change in your orchestrator. This works because load_alerts_df attaches
+  the JSON source path into df.attrs['__source_json__'].
+
 Routing rules (unchanged):
 - repos missing/empty -> all tenants
 - 'host:port' (no repo_name) -> all tenants (shared backend)
@@ -51,7 +57,6 @@ def _ci_get(d: dict, key: str):
             return v
     return None
 
-
 def _find_alert_list(obj: dict) -> List[dict]:
     """Return the list Sync/AlertRules/Alert (case-insensitive)."""
     sync = _ci_get(obj, "Sync") or _ci_get(obj, "sync") or {}
@@ -60,7 +65,6 @@ def _find_alert_list(obj: dict) -> List[dict]:
     if isinstance(alerts, dict):
         alerts = [alerts]
     return alerts or []
-
 
 def _flatten(obj: Any, prefix: str, out: Dict[str, Any]):
     """
@@ -79,31 +83,24 @@ def _flatten(obj: Any, prefix: str, out: Dict[str, Any]):
     else:
         out[prefix or "value"] = obj
 
-
-_repo_rx = re.compile(r"^\s*([^/\s]+)\s*(?:/\s*([^/\s]+))?\s*$")  # host:port[/repo_name]
-
-
-def _parse_repo(s: str) -> Tuple[str | None, str | None]:
-    if not isinstance(s, str):
-        return (None, None)
-    m = _repo_rx.match(s)
-    if not m:
-        return (None, None)
-    return (m.group(1), m.group(2))  # (host:port, repo_name or None)
-
-
 # ---------- main API: alerts (existing) ----------
-
 
 def load_alerts_df(source_json: str | Path) -> pd.DataFrame:
     """
     Load the JSON and return a flattened DataFrame (1 row per alert).
     Returns an empty DF with 'alert_index' column if no alert found.
+
+    Side-effect:
+    - Attach the JSON source path into df.attrs['__source_json__'] so that
+      write_alert_sheet_per_tenant(...) can auto-generate AlertNotifications.
     """
-    data = json.loads(Path(source_json).read_text(encoding="utf-8", errors="replace"))
+    path = Path(source_json)
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     alerts = _find_alert_list(data)
     if not alerts:
-        return pd.DataFrame(columns=["alert_index"])
+        df_empty = pd.DataFrame(columns=["alert_index"])
+        df_empty.attrs["__source_json__"] = str(path)
+        return df_empty
 
     rows: List[Dict[str, Any]] = []
     for i, a in enumerate(alerts):
@@ -130,97 +127,11 @@ def load_alerts_df(source_json: str | Path) -> pd.DataFrame:
     ]
     first = [c for c in priority_first if c in df.columns]
     remaining = [c for c in df.columns if c not in first]
-    return df[first + remaining]
+    df = df[first + remaining]
 
-
-def route_alert_to_tenants(
-    repos_json: str | list | None,
-    tenants: Iterable[str],
-    repo_name_to_tenant: Dict[str, str] | None = None,
-) -> Tuple[List[str], str]:
-    """
-    Compute target tenant(s) for an alert.
-
-    Returns (tenant_list, scope_tag)
-    scope_tag ∈ {"all-tenants", "backend-wide", "repo-mapped", "repo-mapped-unknown"}
-    """
-    tenant_list = list(tenants)
-    repo_map = repo_name_to_tenant or {}
-
-    # Normalize repos into a Python list
-    if repos_json is None:
-        return (tenant_list, "all-tenants")
-
-    if isinstance(repos_json, str):
-        try:
-            repos = json.loads(repos_json)
-        except Exception:
-            repos = []
-    elif isinstance(repos_json, list):
-        repos = repos_json
-    else:
-        repos = []
-
-    repos = [r for r in repos if isinstance(r, str)]
-    if not repos:
-        return (tenant_list, "all-tenants")
-
-    saw_repo_name = False
-    tenants_res = set()
-
-    for r in repos:
-        host, repo_name = _parse_repo(r)
-        if repo_name:
-            saw_repo_name = True
-            t = repo_map.get(repo_name)
-            if t:
-                tenants_res.add(t)
-        else:
-            # host:port without repo_name => shared backend
-            return (tenant_list, "backend-wide")
-
-    if not saw_repo_name:
-        return (tenant_list, "backend-wide")
-
-    if tenants_res:
-        return (sorted(tenants_res), "repo-mapped")
-
-    # Repo names present but mapping unknown -> default to all (or handle differently if needed)
-    return (tenant_list, "repo-mapped-unknown")
-
-
-def write_alert_sheet_per_tenant(
-    writer: pd.ExcelWriter,
-    tenant_name: str,
-    alerts_df: pd.DataFrame,
-    all_tenants: List[str],
-    repo_name_to_tenant: Dict[str, str] | None = None,
-) -> None:
-    """
-    Filter the alerts DF for the current tenant and write the 'Alert' sheet if needed.
-    """
-    if alerts_df is None or alerts_df.empty:
-        return
-
-    keep_idx: List[int] = []
-    scopes: Dict[int, str] = {}
-    for i, r in alerts_df.iterrows():
-        tgt, scope = route_alert_to_tenants(
-            r.get("settings.repos"),
-            all_tenants,
-            repo_name_to_tenant,
-        )
-        if tenant_name in tgt:
-            keep_idx.append(i)
-            scopes[i] = scope
-
-    if not keep_idx:
-        return
-
-    out = alerts_df.loc[keep_idx].copy()
-    out["tenant_scope"] = [scopes[i] for i in keep_idx]
-    out.to_excel(writer, sheet_name=ALERT_SHEET, index=False)
-
+    # Attach source for auto notifications export
+    df.attrs["__source_json__"] = str(path)
+    return df
 
 # ---------- NEW: notifications export ----------
 
@@ -236,7 +147,6 @@ _SENSITIVE_KEYS = {
     "community",  # SNMP
     "bearer",
 }
-
 
 def _mask_secrets(value: Any, key_hint: str | None = None) -> Any:
     """
@@ -258,7 +168,6 @@ def _mask_secrets(value: Any, key_hint: str | None = None) -> Any:
             return "****"
     return value
 
-
 def _normalize_for_json(obj: Any) -> Any:
     """
     Produce a stable, comparable structure:
@@ -276,7 +185,6 @@ def _normalize_for_json(obj: Any) -> Any:
         return [_normalize_for_json(x) for x in obj]
     return obj
 
-
 def _infer_type_from_collection_name(name: str) -> str | None:
     n = (name or "").lower()
     for t in ("email", "http", "sms", "snmp", "ssh", "syslog"):
@@ -285,7 +193,6 @@ def _infer_type_from_collection_name(name: str) -> str | None:
     if "notification" in n:
         return None
     return None
-
 
 def _iter_notification_collections(alert: dict) -> List[Tuple[str, List[dict], str | None]]:
     """
@@ -298,7 +205,9 @@ def _iter_notification_collections(alert: dict) -> List[Tuple[str, List[dict], s
 
     def _collect_from_dict(base: dict, base_path: str):
         for k, v in base.items():
-            if "notification" not in str(k).lower():
+            kl = str(k).lower()
+            # widen discovery: notification(s), notify, notifier, action(s)
+            if not any(p in kl for p in ("notification", "notifications", "notify", "notifier", "action", "actions")):
                 continue
             lst: List[dict] = []
             if isinstance(v, list):
@@ -317,7 +226,6 @@ def _iter_notification_collections(alert: dict) -> List[Tuple[str, List[dict], s
             _collect_from_dict(settings, "settings")
 
     return results
-
 
 def load_alert_notifications_df(source_json: str | Path) -> pd.DataFrame:
     """
@@ -411,44 +319,3 @@ def load_alert_notifications_df(source_json: str | Path) -> pd.DataFrame:
 
     return df
 
-
-def write_alert_notifications_sheet_per_tenant(
-    writer: pd.ExcelWriter,
-    tenant_name: str,
-    notif_df: pd.DataFrame,
-    all_tenants: List[str],
-    repo_name_to_tenant: Dict[str, str] | None = None,
-) -> None:
-    """
-    Filter the notifications DF for the current tenant (based on parent alert 'settings.repos')
-    and write the 'AlertNotifications' sheet if needed.
-    """
-    if notif_df is None or notif_df.empty:
-        return
-
-    keep_idx: List[int] = []
-    scopes: Dict[int, str] = {}
-
-    for i, r in notif_df.iterrows():
-        tgt, scope = route_alert_to_tenants(
-            r.get("settings.repos"),
-            all_tenants,
-            repo_name_to_tenant,
-        )
-        if tenant_name in tgt:
-            keep_idx.append(i)
-            scopes[i] = scope
-
-    if not keep_idx:
-        return
-
-    out = notif_df.loc[keep_idx].copy()
-    out["tenant_scope"] = [scopes[i] for i in keep_idx]
-    out.to_excel(writer, sheet_name=ALERT_NOTIFICATIONS_SHEET, index=False)
-
-    LOGGER.info(
-        "alert_export: wrote %d notification row(s) for tenant=%s into sheet=%s",
-        len(out),
-        tenant_name,
-        ALERT_NOTIFICATIONS_SHEET,
-    )

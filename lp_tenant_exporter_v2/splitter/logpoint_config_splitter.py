@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from device_tenant_resolver import determine_device_tenant  # <= NEW
 # === NEW (alerts) ===
-from alert_export import load_alerts_df, write_alert_sheet_per_tenant, ALERT_SHEET  # <= NEW
+from alert_export import load_alerts_df, ALERT_SHEET  # <= NEW
 
 SCRIPT_NAME = "logpoint_config_splitter"
 DEFAULT_CONFIG_NAME = f"{SCRIPT_NAME}-config.json"
@@ -19,7 +19,7 @@ EXCLUDED_NORMPOLICIES = {"_logpoint", "_LogPointAlerts"}
 
 # Configure logging (identique à l’original)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='[%(levelname)s] %(message)s'
 )
 
@@ -430,13 +430,14 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
             # === NEW: feuille Alert par tenant ===
             if alerts_df is not None and not alerts_df.empty:
                 try:
-                    write_alert_sheet_per_tenant(
-                        writer=writer,
-                        tenant_name=tenant,
-                        alerts_df=alerts_df,
-                        all_tenants=tenant_list,
-                        repo_name_to_tenant=repo_name_to_tenant
-                    )
+                    alerts_df.to_excel(writer, sheet_name="Alert", index=False)
+                    # write_alert_sheet_per_tenant(
+                    #     writer=writer,
+                    #     tenant_name=tenant,
+                    #     alerts_df=alerts_df,
+                    #     all_tenants=tenant_list,
+                    #     repo_name_to_tenant=repo_name_to_tenant
+                    # )
                 except Exception as e:
                     logging.warning(f"Alerts: failed to write for tenant {tenant}: {e}")
 

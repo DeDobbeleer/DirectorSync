@@ -265,21 +265,21 @@ def fetch_mitre_attacks(
         LOG.error("Invalid JSON in response: %s", exc)
         raise SystemExit(3) from exc
 
-    if isinstance(first, dict):
-        msg = first.get("message")
-        status = str(first.get("status", "")).lower()
-        if isinstance(msg, str) and "/monitorapi/" in msg:
-            LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
-            return _follow_monitor_order(
-                base_url=base_url,
-                monitor_path=msg,
-                headers=headers,
-                verify=verify,
-                sess=sess,
-                req_timeout=timeout,
-                poll_timeout=poll_timeout,
-                poll_interval=poll_interval,
-            )
+    
+    msg = first.get("message")
+    status = str(first.get("status", "")).lower()
+    if isinstance(msg, str) and "/monitorapi/" in msg:
+        LOG.info("Following monitor order: %s (status=%s)", msg, status or "?")
+        return _follow_monitor_order(
+            base_url=base_url,
+            monitor_path=msg,
+            headers=headers,
+            verify=verify,
+            sess=sess,
+            req_timeout=timeout,
+            poll_timeout=poll_timeout,
+            poll_interval=poll_interval,
+        )
 
     LOG.debug("Response keys: %s", list(first.keys()) if isinstance(first, Mapping) else type(first))
     return first  # already the final payload

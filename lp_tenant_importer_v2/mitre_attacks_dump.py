@@ -11,7 +11,7 @@ JSON to stdout:
         --base-url https://director.example.com \
         --pool-uuid a9fa7661c4f84b278b136e94a86b4ea2 \
         --logpoint-id 506caf82de83054597d07c3c632a98ce \
-        --token "$DIRECTOR_TOKEN"
+        --token "$LP_DIRECTOR_API_TOKEN"
 
 XLSX to file (skip TLS verification if using self-signed):
     python mitre_attacks_dump.py \
@@ -26,7 +26,7 @@ CSV to a directory with one CSV per table:
 
 Notes
 -----
-- If --token / --token-file is omitted, the script reads DIRECTOR_TOKEN
+- If --token / --token-file is omitted, the script reads LP_DIRECTOR_API_TOKEN
   from the environment.
 - Output tables are created from any top-level list of objects found in the
   API response payload (e.g., `attack_tags`, `attack_categories`).
@@ -258,7 +258,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--logpoint-id", required=True, help="Logpoint identifier (UUID or instance id)")
 
     auth = p.add_argument_group("auth")
-    auth.add_argument("--token", help="Bearer token (overrides env DIRECTOR_TOKEN)")
+    auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_API_TOKEN)")
     auth.add_argument("--token-file", type=Path, help="Path to a file containing only the token")
 
     out = p.add_argument_group("output")

@@ -194,20 +194,9 @@ def _follow_monitor_order(
             return {"data": resp.text}
 
         if success == True:
-            status = str(body.get("status", "")).lower()
-            # Follow nested pointer if still processing and new message provided
-            msg = body.get("message")
-            if isinstance(msg, str) and "/monitorapi/" in msg and status in {"processing", "pending", "running", "queued", "accepted"}:
-                url = _abs_url(base_url, msg)
-                LOG.debug("Monitor indicates further polling at %s", url)
-            # Completion / success
-            if status in {"success", "ok", "finished", "done", "ready", "complete", "completed"}:
-                LOG.info("Monitor job completed (attempt=%d)", attempt)
-                return body
-            # Final data payload without explicit status
-            if ("data" in body) or any(isinstance(v, list) for v in body.values()):
-                LOG.info("Monitor returned data (attempt=%d)", attempt)
-                return body
+
+            LOG.info("Monitor job completed (attempt=%d)", attempt)
+            return rows
 
         if time.monotonic() >= deadline:
             LOG.error("Monitor polling timed out after %.1fs", poll_timeout)

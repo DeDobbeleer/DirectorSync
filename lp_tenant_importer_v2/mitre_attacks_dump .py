@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
 """Dump MITRE ATT&CK taxonomy from Logpoint Director API.
 
+Enhancements:
+- Supports loading configuration from a .env file (auto-detected or via --env-file).
+- CLI args override .env; .env overrides process env.
+
 This mini-script calls the Director endpoint `MitreAttacks/fetch` and exports
 results to JSON (default), CSV, or XLSX.
 
 Usage examples
 --------------
-JSON to stdout:
-    python mitre_attacks_dump.py \
-        --base-url https://director.example.com \
+1) JSON to stdout (auto-load .env if present):
+    python mitre_attacks_dump.py --debug
+
+   Example .env:
+       BASE_URL=https://director.example.com
+       POOL_UUID=a9fa7661c4f84b278b136e94a86b4ea2
+       LOGPOINT_ID=506caf82de83054597d07c3c632a98ce
+       LP_DIRECTOR_API_TOKEN=eyJhbGciOi... (redacted)
+       NO_VERIFY=1  # optional
+
+2) XLSX to file with explicit env file:
+    python mitre_attacks_dump.py --env-file .env.local \
+        --format xlsx --out mitre_attacks.xlsx
+
+3) CSV to directory (arguments override .env):
+    python mitre_attacks_dump.py --format csv --out ./mitre_csv \
+        --base-url https://10.160.144.185 --no-verify \
         --pool-uuid a9fa7661c4f84b278b136e94a86b4ea2 \
         --logpoint-id 506caf82de83054597d07c3c632a98ce \
-        --token "$LP_DIRECTOR_API_TOKEN"
-
-XLSX to file (skip TLS verification if using self-signed):
-    python mitre_attacks_dump.py \
-        --base-url https://10.160.144.185 \
-        --pool-uuid a9fa7661c4f84b278b136e94a86b4ea2 \
-        --logpoint-id 506caf82de83054597d07c3c632a98ce \
-        --token-file token.txt \
-        --format xlsx --out mitre_attacks.xlsx --no-verify
-
-CSV to a directory with one CSV per table:
-    python mitre_attacks_dump.py ... --format csv --out ./mitre_csv
+        --token-file token.txt
 
 Notes
 -----
 - If --token / --token-file is omitted, the script reads LP_DIRECTOR_API_TOKEN
-  from the environment.
+  (from .env or environment).
 - Output tables are created from any top-level list of objects found in the
   API response payload (e.g., `attack_tags`, `attack_categories`).
 - Logging is verbose with DEBUG for troubleshooting.
@@ -51,6 +58,59 @@ except Exception:  # pragma: no cover - optional dependency until xlsx/csv reque
 
 
 LOG = logging.getLogger("mitre_dump")
+
+
+# ------------------------- Utilities ------------------------- #
+
+def _parse_bool(val: Optional[str], default: bool = False) -> bool:
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def load_env_file(path: Optional[Path]) -> Dict[str, str]:
+    """Load KEY=VALUE lines from a .env file (simple parser, no external deps).
+
+    - Ignores blank lines and lines starting with '#'.
+    - Accepts values with optional quotes (single/double) and unescapes basic cases.
+    - Returns a dict of loaded keys (without touching os.environ).
+    """
+    cfg: Dict[str, str] = {}
+    if path is None:
+        # Auto-detect: prefer .env in cwd if present
+        auto = Path(".env")
+        if not auto.exists():
+            return cfg
+        path = auto
+
+    if not path.exists():
+        LOG.debug(".env file not found: %s", path)
+        return cfg
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        LOG.warning("Failed to read .env file %s: %s", path, exc)
+        return cfg
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        # Strip optional surrounding quotes
+        if (value.startswith("\"") and value.endswith("\"")) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        cfg[key] = value
+
+    # Don't log secrets; just counts and known keys presence
+    masked = {k: ("***" if "TOKEN" in k or "PASSWORD" in k else v) for k, v in cfg.items()}
+    LOG.info("Loaded .env from %s with keys: %s", path, ", ".join(sorted(masked.keys())))
+    return cfg
 
 
 # ------------------------- HTTP / API Layer ------------------------- #
@@ -143,11 +203,11 @@ def extract_tables(payload: Mapping[str, Any]) -> Dict[str, List[Mapping[str, An
     root = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
 
     tables: Dict[str, List[Mapping[str, Any]]] = {}
-    for key, val in root.items():  # type: ignore[assignment]
-        if _is_list_of_dicts(val):
-            # normalize table name to snake_case-like, kept as-is otherwise
-            name = str(key).strip()
-            tables[name] = val  # type: ignore[assignment]
+    if isinstance(root, Mapping):
+        for key, val in root.items():  # type: ignore[assignment]
+            if _is_list_of_dicts(val):
+                name = str(key).strip()
+                tables[name] = val  # type: ignore[assignment]
 
     # Heuristics: if no obvious list-of-dicts found, but a single list exists
     # (e.g., data: [ {...}, {...} ]), treat it as a generic table.
@@ -237,15 +297,16 @@ def write_xlsx_tables(tables: Mapping[str, List[Mapping[str, Any]]], out_path: P
 
 # ------------------------- CLI ------------------------- #
 
-def _read_token(cli_token: Optional[str], token_file: Optional[Path]) -> str:
+def _read_token(cli_token: Optional[str], token_file: Optional[Path], env: Mapping[str, str]) -> str:
     if cli_token:
         return cli_token
     if token_file and token_file.exists():
         return token_file.read_text(encoding="utf-8").strip()
-    env = os.getenv("LP_DIRECTOR_API_TOKEN")
-    if env:
-        return env.strip()
-    raise SystemExit("Missing token. Provide --token, --token-file, or set LP_DIRECTOR_API_TOKEN.")
+    # Prefer .env-loaded env mapping first, then process env
+    tok = env.get("LP_DIRECTOR_API_TOKEN") or env.get("TOKEN") or os.getenv("DIRECTOR_TOKEN") or os.getenv("TOKEN")
+    if tok:
+        return tok.strip()
+    raise SystemExit("Missing token. Provide --token, --token-file, or set DIRECTOR_TOKEN in .env or environment.")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -253,9 +314,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Dump MITRE ATT&CK taxonomy from Logpoint Director API",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--base-url", required=True, help="Director base URL (e.g., https://director.example.com)")
-    p.add_argument("--pool-uuid", required=True, help="Director Pool UUID")
-    p.add_argument("--logpoint-id", required=True, help="Logpoint identifier (UUID or instance id)")
+    # These are optional now; they can come from .env
+    p.add_argument("--base-url", help="Director base URL (e.g., https://director.example.com)")
+    p.add_argument("--pool-uuid", help="Director Pool UUID")
+    p.add_argument("--logpoint-id", help="Logpoint identifier (UUID or instance id)")
+
+    envgrp = p.add_argument_group("env")
+    envgrp.add_argument("--env-file", type=Path, help="Path to a .env file (auto-detect .env if omitted)")
 
     auth = p.add_argument_group("auth")
     auth.add_argument("--token", help="Bearer token (overrides env LP_DIRECTOR_API_TOKEN)")
@@ -281,18 +346,83 @@ def configure_logging(debug: bool) -> None:
     )
 
 
+def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -> Tuple[str, str, str, bool]:
+    """Resolve base_url, pool_uuid, logpoint_id, verify flag from CLI/ENV/.env.
+
+    Precedence: CLI > envfile_vars > process env.
+    Also supports aliases: BASE_URL/DIRECTOR_BASE_URL, POOL_UUID/DIRECTOR_POOL_UUID,
+    LOGPOINT_ID/DIRECTOR_LOGPOINT_ID. TLS verify can be controlled by NO_VERIFY/VERIFY.
+    """
+    # Base URL
+    base_url = (
+        args.base_url
+        or envfile_vars.get("BASE_URL")
+        or envfile_vars.get("DIRECTOR_BASE_URL")
+        or os.getenv("BASE_URL")
+        or os.getenv("DIRECTOR_BASE_URL")
+    )
+
+    pool_uuid = (
+        args.pool_uuid
+        or envfile_vars.get("POOL_UUID")
+        or envfile_vars.get("DIRECTOR_POOL_UUID")
+        or os.getenv("POOL_UUID")
+        or os.getenv("DIRECTOR_POOL_UUID")
+    )
+
+    logpoint_id = (
+        args.logpoint_id
+        or envfile_vars.get("LOGPOINT_ID")
+        or envfile_vars.get("DIRECTOR_LOGPOINT_ID")
+        or os.getenv("LOGPOINT_ID")
+        or os.getenv("DIRECTOR_LOGPOINT_ID")
+    )
+
+    # TLS verify handling
+    no_verify_env = envfile_vars.get("NO_VERIFY") or os.getenv("NO_VERIFY")
+    verify_env = envfile_vars.get("VERIFY") or os.getenv("VERIFY")
+    # CLI --no-verify has highest precedence; otherwise derive from env
+    verify = not args.no_verify if hasattr(args, "no_verify") else True
+    if not hasattr(args, "no_verify") or not args.no_verify:
+        # Only consider env when CLI didn't force no-verify
+        if verify_env is not None:
+            verify = _parse_bool(verify_env, default=True)
+        if no_verify_env is not None and _parse_bool(no_verify_env, default=False):
+            verify = False
+
+    missing = [name for name, val in {
+        "BASE_URL": base_url,
+        "POOL_UUID": pool_uuid,
+        "LOGPOINT_ID": logpoint_id,
+    }.items() if not val]
+
+    if missing:
+        raise SystemExit(
+            "Missing required settings: " + ", ".join(missing) +
+            ". Provide via CLI, .env, or environment."
+        )
+
+    return str(base_url), str(pool_uuid), str(logpoint_id), bool(verify)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     configure_logging(args.debug)
 
-    token = _read_token(args.token, args.token_file)
+    # Load .env values (auto-detect if --env-file not provided)
+    envfile_vars = load_env_file(args.env_file)
+
+    # Resolve config values with proper precedence
+    base_url, pool_uuid, logpoint_id, verify = _resolve_config(args, envfile_vars)
+
+    token = _read_token(args.token, args.token_file, envfile_vars)
 
     payload = fetch_mitre_attacks(
-        base_url=args.base_url,
-        pool_uuid=args.pool_uuid,
-        logpoint_id=args.logpoint_id,
+        base_url=base_url,
+        pool_uuid=pool_uuid,
+        logpoint_id=logpoint_id,
         token=token,
-        verify=not args.no_verify,
+        verify=verify,
         timeout=args.timeout,
     )
 

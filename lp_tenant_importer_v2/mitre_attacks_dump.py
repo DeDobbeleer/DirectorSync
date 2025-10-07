@@ -241,7 +241,7 @@ def fetch_mitre_attacks(
     LOG.info("FETCH MitreAttacks: POST %s", url)
     try:
         resp = sess.post(url, headers=headers, json=payload, verify=verify, timeout=timeout)
-        LOG.debug(f"POST request response: {resp}")
+        LOG.debug(f"POST request response: {resp.json()}")
     except requests.RequestException as exc:  # network/SSL errors (DNS, connect timeout, etc.)
         LOG.error("HTTP request failed: %s", exc)
         raise SystemExit(2) from exc

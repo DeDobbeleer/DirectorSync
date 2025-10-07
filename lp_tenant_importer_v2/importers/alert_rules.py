@@ -293,6 +293,7 @@ class AlertRulesImporter(BaseImporter):
             if isinstance(mon, tuple) and mon[0] and mon[1]:
                 payload = mon[1] or {}
                 rows = (payload.get("response") or {}).get("rows") or []
+                log.debug(f"dump mitre payload rows len: {len(rows)}")
             # Build index
             for r in rows:
                 log.debug(f"dump mitre payload row: {r}")

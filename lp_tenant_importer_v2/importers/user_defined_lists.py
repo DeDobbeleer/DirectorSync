@@ -302,7 +302,7 @@ class UserDefinedListsImporter(BaseImporter):
         """Comparable subset for a desired row."""
         return {
             "list_type": desired_row.get("list_type"),
-            "lists": tuple(desired_row.get("list") or []),
+            "lists": tuple(desired_row.get("lists") or []),
             "age_limit": int(desired_row.get("age_limit") or 0),
             "last_updated": int(desired_row.get("last_updated") or ""),
         }

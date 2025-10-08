@@ -222,10 +222,10 @@ class UserDefinedListsImporter(BaseImporter):
             raise
         idx: Dict[str, Dict[str, Any]] = {}
         for it in rows or []:
-            nm = _s(it.get("name"))  # API returns 'name' in UPPER
+            nm = _s(it.get("name")).upper()  # API returns 'name' in UPPER
             if not nm:
                 continue
-            idx[nm.upper()] = it
+            idx[nm] = it
         log.info("fetch_existing: %d lists [node=%s]", len(idx), node.name)
         return idx
 
@@ -316,11 +316,11 @@ class UserDefinedListsImporter(BaseImporter):
             values = existing_obj.get("lists") or []
             # List values may already be deduped; normalize to set semantics for diff
             values_set = sorted({str(v).strip() for v in values if _s(v)})
-            return {"type": "static_list", "lists": tuple(values_set), "age_limit": 0, "last_updated": ""}
+            return {"list_type": "static_list", "lists": tuple(values_set), "age_limit": 0, "last_updated": ""}
         # dynamic
         age_limit = int(existing_obj.get("age_limit") or 0)
         last_update = str(existing_obj.get("last_update") or "")
-        return {"type": "dynamic_list", "values_set": tuple(), "age_limit": age_limit, "last_update": last_update}
+        return {"list_type": "dynamic_list", "lists": tuple(), "age_limit": age_limit, "last_update": last_update}
 
     # ------------------------ API payloads ------------------------
 

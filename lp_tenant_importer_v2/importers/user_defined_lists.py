@@ -274,21 +274,12 @@ class UserDefinedListsImporter(BaseImporter):
             }
 
             if list_type == "static":
-                # Prefer *_json, then *_csv, then a generic 'values'
-                values_raw = None
-                for k in ("lists"):
-                    if has(k):
-                        values_raw = row[col(k)]
-                        if values_raw is not None and _s(values_raw) != "":
-                            break
-                values = _parse_list_field(values_raw)
+                values = _parse_list_field(row[col("list")])
                 if not values:
                     raise ValidationError(
                         f"Static list '{name}': no values provided in values_* column"
                     )
-                desired["values"] = values
-                # For diff: set semantics (order-insensitive)
-                desired["values_set"] = sorted(set(values))
+                desired["lists"] = sorted(set(values))
 
             else:  # dynamic
                 d = _to_int(row[col("age_limit")])
@@ -311,7 +302,7 @@ class UserDefinedListsImporter(BaseImporter):
         """Comparable subset for a desired row."""
         return {
             "list_type": desired_row.get("list_type"),
-            "values_set": tuple(desired_row.get("values_set") or []),
+            "lists": tuple(desired_row.get("list") or []),
             "age_limit": int(desired_row.get("age_limit") or 0),
             "last_updated": int(desired_row.get("last_updated") or ""),
         }
@@ -325,7 +316,7 @@ class UserDefinedListsImporter(BaseImporter):
             values = existing_obj.get("lists") or []
             # List values may already be deduped; normalize to set semantics for diff
             values_set = sorted({str(v).strip() for v in values if _s(v)})
-            return {"type": "static_list", "values_set": tuple(values_set), "age_limit": 0, "last_updated": ""}
+            return {"type": "static_list", "lists": tuple(values_set), "age_limit": 0, "last_updated": ""}
         # dynamic
         age_limit = int(existing_obj.get("age_limit") or 0)
         last_update = str(existing_obj.get("last_update") or "")
@@ -341,7 +332,7 @@ class UserDefinedListsImporter(BaseImporter):
         typ = _s(desired_row.get("list_type"))
         name = _s(desired_row.get("name"))
         if typ == "static_list":
-            d = {"s_name": name, "lists": list(desired_row.get("values_set") or [])}
+            d = {"s_name": name, "lists": list(desired_row.get("lists") or [])}
             log.debug(f"Static list payload for: {d.get("s_name")} {d}")
             return d
         # dynamic

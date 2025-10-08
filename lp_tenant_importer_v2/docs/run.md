@@ -59,9 +59,19 @@ python -m lp_tenant_importer_v2.main \
   import-alert-rules
 ```
 
-directorSync.exe --tenant core --tenants-file tenants.yml --xlsx core_config.xlsx  import-alert-rules
+## Compilation for `.exe` and run from `dist/`
+```bash
+# compilation: directorSync
+python -m PyInstaller -F app.py -n directorSync --paths . --additional-hooks-dir hooks-importer --collect-submodules lp_tenant_importer_v2.importers --collect-all openpyxl
+# run : directorSync.exe
+..\dist\directorSync.exe --tenant core --xlsx samples\core_config.xlsx import-alert-rules
 
-python -m PyInstaller -F lp_tenant_importer_v2\main.py -n directorSync --paths . --additional-hooks-dir hooks --collect-submodules lp_tenant_importer_v2.importers --collect-all openpyxl
+#compilation: logpoint_config_splitter
+python -m PyInstaller -F lp_tenant_exporter_v2\splitter\logpoint_config_splitter.py  -n logpoint_config_splitter  --paths .  --collect-all xlsxwriter
+
+# run: logpoint_config_splitter
+..\dist\logpoint_config_splitter.exe --input data\sync_config_ESA.json --input-sh data\alerts_with_ESA_original_repos.json --output-dir split --config-dir config
+```
 
 ### Vérif rapide
 
@@ -72,18 +82,3 @@ python -c "import lp_tenant_importer_v2, sys; print('OK:', lp_tenant_importer_v2
 ```
 
 > Astuce pro : utilise des **chemins absolus** dans `.env` (`LP_TENANTS_FILE`, `LP_PROFILE_FILE`) pour être insensible au répertoire courant.
-
-
-
-convert to exe
-
-pyinstaller --onefile --name DirectorSync app.py --collect-submodules lp_tenant_importer_v2 --collect-all pandas --collect-all openpyxl --collect-all requests --collect-all PyYAML 
-
-pyinstaller --onefile --name DirectorSync "app.py" --additional-hooks-dir=hooks --collect-all pandas --collect-all openpyxl
-  requests
-pandas
-openpyxl
-python-dotenv
-PyYAML
-
-	Wu5T2HeE76

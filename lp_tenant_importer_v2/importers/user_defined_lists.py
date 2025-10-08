@@ -271,7 +271,7 @@ class UserDefinedListsImporter(BaseImporter):
                 "last_updated": "",
             }
 
-            if list_type == "static":
+            if list_type == "static_list":
                 values = _parse_list_field(row[col("lists")])
                 log.debug(f"lists values: {values}")
                 if not values:

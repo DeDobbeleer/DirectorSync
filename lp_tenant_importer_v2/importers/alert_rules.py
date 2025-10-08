@@ -198,6 +198,11 @@ class AlertRulesImporter(BaseImporter):
     resource_name: str = "alert_rules"
     sheet_names = ("Alert",)
     required_columns = tuple()
+    
+    compare_keys = ("risk", "repos_csv", "aggregate", "condition_option",
+                    "condition_value", "condition_value", "limit", "timerange_day", "timerange_hour",
+                    "timerange_minute", "searchname", "apply_jinja_template", "description",
+                    "original_data", "manageable_by_csv", "attack_tag_csv", "assigned_to_raw", "metadata_json" )   
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -923,6 +923,7 @@ class AlertRulesImporter(BaseImporter):
             log.debug(f"attack_raw: {attack_raw} : {desired.get("name")}")
             if attack_raw:
                 attack_ids = self._resolve_attack_tags(client, pool_uuid, node, attack_raw)
+                log.debug(f"attack_ids: {attack_ids} : {desired.get("name")}")
                 if attack_ids:
                     desired["attack_tag"] = attack_ids
                 else:

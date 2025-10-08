@@ -338,7 +338,7 @@ class UserDefinedListsImporter(BaseImporter):
         return RESOURCE_STATIC if typ == "static_list" else RESOURCE_DYNAMIC
 
     def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        typ = _s(desired_row.get("type_list"))
+        typ = _s(desired_row.get("list_type"))
         name = _s(desired_row.get("name"))
         if typ == "static_list":
             d = {"s_name": name, "lists": list(desired_row.get("values") or [])}

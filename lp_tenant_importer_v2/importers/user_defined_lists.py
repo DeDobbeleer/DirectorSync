@@ -352,7 +352,7 @@ class UserDefinedListsImporter(BaseImporter):
             "agelimit_hour" : h,
             "agelimit_minute": m,
         }
-        log.debug(f"Static list payload for: {d.get("d_name")} {d}")
+        log.debug(f"Dynamic list payload for: {d.get("d_name")} {d}")
         return d
 
     def build_payload_update(

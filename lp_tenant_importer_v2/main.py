@@ -147,8 +147,8 @@ def cmd_import_generic(args):
     except FileNotFoundError as exc:
         log.error("File not found: %s", exc)
         sys.exit(EXIT_VALIDATION_ERROR)
-    except ValidationError as exc:
-        log.exception("Validation error (%s): %r", type(exc).__name__, exc)
+    # except ValidationError as exc:
+    #     log.exception("Validation error (%s): %r", type(exc).__name__, exc)
         sys.exit(EXIT_VALIDATION_ERROR)
     except requests.RequestException as exc:
         log.error("Network/HTTP error: %s", exc)

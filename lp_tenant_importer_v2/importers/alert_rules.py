@@ -334,7 +334,7 @@ class AlertRulesImporter(BaseImporter):
             if not token:
                 continue
             
-            id=idx[token]
+            id=idx[token].get("id")
             if id:
                 out.append(id)
             else:

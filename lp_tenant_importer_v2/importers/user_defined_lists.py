@@ -275,9 +275,10 @@ class UserDefinedListsImporter(BaseImporter):
                 values = _parse_list_field(row[col("lists")])
                 log.debug(f"lists values: {values}")
                 if not values:
-                    raise ValidationError(
+                    log.warning(
                         f"Static list '{name}': no values provided in values_* column"
                     )
+                    continue
                 desired["lists"] = sorted(set(values))
 
             else:  # dynamic

@@ -297,28 +297,16 @@ class AlertRulesImporter(BaseImporter):
                 log.debug(f"dump mitre payload rows len: {len(rows)}")
             # Build index
             for r in rows:
-                log.debug(f"dump mitre payload row: {r}")
-                attack_id = _s(r.get("id")) or _s(r.get("attack_id")) or _s(r.get("name"))
+                attack_id = _s(r.get("id"))
                 if not attack_id:
                     continue
-                label = _s(r.get("name")) or _s(r.get("label"))
-                tech = _s(r.get("technique_id")) or _s(r.get("attack_id"))
-                # Common hash key variants in catalog
-                for hk in ("hash", "hash_id", "mitre_hash", "id_hash"):
-                    hval = _s(r.get(hk))
-                    if hval:
-                        mapping[hval.lower()] = attack_id
-                # Primary keys
-                mapping[_s(attack_id).lower()] = attack_id
-                if label:
-                    mapping[_s(label).lower()] = attack_id
-                if tech:
-                    mapping[_s(tech).lower()] = attack_id
+                hash=_s(r.get("hash"))
+                mapping[hash] = attack_id
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
         self._mitre_cache_by_pool[pool_uuid] = mapping
         self._mitre_loaded_pools.add(pool_uuid)
-        log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
+        log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, mapping)
 
     def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
         """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""

@@ -303,7 +303,7 @@ class UserDefinedListsImporter(BaseImporter):
             "list_type": desired_row.get("list_type"),
             "lists": tuple(desired_row.get("lists") or []),
             "age_limit": int(desired_row.get("age_limit") or 0),
-            "last_updated": int(desired_row.get("last_updated") or ""),
+            "last_updated": str(desired_row.get("last_updated") or ""),
         }
 
     def canon_existing(self, existing_obj: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401

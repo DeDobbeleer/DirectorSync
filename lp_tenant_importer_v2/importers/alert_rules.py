@@ -740,6 +740,10 @@ class AlertRulesImporter(BaseImporter):
         - Follow monitor URL (handled by DirectorClient.fetch_resource) to get rows
         - Cache mapping: name -> payload
         """
+        
+        #MitreAttack to cache
+        self._load_mitre_attacks(client, pool_uuid, node)
+        
         resp = client.fetch_resource(
             pool_uuid=pool_uuid,
             node_id=node.id,

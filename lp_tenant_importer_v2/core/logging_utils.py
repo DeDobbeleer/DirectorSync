@@ -73,7 +73,7 @@ def _build_log_filename(tenant: str, action: str) -> str:
     Note: per requirement, the *day* component is intentionally omitted.
     """
     # Example: 2025-10-05 -> hour 05 => 2025-10-05 -> we keep YYYY-MM-HH
-    ts = datetime.now().strftime("%Y-%m-%H")
+    ts = datetime.now().strftime("%Y-%m-%d-%H-%M")
     # Keep the given spelling and punctuation as-is
     return f"{tenant}-{action}-{ts}.log"
 

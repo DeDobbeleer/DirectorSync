@@ -342,7 +342,7 @@ class UserDefinedListsImporter(BaseImporter):
         name = _s(desired_row.get("name"))
         if typ == "static_list":
             d = {"s_name": name, "lists": list(desired_row.get("values") or [])}
-            log.debug(f"Static list payload for: {d.get("s_name")} ")
+            log.debug(f"Static list payload for: {d.get("s_name")} {d}")
             return d
         # dynamic
         d, h, m = split_seconds_dhm(int(desired_row.get("age_limit") or 0))
@@ -352,7 +352,7 @@ class UserDefinedListsImporter(BaseImporter):
             "agelimit_hour" : h,
             "agelimit_minute": m,
         }
-        log.debug(f"Static list payload for: {d.get("d_name")} ")
+        log.debug(f"Static list payload for: {d.get("d_name")} {d}")
         return d
 
     def build_payload_update(

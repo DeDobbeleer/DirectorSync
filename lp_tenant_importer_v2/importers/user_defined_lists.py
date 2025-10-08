@@ -194,7 +194,7 @@ class UserDefinedListsImporter(BaseImporter):
     resource_name: str = "user_defined_lists"
     sheet_names: Tuple[str, ...] = ("UserDefinedList",)
     # Only absolute minimum here; conditional validation is done in `iter_desired`.
-    required_columns: Tuple[str, ...] = ("name", "type")
+    required_columns: Tuple[str, ...] = ("name", "list_type", "lists")
 
     # Compare keys (subset) used by DiffEngine
     compare_keys: Tuple[str, ...] = (

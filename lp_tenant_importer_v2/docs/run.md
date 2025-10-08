@@ -27,6 +27,7 @@ python -m lp_tenant_importer_v2.main \
 - import-syslog-collectors
 - import-alert-rules
 - list-alert-users
+- import-user-lists
   
 ```bash
 cd ~/dev/DirectorSync/lp_tenant_importer_v2
@@ -55,7 +56,7 @@ python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ../tenants.yml \
   --xlsx samples/core_config.xlsx \
-  import-alert-rules
+  import-user-lists
 ```
 
 directorSync.exe --tenant core --tenants-file tenants.yml --xlsx core_config.xlsx  import-alert-rules

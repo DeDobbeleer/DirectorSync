@@ -30,4 +30,5 @@ defaults:
     devices: [ backends, all_in_one ]
     syslog_collectors: [ backends, all_in_one ]
     alert_rules: [ search_heads ]
+    user_defined_lists: [search_heads]
  

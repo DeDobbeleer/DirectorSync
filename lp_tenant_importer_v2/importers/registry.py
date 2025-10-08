@@ -112,6 +112,17 @@ _IMPORTERS: Dict[str, ImporterSpec] = {
         module="lp_tenant_importer_v2.importers.alert_rules_report",
         class_name="AlertRulesXlsxLister",
     ),
+
+    "user_defined_lists": ImporterSpec(
+        key="user_defined_lists",
+        cli="import-user-lists",
+        help="Import user-defined lists (static & dynamic)",
+        module="lp_tenant_importer_v2.importers.user_defined_lists",
+        class_name="UserDefinedListsImporter",
+        element_key="user_defined_lists",
+    ),
+
+#     user_defined_lists: [search_heads]
     
 }
 

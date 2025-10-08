@@ -294,7 +294,6 @@ class UserDefinedListsImporter(BaseImporter):
                 d = _to_int(row[col("age_limit")])
                 l = _to_int(row[col("last_updated")])
 
-                age_limit = max(0, d * 1440 + h * 60 + m)
                 desired.update(
                     {
                         "age_limit": d,

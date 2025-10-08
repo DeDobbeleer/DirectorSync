@@ -297,12 +297,20 @@ class AlertRulesImporter(BaseImporter):
                 log.debug(f"dump mitre payload rows len: {len(rows)}")
             # Build index
             for r in rows:
-                attack_id = _s(r.get("id"))
-                if not attack_id:
+                id = _s(r.get("id"))
+                if not id:
                     continue
+                h = {}
+                
+                h["id"] = id
+                h["attack_id"] = _s(r.get("attack_id"))
+                h["attack_category"] = _s(r.get("attack_category"))
+                h["ttack_tag"] = _s(r.get("ttack_tag"))
+
                 hash=_s(r.get("hash"))
-                mapping[hash] = attack_id
-                log.debug(f"MITRE cache loading: {hash} (hash) -> {attack_id} (attack_id)")
+                
+                mapping[hash] = h
+                log.debug(f"MITRE cache loading: {hash} (hash) -> {h}")
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
         self._mitre_cache_by_pool[pool_uuid] = mapping

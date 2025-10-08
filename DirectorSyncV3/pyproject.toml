@@ -1,0 +1,23 @@
+[project]
+name = "directorsync-v3"
+version = "3.0.0a1"
+description = "DirectorSync v3 – declarative import framework for Logpoint Director"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Your Team", email = "you@example.com" }]
+
+[project.urls]
+Homepage = "https://github.com/DeDobbeleer/DirectorSync"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+lint.select = ["E","W","F","I","D","UP","B","S","RUF"]
+lint.ignore = ["D100","D104"]  # allow missing module/package docstrings at bootstrap
+format.preview = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]

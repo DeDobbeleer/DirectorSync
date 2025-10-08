@@ -1,0 +1,9 @@
+pyproject.toml
+src/directorsync_v3/__init__.py
+src/directorsync_v3.egg-info/PKG-INFO
+src/directorsync_v3.egg-info/SOURCES.txt
+src/directorsync_v3.egg-info/dependency_links.txt
+src/directorsync_v3.egg-info/top_level.txt
+src/directorsync_v3/core/__init__.py
+src/directorsync_v3/core/config.py
+test/test_config_minimal.py

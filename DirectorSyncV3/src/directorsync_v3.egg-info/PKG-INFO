@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: directorsync-v3
+Version: 3.0.0a1
+Summary: DirectorSync v3 – declarative import framework for Logpoint Director
+Author-email: Your Team <you@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/DeDobbeleer/DirectorSync
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown

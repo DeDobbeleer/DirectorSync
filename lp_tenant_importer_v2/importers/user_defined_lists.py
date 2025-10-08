@@ -396,16 +396,7 @@ class UserDefinedListsImporter(BaseImporter):
                 existing_id,
                 node.name,
             )
-            log.info(
-                "DELETE list type=%s name=%s id=%s [node=%s]",
-                typ,
-                desired.get("name"),
-                existing_id,
-                node.name,
-            )
-            client.delete_resource(pool_uuid, node.id, RESOURCE_BASE, existing_id)
-            return client.create_resource(pool_uuid, node.id, resource, payload)
-            # return client.update_resource(pool_uuid, node.id, resource, existing_id, payload)
+            return client.update_resource(pool_uuid, node.id, resource, existing_id, payload)
 
         # NOOP/SKIP handled by BaseImporter — return a minimal OK dict if ever hit
         return {"status": "OK", "monitor_ok": None, "monitor_branch": "noop"}

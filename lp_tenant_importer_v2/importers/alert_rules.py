@@ -302,11 +302,12 @@ class AlertRulesImporter(BaseImporter):
                     continue
                 hash=_s(r.get("hash"))
                 mapping[hash] = attack_id
+                log.debug(f"MITRE cache loading: {hash} (hash) -> {attack_id} (attack_id)")
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
         self._mitre_cache_by_pool[pool_uuid] = mapping
         self._mitre_loaded_pools.add(pool_uuid)
-        log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, mapping)
+        log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
 
     def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
         """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""

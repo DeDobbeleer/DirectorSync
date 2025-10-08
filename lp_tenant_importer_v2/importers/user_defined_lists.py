@@ -83,12 +83,14 @@ def _s(v: Any) -> str:
 
 def _to_int(v: Any) -> int:
     """Coerce common spreadsheet values to int (>=0)."""
+
     if v is None or v == "":
         return 0
     try:
         return int(float(str(v).strip()))
     except Exception as exc:  # noqa: BLE001
-        raise ValidationError(f"invalid integer value: {v!r}") from exc
+        return 0
+
 
 
 def _parse_list_field(raw: Any) -> List[str]:

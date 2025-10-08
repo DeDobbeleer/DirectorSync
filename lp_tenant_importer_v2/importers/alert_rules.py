@@ -319,8 +319,10 @@ class AlertRulesImporter(BaseImporter):
 
     def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
         """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""
-        self._load_mitre_attacks(client, pool_uuid, node)
         idx = self._mitre_cache_by_pool.get(pool_uuid) or {}
+        
+        log.debug(f"_resolve_attack_tags raw xlsx dump; {items}")
+        
         out: List[str] = []
         for it in (items or []):
             token = _s(it)

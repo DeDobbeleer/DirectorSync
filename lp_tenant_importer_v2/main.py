@@ -99,66 +99,66 @@ def _enrich_rows_for_output(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def cmd_import_generic(args):
     """Generic handler for all importers declared in the registry."""
-    # try:
+    try:
         # Early check: XLSX path exists
-    if not os.path.isfile(args.xlsx):
-        raise FileNotFoundError(
-            (
-                f"XLSX file not found: {args.xlsx}. "
-                "Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx "
-                "or provide an absolute path."
+        if not os.path.isfile(args.xlsx):
+            raise FileNotFoundError(
+                (
+                    f"XLSX file not found: {args.xlsx}. "
+                    "Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx "
+                    "or provide an absolute path."
+                )
             )
+
+        spec_key = getattr(args, "importer_key", None)
+        if not spec_key:
+            raise RuntimeError("Internal error: importer_key not set on subcommand")
+
+        spec = get_spec_by_key(spec_key)
+
+        client, pool_uuid, tenant_name, xlsx_path, cfg = _prepare_context(args)
+
+        # Resolve target nodes from global defaults.target
+        tenant_ctx = cfg.get_tenant(tenant_name)
+        nodes = cfg.get_targets(tenant_ctx, spec.element_key)
+
+        # Lazy-load the importer class and run
+        importer_cls = spec.load_class()
+        importer = importer_cls()
+        result = importer.run_for_nodes(
+            client, pool_uuid, nodes, xlsx_path, args.dry_run, tenant_name, tenant_ctx
         )
 
-    spec_key = getattr(args, "importer_key", None)
-    if not spec_key:
-        raise RuntimeError("Internal error: importer_key not set on subcommand")
+        # Enrich rows for nicer table output (skip reason, monitor)
+        rows = _enrich_rows_for_output(result.rows)
+        recap = print_rows(rows, args.format)
+        
+        if args.format == 'json':
+            log.info(recap)
+        else:
+            log.info("\n" + recap)
 
-    spec = get_spec_by_key(spec_key)
+        if result.any_error:
+            raise RuntimeError("One or more operations failed; see rows above.")
 
-    client, pool_uuid, tenant_name, xlsx_path, cfg = _prepare_context(args)
-
-    # Resolve target nodes from global defaults.target
-    tenant_ctx = cfg.get_tenant(tenant_name)
-    nodes = cfg.get_targets(tenant_ctx, spec.element_key)
-
-    # Lazy-load the importer class and run
-    importer_cls = spec.load_class()
-    importer = importer_cls()
-    result = importer.run_for_nodes(
-        client, pool_uuid, nodes, xlsx_path, args.dry_run, tenant_name, tenant_ctx
-    )
-
-    # Enrich rows for nicer table output (skip reason, monitor)
-    rows = _enrich_rows_for_output(result.rows)
-    recap = print_rows(rows, args.format)
-    
-    if args.format == 'json':
-        log.info(recap)
-    else:
-        log.info("\n" + recap)
-
-    if result.any_error:
-        raise RuntimeError("One or more operations failed; see rows above.")
-
-    # except ConfigError as exc:
-    #     log.error("Configuration error: %s", exc)
-    #     sys.exit(EXIT_CONFIG_ERROR)
-    # except FileNotFoundError as exc:
-    #     log.error("File not found: %s", exc)
-    #     sys.exit(EXIT_VALIDATION_ERROR)
-    # # except ValidationError as exc:
-    # #     log.exception("Validation error (%s): %r", type(exc).__name__, exc)
-    #     sys.exit(EXIT_VALIDATION_ERROR)
-    # except requests.RequestException as exc:
-    #     log.error("Network/HTTP error: %s", exc)
-    #     sys.exit(EXIT_NETWORK_ERROR)
-    # except RuntimeError as exc:
-    #     log.error("Validation error: %s", exc)
-    #     sys.exit(EXIT_VALIDATION_ERROR)
-    # except Exception as exc:  # pragma: no cover — safety net
-    #     log.error("Unexpected error: %s", exc, exc_info=True)
-    #     sys.exit(EXIT_GENERIC_ERROR)
+    except ConfigError as exc:
+        log.error("Configuration error: %s", exc)
+        sys.exit(EXIT_CONFIG_ERROR)
+    except FileNotFoundError as exc:
+        log.error("File not found: %s", exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
+    except ValidationError as exc:
+        log.exception("Validation error (%s): %r", type(exc).__name__, exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
+    except requests.RequestException as exc:
+        log.error("Network/HTTP error: %s", exc)
+        sys.exit(EXIT_NETWORK_ERROR)
+    except RuntimeError as exc:
+        log.error("Validation error: %s", exc)
+        sys.exit(EXIT_VALIDATION_ERROR)
+    except Exception as exc:  # pragma: no cover — safety net
+        log.error("Unexpected error: %s", exc, exc_info=True)
+        sys.exit(EXIT_GENERIC_ERROR)
 
 
 # ---------------------------- Argument parser -------------------------------

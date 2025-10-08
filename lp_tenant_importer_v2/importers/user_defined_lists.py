@@ -266,15 +266,13 @@ class UserDefinedListsImporter(BaseImporter):
             desired: Dict[str, Any] = {
                 "name": name,
                 "list_type": list_type,
-                "values": [],
-                "values_set": [],
+                "lists": [],
                 "age_limit": 0,  
                 "last_updated": "",
-                "state": _s(row[col("state")]) if has("state") else "present",
             }
 
             if list_type == "static":
-                values = _parse_list_field(row[col("list")])
+                values = _parse_list_field(row[col("lists")])
                 if not values:
                     raise ValidationError(
                         f"Static list '{name}': no values provided in values_* column"

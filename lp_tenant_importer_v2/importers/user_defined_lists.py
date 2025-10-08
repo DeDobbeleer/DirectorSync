@@ -293,6 +293,10 @@ class UserDefinedListsImporter(BaseImporter):
 
             yield desired
 
+    def key_fn(self, desired_row: Dict[str, Any]) -> str:  # noqa: D401
+        """Return unique key — the list name (uppercased)."""
+        return _s(desired_row.get("name")).upper()
+
     def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
         """Comparable subset for a desired row."""
         return {

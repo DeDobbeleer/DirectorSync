@@ -273,6 +273,7 @@ class UserDefinedListsImporter(BaseImporter):
 
             if list_type == "static":
                 values = _parse_list_field(row[col("lists")])
+                log.debug(f"lists values: {values}")
                 if not values:
                     raise ValidationError(
                         f"Static list '{name}': no values provided in values_* column"

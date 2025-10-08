@@ -36,6 +36,7 @@ import pandas as pd
 LOGGER = logging.getLogger(__name__)
 
 ALERT_SHEET = "Alert"
+USERLIST_SHEET = "UserDefinedList"
 ALERT_NOTIFICATIONS_SHEET = "AlertNotifications"
 
 # ---------- utilities ----------
@@ -51,6 +52,14 @@ def _ci_get(d: dict, key: str):
             return v
     return None
 
+
+def _find_user_list_list(obj: dict) -> List[dict]:
+    """Return the list Sync/AlertRules/Alert (case-insensitive)."""
+    sync = _ci_get(obj, "Sync") or _ci_get(obj, "sync") or {}
+    ul = _ci_get(sync, "UserDefinedList") or {}
+    if isinstance(ul, dict):
+        ul = [ul]
+    return ul or []
 
 def _find_alert_list(obj: dict) -> List[dict]:
     """Return the list Sync/AlertRules/Alert (case-insensitive)."""
@@ -83,6 +92,27 @@ def _flatten(obj: Any, prefix: str, out: Dict[str, Any]):
 
 
 # ---------- main API: alerts (existing) ----------
+
+
+def load_userlist_df(source_json: str | Path) -> pd.DataFrame:
+    """
+    Load the JSON and return a flattened DataFrame (1 row per alert).
+    Returns an empty DF with 'alert_index' column if no alert found.
+    """
+    data = json.loads(Path(source_json).read_text(encoding="utf-8", errors="replace"))
+    user_list = _find_user_list_list(data)
+    if not user_list:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for i, a in enumerate(user_list):
+        row: Dict[str, Any] = {"user_list_index": i}
+        _flatten(a, "", row)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    return df
 
 
 def load_alerts_df(source_json: str | Path) -> pd.DataFrame:

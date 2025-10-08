@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from device_tenant_resolver import determine_device_tenant  # <= NEW
 # === NEW (alerts) ===
-from alert_export import load_alerts_df, write_alert_sheet_per_tenant, ALERT_SHEET  # <= NEW
+from alert_export import load_alerts_df, load_userlist_df, ALERT_SHEET, USERLIST_SHEET  # <= NEW
 
 SCRIPT_NAME = "logpoint_config_splitter"
 DEFAULT_CONFIG_NAME = f"{SCRIPT_NAME}-config.json"
@@ -349,7 +349,8 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
                              tenant_list: List[str],
                              output_dir: str,
                              config_dict: Dict,
-                             alerts_df=None) -> None:  # <= NEW param, défaut None
+                             alerts_df=None,
+                             user_list_df=None) -> None:  # <= NEW param, défaut None
     os.makedirs(output_dir, exist_ok=True)
     unmatched_records_by_entity = defaultdict(list)
 
@@ -433,6 +434,12 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
                     alerts_df.to_excel(writer, sheet_name=ALERT_SHEET, index=False)
                 except Exception as e:
                     logging.warning(f"Alerts: failed to write for tenant {tenant}: {e}")
+            
+            if user_list_df is not None and not user_list_df.empty:
+                try:
+                    user_list_df.to_excel(writer, sheet_name=USERLIST_SHEET, index=False)
+                except Exception as e:
+                    logging.warning(f"UserList: failed to write for tenant {tenant}: {e}")
 
         logging.info(f"Tenant config exported to '{output_path}'")
 
@@ -501,9 +508,11 @@ def main():
     alerts_source = args.input_sh if args.input_sh else json_path
     try:
         alerts_df = load_alerts_df(alerts_source)
+        user_list_df = load_userlist_df(alerts_source)
     except Exception as e:
         logging.warning(f"Alerts: unable to load from {alerts_source}: {e}")
         alerts_df = None
+        user_list_df = None
 
     tenant_list = load_tenant_list(config_dir)
     config_dict = load_full_config(config_dir)  # <= NEW
@@ -524,7 +533,8 @@ def main():
     }
 
     # <= signature mise à jour (on passe la config complète + alerts_df)
-    split_entities_by_tenant(entities, tenant_list, output_dir, config_dict, alerts_df=alerts_df)
+    split_entities_by_tenant(entities, tenant_list, output_dir, config_dict, 
+                             alerts_df=alerts_df, user_list_df=user_list_df)
 
 if __name__ == "__main__":
     main()

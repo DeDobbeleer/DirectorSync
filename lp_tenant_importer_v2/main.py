@@ -141,24 +141,24 @@ def cmd_import_generic(args):
         if result.any_error:
             raise RuntimeError("One or more operations failed; see rows above.")
 
-    except ConfigError as exc:
-        log.error("Configuration error: %s", exc)
-        sys.exit(EXIT_CONFIG_ERROR)
-    except FileNotFoundError as exc:
-        log.error("File not found: %s", exc)
-        sys.exit(EXIT_VALIDATION_ERROR)
-    # except ValidationError as exc:
-    #     log.exception("Validation error (%s): %r", type(exc).__name__, exc)
-        sys.exit(EXIT_VALIDATION_ERROR)
-    except requests.RequestException as exc:
-        log.error("Network/HTTP error: %s", exc)
-        sys.exit(EXIT_NETWORK_ERROR)
-    except RuntimeError as exc:
-        log.error("Validation error: %s", exc)
-        sys.exit(EXIT_VALIDATION_ERROR)
-    except Exception as exc:  # pragma: no cover — safety net
-        log.error("Unexpected error: %s", exc, exc_info=True)
-        sys.exit(EXIT_GENERIC_ERROR)
+    # except ConfigError as exc:
+    #     log.error("Configuration error: %s", exc)
+    #     sys.exit(EXIT_CONFIG_ERROR)
+    # except FileNotFoundError as exc:
+    #     log.error("File not found: %s", exc)
+    #     sys.exit(EXIT_VALIDATION_ERROR)
+    # # except ValidationError as exc:
+    # #     log.exception("Validation error (%s): %r", type(exc).__name__, exc)
+    #     sys.exit(EXIT_VALIDATION_ERROR)
+    # except requests.RequestException as exc:
+    #     log.error("Network/HTTP error: %s", exc)
+    #     sys.exit(EXIT_NETWORK_ERROR)
+    # except RuntimeError as exc:
+    #     log.error("Validation error: %s", exc)
+    #     sys.exit(EXIT_VALIDATION_ERROR)
+    # except Exception as exc:  # pragma: no cover — safety net
+    #     log.error("Unexpected error: %s", exc, exc_info=True)
+    #     sys.exit(EXIT_GENERIC_ERROR)
 
 
 # ---------------------------- Argument parser -------------------------------

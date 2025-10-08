@@ -285,8 +285,9 @@ class AlertRulesImporter(BaseImporter):
             res = client.fetch_resource(
                 pool_uuid=pool_uuid,
                 node_id=node.id,
-                resource="MitreAttacks/fetch",
+                resource="MitreAttacks",
                 data={},
+                path="fetch",
             ) or {}
             mon = res.get("monitor_ok")
             rows = []

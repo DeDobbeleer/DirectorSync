@@ -340,15 +340,19 @@ class UserDefinedListsImporter(BaseImporter):
         typ = _s(desired_row.get("type_list"))
         name = _s(desired_row.get("name"))
         if typ == "static_list":
-            return {"s_name": name, "lists": list(desired_row.get("values") or [])}
+            d = {"s_name": name, "lists": list(desired_row.get("values") or [])}
+            log.debug(f"Static list payload for: {d.get("s_name")} ")
+            return d
         # dynamic
         d, h, m = split_seconds_dhm(int(desired_row.get("age_limit") or 0))
-        return {
+        d = {
             "d_name": name,
             "agelimit_day" : d,
             "agelimit_hour" : h,
             "agelimit_minute": m,
         }
+        log.debug(f"Static list payload for: {d.get("d_name")} ")
+        return d
 
     def build_payload_update(
         self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]
@@ -370,7 +374,7 @@ class UserDefinedListsImporter(BaseImporter):
         Delete is intentionally **opt-in** and should be wired by policy before use.
         """
         desired = decision.desired or {}
-        typ = _s(desired.get("type")).lower()
+        typ = _s(desired.get("list_type"))
         resource = self._resource_for_type(typ)
 
         # Optional delete flow (only if explicitly requested and existing present)
@@ -385,9 +389,10 @@ class UserDefinedListsImporter(BaseImporter):
 
         if decision.op == "CREATE":
             payload = self.build_payload_create(desired)
+            
             log.info("CREATE list type=%s name=%s [node=%s]", typ, desired.get("name"), node.name)
             return client.create_resource(pool_uuid, node.id, resource, payload)
-
+            
         if decision.op == "UPDATE":
             if not existing_id:
                 raise RuntimeError("UPDATE selected but no existing id present")

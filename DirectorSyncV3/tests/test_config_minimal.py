@@ -2,7 +2,8 @@ from directorsync_v3.core.config import load_config
 
 
 def test_defaults_and_run_id_generated():
-    cfg = load_config()
+    # In unit tests we run in dry_run to avoid requiring base_url/tenant/pool
+    cfg = load_config({"app": {"dry_run": True}})
     assert cfg.logging.console_level == "INFO"
     rid1 = cfg.run_id
     rid2 = cfg.run_id

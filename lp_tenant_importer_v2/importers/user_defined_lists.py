@@ -202,7 +202,8 @@ class UserDefinedListsImporter(BaseImporter):
     compare_keys: Tuple[str, ...] = (
         "name",
         "lists",
-        "age_limit"
+        "age_limit",
+        "list_type"
     )
 
     # ------------------------ Base hooks ------------------------

@@ -341,7 +341,7 @@ class UserDefinedListsImporter(BaseImporter):
         typ = _s(desired_row.get("list_type"))
         name = _s(desired_row.get("name"))
         if typ == "static_list":
-            d = {"s_name": name, "lists": list(desired_row.get("values") or [])}
+            d = {"s_name": name, "lists": list(desired_row.get("values_set") or [])}
             log.debug(f"Static list payload for: {d.get("s_name")} {d}")
             return d
         # dynamic

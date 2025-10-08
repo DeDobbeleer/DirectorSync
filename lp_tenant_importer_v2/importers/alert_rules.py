@@ -919,7 +919,9 @@ class AlertRulesImporter(BaseImporter):
                     desired.pop("manageable_by", None)
 
             # attack_tag (MITRE): resolve XLSX tokens (hash/technique/name) -> final IDs
+            
             attack_raw = desired.get("attack_tag") or []
+            log.debug(f"attack_raw: {attack_raw} : {desired.get("name")}")
             if attack_raw:
                 attack_ids = self._resolve_attack_tags(client, pool_uuid, node, attack_raw)
                 if attack_ids:

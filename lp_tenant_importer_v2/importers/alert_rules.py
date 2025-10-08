@@ -318,13 +318,13 @@ class AlertRulesImporter(BaseImporter):
                 log.debug(f"MITRE cache loading: {hash} (hash) -> {h}")
         except Exception as exc:
             log.warning("Failed fetching MITRE attacks catalog (pool=%s): %s", pool_uuid, exc)
-        self._mitre_cache_by_pool[pool_uuid] = mapping
+        self._mitre_cache_by_pool[node.id] = mapping
         self._mitre_loaded_pools.add(pool_uuid)
         log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
 
     def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
         """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""
-        idx = self._mitre_cache_by_pool.get(pool_uuid) or {}
+        idx = self._mitre_cache_by_pool.get(node.id) or {}
         
         log.debug(f"_resolve_attack_tags raw xlsx dump; {items}")
         
@@ -333,18 +333,12 @@ class AlertRulesImporter(BaseImporter):
             token = _s(it)
             if not token:
                 continue
-            # Allow 'X|Y' forms where X is the canonical token (hash or technique)
-            if "|" in token:
-                token = token.split("|", 1)[0].strip()
-            key = token.lower()
-            if key in idx:
-                out.append(idx[key])
+            
+            id=idx[token]
+            if id:
+                out.append(id)
             else:
-                log.warning("Unknown MITRE attack token '%s' (pool=%s) - ignored", it, pool_uuid)
-        # keep only known IDs (those present in idx.values())
-        valid_ids = set(idx.values())
-        out = [v for v in out if v in valid_ids]
-        # dedupe / stable
+                log.warning("Unknown MITRE attack token '%s' (node=%s) - ignored", it, node.name)
         seen, uniq = set(), []
         for v in out:
             if v not in seen:

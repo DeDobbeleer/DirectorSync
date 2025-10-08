@@ -305,7 +305,7 @@ class AlertRulesImporter(BaseImporter):
                 h["id"] = id
                 h["attack_id"] = _s(r.get("attack_id"))
                 h["attack_category"] = _s(r.get("attack_category"))
-                h["ttack_tag"] = _s(r.get("ttack_tag"))
+                h["attack_tag"] = _s(r.get("attack_tag"))
 
                 hash=_s(r.get("hash"))
                 

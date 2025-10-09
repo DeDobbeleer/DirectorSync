@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from string import Template
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import importlib
 
 import yaml
 
@@ -105,6 +106,12 @@ TRANSFORM_REGISTRY = {
     "to_int": t_to_int,
 }
 
+# =========================
+# Resolve & hook types
+# =========================
+
+InventoryProvider = Any  # callable: (name: str) -> list[dict]
+HookFunc = Any           # callable signature varies per hook (documented below)
 
 # =========================
 # Profile Runtime
@@ -178,12 +185,88 @@ class ResourceProfile:
             out[logical] = val
         return out
 
+    # ----- Resolve -----
+    def resolve(self, mapped: Dict[str, Any], provider: InventoryProvider) -> Dict[str, Any]:
+        """
+        Apply profile 'resolve' rules to enrich mapped fields by looking up IDs in inventories.
+
+        Supported forms:
+          resolve:
+            fieldX:
+              from: "inventory_name"
+              lookup:      { by: "name", using: "${source_field}" }
+            fieldY:
+              from: "inventory_name"
+              lookup_many: { by: "name", using: "${source_list}" }
+
+        - Default returned field is 'id'. No network calls here; provider supplies in-memory inventories.
+        - Failures do not raise; they yield None (lookup) or [] (lookup_many). Prechecks decide SKIP/ERROR.
+        """
+        rules = self.cfg.get("resolve") or {}
+        if not rules:
+            return mapped
+
+        out = dict(mapped)
+        for target, spec in rules.items():
+            if not isinstance(spec, dict) or "from" not in spec or not any(
+                k in spec for k in ("lookup", "lookup_many")
+            ):
+                raise ProfileValidationError(f"Invalid resolve spec for '{target}'")
+
+            inv_name = spec["from"]
+            inventory = provider(inv_name)  # must return list[dict]
+            if not isinstance(inventory, list):
+                raise ProfileValidationError(f"Inventory '{inv_name}' must be a list of objects")
+
+            # Helper: single value substitute from mapped
+            def _subst(expr: str) -> Any:
+                # If expression is exactly "${field}", return the native value (list/int/bool/etc.)
+                m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", str(expr))
+                if m:
+                    return mapped.get(m.group(1))
+                # Otherwise, regular string templating
+                return Template(str(expr)).safe_substitute(mapped)
+
+            # Helper: find by field, return 'id' by default
+            def _find_one(by: str, value: Any, ret: str = "id") -> Any:
+                for it in inventory:
+                    if it.get(by) == value:
+                        return it.get(ret)
+                return None
+
+            if "lookup" in spec:
+                by = spec["lookup"].get("by")
+                using = spec["lookup"].get("using")
+                if by is None or using is None:
+                    raise ProfileValidationError(f"Resolve.lookup must include 'by' and 'using' for '{target}'")
+                needle = _subst(using)
+                out[target] = _find_one(by, needle, "id")
+
+            elif "lookup_many" in spec:
+                by = spec["lookup_many"].get("by")
+                using = spec["lookup_many"].get("using")
+                if by is None or using is None:
+                    raise ProfileValidationError(f"Resolve.lookup_many must include 'by' and 'using' for '{target}'")
+                values = _subst(using)
+                if isinstance(values, (list, tuple)):
+                    needles = list(values)
+                else:
+                    needles = [values] if values not in (None, "", []) else []
+                ids: List[Any] = []
+                for v in needles:
+                    fid = _find_one(by, v, "id")
+                    if fid is not None:
+                        ids.append(fid)
+                out[target] = ids
+
+        return out
+
     # ----- Prechecks -----
     def precheck(self, mapped: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Run simple declarative prechecks:
           - non_empty(field)
-          - must_exist_many(field)
+          - must_exist_many(field, min=1)
           - unique_in_sheet(field) [advisory; no-op here]
         Returns (ok, reason_if_not_ok).
         """
@@ -198,6 +281,14 @@ class ResourceProfile:
                 items = mapped.get(field) or []
                 if not isinstance(items, (list, tuple)) or not items:
                     return False, f"Field '{field}' has no items"
+                # optional threshold: require at least N items
+                min_required = chk.get("min", 1)
+                try:
+                    min_required = int(min_required)
+                except Exception:
+                    min_required = 1
+                if len(items) < max(1, min_required):
+                    return False, f"Field '{field}' requires at least {max(1, min_required)} item(s)"
                 if any(v in (None, "", []) for v in items):
                     return False, f"Field '{field}' contains empty item(s)"
             elif ctype == "unique_in_sheet":

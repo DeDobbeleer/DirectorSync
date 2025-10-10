@@ -11,12 +11,14 @@ Central logging for DirectorSync v3.
 from __future__ import annotations
 
 import logging
+import sys
 import logging.handlers
 import os
 import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from pathlib import Path
 
 
 class MaskSecretsFilter(logging.Filter):
@@ -59,6 +61,83 @@ def _utc_formatter(fmt: str) -> logging.Formatter:
     return f
 
 
+def _ensure_single_console_handler(
+    base_logger: logging.Logger,
+    *,
+    console_level: str,
+    formatter: logging.Formatter,
+    mask: logging.Filter,
+) -> None:
+    """
+    Make sure there is exactly ONE StreamHandler bound to sys.stderr
+    (pytest may close/replace stdio between tests; also avoid duplicates).
+    """
+    # Remove all existing StreamHandlers
+    for h in list(base_logger.handlers):
+        if isinstance(h, logging.StreamHandler):
+            try:
+                base_logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
+
+    # Add a fresh one on stderr
+    sh = logging.StreamHandler(stream=sys.stderr)
+    sh.setLevel(getattr(logging, console_level.upper(), logging.INFO))
+    sh.setFormatter(formatter)
+    sh.addFilter(mask)
+    base_logger.addHandler(sh)
+
+
+def _ensure_app_file_handler(
+    base_logger: logging.Logger,
+    *,
+    base_dir: str,
+    file_level: str,
+    formatter: logging.Formatter,
+    mask: logging.Filter,
+) -> None:
+    """
+    Ensure a single TimedRotatingFileHandler points to <base_dir>/app.log
+    for the CURRENT working directory. If a previous test configured a handler
+    to another path, replace it.
+    """
+    _ensure_dir(base_dir)
+    desired = os.path.abspath(os.path.join(base_dir, "app.log"))
+    # touch early (tests assert existence)
+    Path(desired).touch(exist_ok=True)
+
+    # Remove any rotating handler not pointing to 'desired'
+    for h in list(base_logger.handlers):
+        if isinstance(h, logging.handlers.TimedRotatingFileHandler):
+            current = os.path.abspath(getattr(h, "baseFilename", ""))
+            if current != desired:
+                try:
+                    base_logger.removeHandler(h)
+                    h.close()
+                except Exception:
+                    pass
+
+    # If none matches 'desired', add a fresh one
+    if not any(
+        isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        and os.path.abspath(getattr(h, "baseFilename", "")) == desired
+        for h in base_logger.handlers
+    ):
+        rh = logging.handlers.TimedRotatingFileHandler(
+            desired,
+            when="midnight",
+            backupCount=14,
+            encoding="utf-8",
+            utc=True,
+            delay=False,  # open immediately so file exists and is writable
+        )
+        rh.setLevel(getattr(logging, file_level.upper(), logging.DEBUG))
+        rh.setFormatter(formatter)
+        rh.addFilter(mask)
+        base_logger.addHandler(rh)
+
+
 def build_logger(
     *,
     name: str = "ds",
@@ -73,68 +152,67 @@ def build_logger(
     Configure and return a LoggerAdapter.
 
     Design:
-      - A base logger `<name>` holds console + rotating file handlers (configured once).
+      - A base logger `<name>` holds console + rotating file handlers.
       - A child logger `<name>.<action>.<run_id>` holds a per-run file handler.
       - Records propagate to base logger so they appear in all sinks.
     """
     mask = MaskSecretsFilter()
 
-    # --- Base logger with console + rotating file (configured once) ---
+    # Common formatter
+    fmt = (
+        "%(asctime)s | %(levelname)-8s | %(name)s | "
+        "run=%(run_id)s action=%(action)s tenant=%(tenant)s pool=%(pool)s profile=%(profile)s | "
+        "%(message)s"
+    )
+    formatter = _utc_formatter(fmt)
+
+    # --- Base logger with console + rotating file ---
     base = logging.getLogger(name)
     base.setLevel(logging.DEBUG)
 
+    # First-time bootstrap (harmless if called once)
     if not getattr(base, "_ds_configured", False):
         _ensure_dir(base_dir)
-        fmt = (
-            "%(asctime)s | %(levelname)-8s | %(name)s | "
-            "run=%(run_id)s action=%(action)s tenant=%(tenant)s pool=%(pool)s profile=%(profile)s | "
-            "%(message)s"
-        )
-        formatter = _utc_formatter(fmt)
-
-        # Console
-        sh = logging.StreamHandler()
-        sh.setLevel(getattr(logging, console_level.upper(), logging.INFO))
-        sh.setFormatter(formatter)
-        sh.addFilter(mask)
-
-        # Timed rotating file (daily)
-        rh = logging.handlers.TimedRotatingFileHandler(
-            os.path.join(base_dir, "app.log"),
-            when="midnight",
-            backupCount=14,
-            encoding="utf-8",
-        )
-        rh.setLevel(getattr(logging, file_level.upper(), logging.DEBUG))
-        rh.setFormatter(formatter)
-        rh.addFilter(mask)
-
-        base.addHandler(sh)
-        base.addHandler(rh)
+        try:
+            (Path(base_dir) / "app.log").touch(exist_ok=True)
+        except Exception:
+            pass
         base._ds_configured = True  # type: ignore[attr-defined]
+
+    # Always ensure we point to the RIGHT sinks for this call
+    _ensure_single_console_handler(
+        base_logger=base,
+        console_level=console_level,
+        formatter=formatter,
+        mask=mask,
+    )
+    _ensure_app_file_handler(
+        base_logger=base,
+        base_dir=base_dir,
+        file_level=file_level,
+        formatter=formatter,
+        mask=mask,
+    )
 
     # --- Child logger with per-run action file (configured once per action+run) ---
     child_name = f"{name}.{action}.{run_id}"
     child = logging.getLogger(child_name)
     child.setLevel(logging.DEBUG)
-    child.propagate = True
+    child.propagate = True  # no console here; bubble up to base
 
     if not getattr(child, "_ds_action_configured", False):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         dated_dir = os.path.join(base_dir, today)
         _ensure_dir(dated_dir)
 
-        fmt = (
-            "%(asctime)s | %(levelname)-8s | %(name)s | "
-            "run=%(run_id)s action=%(action)s tenant=%(tenant)s pool=%(pool)s profile=%(profile)s | "
-            "%(message)s"
-        )
-        formatter = _utc_formatter(fmt)
-
-        fh = logging.FileHandler(
-            os.path.join(dated_dir, f"{action}_{run_id}.log"),
-            encoding="utf-8",
-        )
+        action_file = os.path.join(dated_dir, f"{action}_{run_id}.log")
+        # Touch early so tests can see the file immediately
+        try:
+            Path(action_file).touch(exist_ok=True)
+        except Exception:
+            pass
+        # Per-run file (no rotation needed)
+        fh = logging.FileHandler(action_file, encoding="utf-8", delay=False)
         fh.setLevel(getattr(logging, file_level.upper(), logging.DEBUG))
         fh.setFormatter(formatter)
         fh.addFilter(mask)

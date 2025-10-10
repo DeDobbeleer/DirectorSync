@@ -1,15 +1,3 @@
-"""
-CRUD Applier for DirectorSync v3 (Step 8).
-
-- Fetches current remote state via profile.endpoint.list (JSON).
-- For each input row: map -> resolve -> preprocess_hook -> precheck -> build payload
-  -> post_payload_hook -> compare -> decide -> apply (POST/PUT) as needed.
-- URL formatting supports placeholders from context, mapped/desired values, and current.id.
-- No monitoring yet (will be added in a later step).
-
-This module intentionally reuses ResourceProfile methods to avoid duplicating mapping logic.
-"""
-
 from __future__ import annotations
 
 import json
@@ -19,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .director_client import DirectorClient, HttpError
+from .job_monitor import JobMonitor, MonitorConfig, MonitorError, MonitorTimeout
 from .profiles import ProfileValidationError, ResourceProfile, TransformError
 
 RowDict = Dict[str, Any]
@@ -29,31 +18,15 @@ InventoryProvider = Callable[[str], List[Dict[str, Any]]]
 
 @dataclass(frozen=True)
 class ApplyResult:
-    """Outcome for one row after apply phase (may be no-op)."""
     index: int
     natural_key: Tuple[Any, ...]
-    status: str            # CREATED / UPDATED / UNCHANGED / SKIP / ERROR / EXCEPTION
+    status: str
     reason: str = ""
     error: str = ""
-    url: str = ""          # endpoint called if any
+    url: str = ""
 
 
 class CrudApplier:
-    """
-    Apply create/update decisions to the Director API using DirectorClient.
-
-    Minimal expectations for the profile:
-      endpoint:
-        list:   "/path"
-        create: "/path"
-        update: "/path/{id}"
-
-    Placeholders in endpoints may reference:
-      - context keys (e.g., "tenant", "pool_uuid")
-      - mapped/desired fields (e.g., "node_id")
-      - "id" (taken from current remote object via profile.id_field)
-    """
-
     def __init__(
         self,
         profile: ResourceProfile,
@@ -71,12 +44,26 @@ class CrudApplier:
         self._provider = inventories or (lambda name: [])
         self._hooks = hooks or {}
 
-        # Resolve hooks names declared in profile (if any)
         hooks_cfg = self.profile.cfg.get("hooks", {}) or {}
         self.h_preprocess = self._resolve_hook(hooks_cfg.get("preprocess_row"))
         self.h_post_payload = self._resolve_hook(hooks_cfg.get("post_payload"))
 
-    # ---------- Utilities ----------
+        # Optional monitor config
+        mon_cfg = (self.profile.cfg.get("monitor") or {})
+        self.monitor = None
+        if mon_cfg.get("path"):
+            poll = mon_cfg.get("poll", {}) or {}
+            self.monitor = JobMonitor(
+                self.client,
+                MonitorConfig(
+                    path=mon_cfg["path"],
+                    status_field=mon_cfg.get("status_field", "status"),
+                    ok_states=list(mon_cfg.get("ok_states") or []),
+                    fail_states=list(mon_cfg.get("fail_states") or []),
+                    interval_sec=float(poll.get("interval_sec", 0.05)),
+                    timeout_sec=float(poll.get("timeout_sec", 5.0)),
+                ),
+            )
 
     def _resolve_hook(self, ref: Optional[str]) -> Optional[HookFunc]:
         if not ref:
@@ -91,20 +78,14 @@ class CrudApplier:
         raise ProfileValidationError(f"Unknown hook reference '{ref}'")
 
     def _format_url(self, template: str, *, mapped: Dict[str, Any], desired: Dict[str, Any], current: Optional[Dict[str, Any]]) -> str:
-        """
-        Safe placeholder formatting: replaces {key} with str(value) from combined sources.
-        Missing keys are replaced by empty string.
-        """
         sources: Dict[str, Any] = {}
         sources.update(self.ctx)
         sources.update(mapped or {})
         sources.update(desired or {})
         if current:
-            # prefer the id_field value as "id"
             id_field = self.profile.id_field
             if id_field in current:
                 sources.setdefault("id", current[id_field])
-            # also expose all current fields
             sources.update(current)
 
         def repl(m: re.Match[str]) -> str:
@@ -115,7 +96,6 @@ class CrudApplier:
         return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", repl, template)
 
     def _normalize_remote(self, items_json: Any) -> List[Dict[str, Any]]:
-        """Accept either a list or an object with 'items'."""
         if isinstance(items_json, list):
             return [i for i in items_json if isinstance(i, dict)]
         if isinstance(items_json, dict) and isinstance(items_json.get("items"), list):
@@ -129,11 +109,7 @@ class CrudApplier:
             index[key] = it
         return index
 
-    # ---------- Public API ----------
-
     def apply(self, rows: Iterable[RowDict]) -> Tuple[List[ApplyResult], Dict[str, int]]:
-        """Run list → decide → apply. Returns (row results, summary counts)."""
-        # 1) List current state
         list_tpl = self.profile.cfg.get("endpoint", {}).get("list")
         if not list_tpl:
             raise ProfileValidationError("Profile missing endpoint.list")
@@ -150,7 +126,6 @@ class CrudApplier:
         results: List[ApplyResult] = []
         counts: Dict[str, int] = {}
 
-        # 2) Per-row decisions and applies
         for idx, raw in enumerate(rows):
             try:
                 mapped = self.profile.map_row(raw)
@@ -170,11 +145,22 @@ class CrudApplier:
 
                 desired_cmp = self.profile.make_comparable(desired)
                 current = current_index.get(key)
+
                 if current is None:
                     # CREATE
                     url = self._format_url(self.profile.cfg["endpoint"]["create"], mapped=mapped, desired=desired, current=None)
-                    self.client.post_json(url, desired)
-                    self._append(results, counts, ApplyResult(idx, key, "CREATED", url=url))
+                    resp = self.client.post_json(url, desired)
+                    # Monitor if configured and job present
+                    status = "CREATED"
+                    if self.monitor:
+                        job_id = (resp or {}).get("job_id") or ((resp or {}).get("job") or {}).get("id")
+                        if job_id:
+                            try:
+                                self.monitor.wait(context={**self.ctx, **mapped, **desired, "job_id": job_id})
+                            except (MonitorError, MonitorTimeout) as e:
+                                self._append(results, counts, ApplyResult(idx, key, "ERROR", error=str(e), url=url))
+                                continue
+                    self._append(results, counts, ApplyResult(idx, key, status, url=url))
                     continue
 
                 current_cmp = self.profile.make_comparable(current)
@@ -183,8 +169,17 @@ class CrudApplier:
                 else:
                     # UPDATE
                     url = self._format_url(self.profile.cfg["endpoint"]["update"], mapped=mapped, desired=desired, current=current)
-                    self.client.put_json(url, desired)
-                    self._append(results, counts, ApplyResult(idx, key, "UPDATED", url=url))
+                    resp = self.client.put_json(url, desired)
+                    status = "UPDATED"
+                    if self.monitor:
+                        job_id = (resp or {}).get("job_id") or ((resp or {}).get("job") or {}).get("id")
+                        if job_id:
+                            try:
+                                self.monitor.wait(context={**self.ctx, **mapped, **desired, **current, "job_id": job_id})
+                            except (MonitorError, MonitorTimeout) as e:
+                                self._append(results, counts, ApplyResult(idx, key, "ERROR", error=str(e), url=url))
+                                continue
+                    self._append(results, counts, ApplyResult(idx, key, status, url=url))
 
             except (ProfileValidationError, TransformError) as e:
                 self._append(results, counts, ApplyResult(idx, tuple(), "ERROR", error=str(e)))

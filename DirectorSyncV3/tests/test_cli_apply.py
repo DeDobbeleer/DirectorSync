@@ -2,9 +2,14 @@ import csv
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+from pathlib import Path
+import pytest
+
+# Skip all tests here if openpyxl is not present
+pytest.importorskip("openpyxl")
+from openpyxl import Workbook
 
 from directorsync_v3.cli import main
-from directorsync_v3.core.profiles import ProfileLoader
 
 
 class _Srv(BaseHTTPRequestHandler):
@@ -57,7 +62,7 @@ def _server():
     return srv, f"http://{srv.server_address[0]}:{srv.server_address[1]}"
 
 
-def _write_profile(tmp_path):
+def _write_profile(tmp_path: Path) -> Path:
     base = tmp_path / "resources" / "profiles"
     base.mkdir(parents=True)
     (base / "_defaults.yml").write_text(
@@ -107,17 +112,19 @@ payload:
     return base
 
 
-def _write_csv(path, rows):
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["Name", "A", "B", "NodeId"])
-        w.writeheader()
-        w.writerows(rows)
+def _write_xlsx(path: Path, rows):
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Name", "A", "B", "NodeId"])
+    for r in rows:
+        ws.append([r["Name"], r["A"], r["B"], r["NodeId"]])
+    wb.save(str(path))
 
 
-def test_cli_dry_run(tmp_path, capsys, monkeypatch):
+def test_cli_xlsx_dry_run(tmp_path, capsys, monkeypatch):
     base = _write_profile(tmp_path)
-    data = tmp_path / "rows.csv"
-    _write_csv(
+    data = tmp_path / "rows.xlsx"
+    _write_xlsx(
         data,
         [
             {"Name": "Alpha", "A": "x;y", "B": "y", "NodeId": "N1"},  # CREATED
@@ -139,11 +146,10 @@ def test_cli_dry_run(tmp_path, capsys, monkeypatch):
     )
     out = capsys.readouterr().out.strip()
     assert code == 0
-    # CREATED=1, UPDATED=0, UNCHANGED=0, SKIP=1
     assert "CREATED=1" in out and "SKIP=1" in out
 
 
-def test_cli_apply_with_http(tmp_path, capsys):
+def test_cli_xlsx_apply_with_http(tmp_path, capsys):
     # Server
     srv, base_url = _server()
     th = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -151,8 +157,8 @@ def test_cli_apply_with_http(tmp_path, capsys):
 
     try:
         base = _write_profile(tmp_path)
-        data = tmp_path / "rows.csv"
-        _write_csv(
+        data = tmp_path / "rows.xlsx"
+        _write_xlsx(
             data,
             [
                 {"Name": "Alpha", "A": "x;y", "B": "y", "NodeId": "N1"},  # CREATED -> POST /create/N1
@@ -178,9 +184,7 @@ def test_cli_apply_with_http(tmp_path, capsys):
         )
         out = capsys.readouterr().out.strip()
         assert code == 0
-        # Exactly 1 created, 1 updated, 1 unchanged
         assert "CREATED=1" in out and "UPDATED=1" in out and "UNCHANGED=1" in out
-        # Server calls prove we hit the right endpoints
         assert _Srv.calls["list"] == 1
         assert _Srv.calls["create"] == 1
         assert _Srv.calls["update"] == 1

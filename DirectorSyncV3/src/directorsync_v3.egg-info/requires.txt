@@ -1,0 +1,3 @@
+
+[excel]
+openpyxl>=3.1

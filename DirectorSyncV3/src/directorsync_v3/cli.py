@@ -27,6 +27,54 @@ from .core.director_client import DirectorClient
 from .core.applier import CrudApplier
 
 
+# --- add this helper next to _read_rows_csv ---
+def _read_rows_xlsx(path: str) -> List[Dict[str, Any]]:
+    """
+    Minimal XLSX reader using openpyxl (optional dependency).
+    - Uses the first worksheet
+    - First row = headers
+    - Returns a list of {header: string_value}
+    """
+    try:
+        from openpyxl import load_workbook  # lazy import so dependency stays optional
+    except Exception as e:
+        raise RuntimeError(
+            "XLSX support requires 'openpyxl'. Install it (e.g. `pip install openpyxl`) "
+            "or use a CSV file instead."
+        ) from e
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Rows file not found: {path}")
+
+    wb = load_workbook(filename=str(p), data_only=True, read_only=True)
+    ws = wb.active  # first sheet
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [("" if h is None else str(h).strip()) for h in rows[0]]
+    out: List[Dict[str, Any]] = []
+    for r in rows[1:]:
+        d: Dict[str, Any] = {}
+        for i, h in enumerate(headers):
+            if not h:
+                continue
+            val = r[i] if i < len(r) else None
+            d[h] = "" if val is None else str(val)
+        out.append(d)
+    return out
+
+def _read_rows_auto(path: str) -> List[Dict[str, Any]]:
+    """
+    Auto-detect reader by file extension.
+    """
+    ext = Path(path).suffix.lower()
+    if ext in (".xlsx", ".xlsm"):
+        return _read_rows_xlsx(path)
+    # default to CSV
+    return _read_rows_csv(path)
+
 def _read_rows_csv(path: str) -> List[Dict[str, Any]]:
     p = Path(path)
     if not p.exists():
@@ -56,7 +104,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("apply", help="Apply rows against a Director profile")
     a.add_argument("--profile", required=True, help="Profile name (without .yml)")
-    a.add_argument("--rows", required=True, help="CSV file with input rows")
+    a.add_argument("--rows", required=True, help="Input rows file (.csv or .xlsx)")
     a.add_argument("--search-path", default="resources/profiles", help="Profiles search path")
 
     a.add_argument("--dry-run", action="store_true", help="Plan only, no network calls")
@@ -122,7 +170,8 @@ def _apply_cmd(args: argparse.Namespace) -> int:
     profile = pl.load(args.profile)
 
     # 4) Read rows
-    rows = _read_rows_csv(args.rows)
+    rows = _read_rows_auto(args.rows)
+    
     logger.info("Loaded %s input rows from %s", len(rows), args.rows)
 
     # 5) Execute

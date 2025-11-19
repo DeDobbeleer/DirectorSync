@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter
 from ..core.config import NodeRef
 from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError, require_columns
+from ..utils.validators import ValidationError
+from .base import BaseImporter
 
 log = logging.getLogger(__name__)
 
@@ -106,19 +107,19 @@ class ProcessingPoliciesImporter(BaseImporter):
     def __init__(self) -> None:
         super().__init__()
         # Per-node caches (filled in fetch_existing)
-        self._norm_names: Dict[str, set] = {}              # node.id -> {NP names}
-        self._ep_name_to_id: Dict[str, Dict[str, str]] = {}  # node.id -> {EP name: id}
-        self._ep_id_to_name: Dict[str, Dict[str, str]] = {}  # node.id -> {EP id: name}
-        self._rp_name_to_id: Dict[str, Dict[str, str]] = {}  # node.id -> {RP name: id}
-        self._rp_id_to_name: Dict[str, Dict[str, str]] = {}  # node.id -> {RP id: name}
+        self._norm_names: dict[str, set] = {}              # node.id -> {NP names}
+        self._ep_name_to_id: dict[str, dict[str, str]] = {}  # node.id -> {EP name: id}
+        self._ep_id_to_name: dict[str, dict[str, str]] = {}  # node.id -> {EP id: name}
+        self._rp_name_to_id: dict[str, dict[str, str]] = {}  # node.id -> {RP name: id}
+        self._rp_id_to_name: dict[str, dict[str, str]] = {}  # node.id -> {RP id: name}
 
         # XLSX-level caches (source-id -> name) for validation / mapping
-        self._xlsx_ep_id_to_name: Dict[str, str] = {}
-        self._xlsx_rp_id_to_name: Dict[str, str] = {}
+        self._xlsx_ep_id_to_name: dict[str, str] = {}
+        self._xlsx_rp_id_to_name: dict[str, str] = {}
 
     # ------------------------------ Validate ------------------------------ #
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         # Sheets presence
         for sh in self.sheet_names:
             if sh not in sheets:
@@ -129,7 +130,7 @@ class ProcessingPoliciesImporter(BaseImporter):
         rp = sheets["RoutingPolicy"]
 
         # Required headers per sheet (case-insensitive)
-        def _cols(df: pd.DataFrame) -> Dict[str, str]:
+        def _cols(df: pd.DataFrame) -> dict[str, str]:
             return {str(c).strip().lower(): str(c) for c in df.columns}
 
         pp_cols = _cols(pp)
@@ -158,7 +159,7 @@ class ProcessingPoliciesImporter(BaseImporter):
 
     # --------------------------- Desired from XLSX --------------------------- #
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         """Yield desired rows with names only; IDs are resolved per node at apply-time."""
         pp = sheets["ProcessingPolicy"].copy()
         ep = sheets["EnrichmentPolicy"].copy()
@@ -217,19 +218,19 @@ class ProcessingPoliciesImporter(BaseImporter):
                 "routing_policy_name": desired.routing_policy_name,
             }
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return str(desired_row.get("name") or "").strip()
 
     # ------------------------ Canonical for diff ------------------------ #
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return {
             "norm_policy": _norm_str(desired_row.get("norm_policy")),
             "enrich_policy_name": _norm_str(desired_row.get("enrich_policy_name")),
             "routing_policy_name": _norm_str(desired_row.get("routing_policy_name")),
         }
 
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         # fetch_existing enriches objects with *_name fields
@@ -249,7 +250,7 @@ class ProcessingPoliciesImporter(BaseImporter):
 
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """
         Return {policy_name -> existing_obj} for the node.
         Also fills per-node caches for NP/EP/RP to support SKIP and id resolution.
@@ -280,7 +281,7 @@ class ProcessingPoliciesImporter(BaseImporter):
         else:
             items = []
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for it in items:
             # API may use "name" or "policy_name"
             name = _norm_str(it.get("name") or it.get("policy_name"))
@@ -308,8 +309,8 @@ class ProcessingPoliciesImporter(BaseImporter):
         pool_uuid: str,
         node: NodeRef,
         decision,
-        existing_id: Optional[str],
-    ) -> Dict[str, Any]:
+        existing_id: str | None,
+    ) -> dict[str, Any]:
         """
         Apply the decision (CREATE/UPDATE/NOOP/SKIP) with strict dependency checks.
         """
@@ -407,9 +408,9 @@ class ProcessingPoliciesImporter(BaseImporter):
     @staticmethod
     def _list_enrichment_policies(
         client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Return {name -> id} for EnrichmentPolicy."""
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         try:
             data = client.list_resource(pool_uuid, node.id, "EnrichmentPolicy") or {}
             items = (data.get("data") if isinstance(data, dict) else data) or []
@@ -425,9 +426,9 @@ class ProcessingPoliciesImporter(BaseImporter):
     @staticmethod
     def _list_routing_policies(
         client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Return {name -> id} for RoutingPolicies."""
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         try:
             data = client.list_resource(pool_uuid, node.id, "RoutingPolicies") or {}
             items = (data.get("data") if isinstance(data, dict) else data) or []

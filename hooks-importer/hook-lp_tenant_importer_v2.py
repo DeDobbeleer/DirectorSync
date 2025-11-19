@@ -1,5 +1,5 @@
 # hooks/hook-lp_tenant_importer_v2.py
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules
 
 # Embarque tout le package, y compris lp_tenant_importer_v2.importers.*
 hiddenimports = collect_submodules('lp_tenant_importer_v2')

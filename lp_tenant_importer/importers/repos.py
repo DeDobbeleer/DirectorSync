@@ -1,13 +1,12 @@
 import logging
-import os
-from typing import Dict, List, Tuple
+
 import pandas as pd
 from core.http import DirectorClient
-from core.nodes import Node, collect_nodes
+from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[str, List[Node]], xlsx_path: str, dry_run: bool, targets: List[str], force_create: bool = False) -> Tuple[List[Dict], bool]:
+def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: dict[str, list[Node]], xlsx_path: str, dry_run: bool, targets: list[str], force_create: bool = False) -> tuple[list[dict], bool]:
     """Import or update repositories for all nodes.
 
     Args:
@@ -64,7 +63,7 @@ def import_repos_for_nodes(client: DirectorClient, pool_uuid: str, nodes: Dict[s
             rows.append({"siem": "", "node": "", "name": name, "result": "Fail", "action": "NONE", "error": "Mismatch in storage and retention data"})
             any_error = True
             continue
-        storage_data = [{"path": path + "/", "retention": int(retention)} for path, retention in zip(storage_paths, retention_days)]
+        storage_data = [{"path": path + "/", "retention": int(retention)} for path, retention in zip(storage_paths, retention_days, strict=False)]
         logger.debug("Processing repo: %s with storage: %s", name, storage_data)
 
         for node_type, node_list in nodes.items():

@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
 from ..utils.validators import require_columns
+from .base import BaseImporter, NodeRef
 
 log = logging.getLogger(__name__)
 
@@ -93,13 +94,13 @@ class RoutingPoliciesImporter(BaseImporter):
 
     def __init__(self) -> None:
         super().__init__()
-        self._active_sheet: Optional[str] = None
-        self._repo_map: Dict[str, str] = {}
-        self._repos_cache: Dict[str, set] = {}  # node.id -> set(repo names)
-        self._first_catch_all: Dict[str, str] = {}  # warn if intra-policy change
+        self._active_sheet: str | None = None
+        self._repo_map: dict[str, str] = {}
+        self._repos_cache: dict[str, set] = {}  # node.id -> set(repo names)
+        self._first_catch_all: dict[str, str] = {}  # warn if intra-policy change
 
     # ------------------------------ Validate ------------------------------ #
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         sheet = self._select_sheet(sheets)
         self._active_sheet = sheet
         df = sheets[sheet]
@@ -119,7 +120,7 @@ class RoutingPoliciesImporter(BaseImporter):
         log.debug("routing_policies: columns=%s rows=%d", list(df.columns), len(df.index))
 
     # --------------------------- Parse desired ---------------------------- #
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         """
         Yield desired policies as dicts:
           { "name": str, "catch_all": str, "rules": List[Dict[str,Any]] }
@@ -133,8 +134,8 @@ class RoutingPoliciesImporter(BaseImporter):
         def col(name: str) -> str:
             return cols.get(name.lower(), name)
 
-        policies: Dict[str, Dict[str, Any]] = {}
-        invalid_rows: List[Tuple[str, int, str]] = []
+        policies: dict[str, dict[str, Any]] = {}
+        invalid_rows: list[tuple[str, int, str]] = []
 
         for idx, row in df.iterrows():
             policy_name = _norm_str(row.get(col("cleaned_policy_name")))
@@ -189,7 +190,7 @@ class RoutingPoliciesImporter(BaseImporter):
                 continue
 
             # Build rule (preserve 'drop' as-is, no semantics here)
-            rule: Dict[str, Any] = {
+            rule: dict[str, Any] = {
                 "type": rule_type,
                 "key": key,
                 "value": value,
@@ -213,11 +214,11 @@ class RoutingPoliciesImporter(BaseImporter):
             )
             yield desired
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return desired_row["name"]
 
     # ------------------------ Canonical for diff ------------------------ #
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         """Canonical shape used by the diff engine (aligned with API fields)."""
         return {
             "name": desired_row.get("name", ""),
@@ -225,7 +226,7 @@ class RoutingPoliciesImporter(BaseImporter):
             "routing_criteria": [self._canon_rule(r) for r in (desired_row.get("rules") or [])],
         }
 
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         """Canonicalize an existing object from Director API."""
         if not existing_obj:
             return None
@@ -256,7 +257,7 @@ class RoutingPoliciesImporter(BaseImporter):
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """
         Return {policy_name -> existing_obj} for the node.
         Also fill the repos cache for SKIP decisions.
@@ -283,7 +284,7 @@ class RoutingPoliciesImporter(BaseImporter):
         else:
             items = []
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for it in items:
             name = _norm_str(it.get("name") or it.get("policy_name") or "")
             if name:
@@ -294,7 +295,7 @@ class RoutingPoliciesImporter(BaseImporter):
         return out
 
     # --------------------------- Build payloads ------------------------- #
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         """API payload: catch_all & routing_criteria at root level (V1-compatible)."""
         payload = {
             "policy_name": desired_row["name"],
@@ -307,9 +308,9 @@ class RoutingPoliciesImporter(BaseImporter):
 
     def build_payload_update(
         self,
-        desired_row: Dict[str, Any],
-        existing_obj: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        desired_row: dict[str, Any],
+        existing_obj: dict[str, Any],
+    ) -> dict[str, Any]:
         payload = {
             "policy_name": desired_row["name"],
             "active": True,
@@ -326,14 +327,14 @@ class RoutingPoliciesImporter(BaseImporter):
         pool_uuid: str,
         node: NodeRef,
         decision,
-        existing_id: Optional[str],
-    ) -> Dict[str, Any]:
+        existing_id: str | None,
+    ) -> dict[str, Any]:
         """
         Apply the decision (CREATE/UPDATE/NOOP). Before writing, enforce SKIP
         if required repos are missing on the node.
         """
         node_t = _node_tag(node)
-        desired: Dict[str, Any] = dict(decision.desired or {})
+        desired: dict[str, Any] = dict(decision.desired or {})
         pol_name = desired.get("name") or "(unnamed)"
 
         log.info("apply: op=%s policy=%s [node=%s]", getattr(decision, "op", "?"), pol_name, node_t)
@@ -370,7 +371,7 @@ class RoutingPoliciesImporter(BaseImporter):
             raise
 
     # ----------------------------- Internals ---------------------------- #
-    def _select_sheet(self, sheets: Dict[str, pd.DataFrame]) -> str:
+    def _select_sheet(self, sheets: dict[str, pd.DataFrame]) -> str:
         for name in self.sheet_names:
             if name in sheets:
                 if all(n in sheets for n in self.sheet_names) and name != self.sheet_names[0]:
@@ -378,7 +379,7 @@ class RoutingPoliciesImporter(BaseImporter):
                 return name
         raise ValueError("Missing required sheets: RP or RoutingPolicy")
 
-    def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
+    def _build_repo_name_map(self, sheets: dict[str, pd.DataFrame]) -> dict[str, str]:
         """Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet."""
         if "Repo" not in sheets:
             return {}
@@ -389,7 +390,7 @@ class RoutingPoliciesImporter(BaseImporter):
         if not src or not dst:
             return {}
 
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         for _, row in df.iterrows():
             k = _norm_str(row.get(src))
             v = _norm_str(row.get(dst))
@@ -419,7 +420,7 @@ class RoutingPoliciesImporter(BaseImporter):
         return names
 
     @staticmethod
-    def _canon_rule(r: Dict[str, Any]) -> Dict[str, Any]:
+    def _canon_rule(r: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize a desired rule (including 'drop' as-is)."""
         out = {
             "type": _norm_str(r.get("type")),
@@ -433,7 +434,7 @@ class RoutingPoliciesImporter(BaseImporter):
         return out
 
     @staticmethod
-    def _canon_rule_from_api(rr: Dict[str, Any]) -> Dict[str, Any]:
+    def _canon_rule_from_api(rr: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize an existing rule from the API."""
         out = {
             "type": _norm_str(rr.get("type")),
@@ -447,7 +448,7 @@ class RoutingPoliciesImporter(BaseImporter):
         return out
 
     @staticmethod
-    def _rule_to_api(r: Dict[str, Any]) -> Dict[str, Any]:
+    def _rule_to_api(r: dict[str, Any]) -> dict[str, Any]:
         """
         Convert a desired rule to the API shape.
         'drop' is required (no importer semantics); 'repo' optional.
@@ -465,11 +466,11 @@ class RoutingPoliciesImporter(BaseImporter):
             out["repo"] = repo
         return out
 
-    def _repos_to_check(self, desired: Dict[str, Any]) -> List[str]:
+    def _repos_to_check(self, desired: dict[str, Any]) -> list[str]:
         """
         Repos to verify: catch_all (if non-empty) + all non-empty rule.repo values.
         """
-        repos: List[str] = []
+        repos: list[str] = []
         catch = _norm_str(desired.get("catch_all"))
         if catch:
             repos.append(catch)
@@ -495,9 +496,9 @@ class RoutingPoliciesImporter(BaseImporter):
     def _monitor_result(
         client: DirectorClient,  # noqa: ARG002 (kept for parity with Repos importer)
         node: NodeRef,           # noqa: ARG002
-        res: Dict[str, Any],
+        res: dict[str, Any],
         action: str,             # noqa: ARG002
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Normalize async monitor result (kept minimal and consistent)."""
         status = "Success"
         mon_ok = None

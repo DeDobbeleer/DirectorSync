@@ -3,7 +3,6 @@ Logging utilities for DirectorSync v2.
 """
 import logging
 import os
-from typing import Optional
 
 DEF_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s "
@@ -36,5 +35,5 @@ def setup_logging(level: str | None = None) -> None:
 
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(name or "lp_v2")

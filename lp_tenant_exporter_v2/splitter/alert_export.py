@@ -1,5 +1,4 @@
 # splitter/alert_export.py
-# -*- coding: utf-8 -*-
 """
 Export alerts from a configuration JSON (AIO or dedicated Search-Head) to flat
 DataFrames and route them per tenant according to the 'repos' routing logic.
@@ -27,9 +26,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any
 
 import pandas as pd
 
@@ -53,7 +51,7 @@ def _ci_get(d: dict, key: str):
     return None
 
 
-def _find_user_list_list(obj: dict) -> List[dict]:
+def _find_user_list_list(obj: dict) -> list[dict]:
     """Return the list Sync/AlertRules/Alert (case-insensitive)."""
     sync = _ci_get(obj, "Sync") or _ci_get(obj, "sync") or {}
     ul = _ci_get(sync, "UserDefinedList") or {}
@@ -61,7 +59,7 @@ def _find_user_list_list(obj: dict) -> List[dict]:
         ul = [ul]
     return ul or []
 
-def _find_alert_list(obj: dict) -> List[dict]:
+def _find_alert_list(obj: dict) -> list[dict]:
     """Return the list Sync/AlertRules/Alert (case-insensitive)."""
     sync = _ci_get(obj, "Sync") or _ci_get(obj, "sync") or {}
     ar = _ci_get(sync, "AlertRules") or {}
@@ -71,7 +69,7 @@ def _find_alert_list(obj: dict) -> List[dict]:
     return alerts or []
 
 
-def _flatten(obj: Any, prefix: str, out: Dict[str, Any]):
+def _flatten(obj: Any, prefix: str, out: dict[str, Any]):
     """
     Flatten nested dicts into dot-notated columns. Lists are JSON-encoded
     to keep them lossless.
@@ -104,9 +102,9 @@ def load_userlist_df(source_json: str | Path) -> pd.DataFrame:
     if not user_list:
         return []
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for i, a in enumerate(user_list):
-        row: Dict[str, Any] = {"user_list_index": i}
+        row: dict[str, Any] = {"user_list_index": i}
         _flatten(a, "", row)
         rows.append(row)
 
@@ -125,9 +123,9 @@ def load_alerts_df(source_json: str | Path) -> pd.DataFrame:
     if not alerts:
         return pd.DataFrame(columns=["alert_index"])
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for i, a in enumerate(alerts):
-        row: Dict[str, Any] = {"alert_index": i}
+        row: dict[str, Any] = {"alert_index": i}
         _flatten(a, "", row)
 
         # Ensure 'settings.repos' exists (JSON list) for routing
@@ -217,20 +215,20 @@ def _infer_type_from_collection_name(name: str) -> str | None:
     return None
 
 
-def _iter_notification_collections(alert: dict) -> List[Tuple[str, List[dict], str | None]]:
+def _iter_notification_collections(alert: dict) -> list[tuple[str, list[dict], str | None]]:
     """
     Discover plausible notification lists inside an alert.
     Returns a list of tuples: (source_path, list_of_notifications, type_hint).
     We check first level and 'settings' sub-dict for any key that contains 'notification'
     (case-insensitive). Values can be a list or a single dict.
     """
-    results: List[Tuple[str, List[dict], str | None]] = []
+    results: list[tuple[str, list[dict], str | None]] = []
 
     def _collect_from_dict(base: dict, base_path: str):
         for k, v in base.items():
             if "notification" not in str(k).lower():
                 continue
-            lst: List[dict] = []
+            lst: list[dict] = []
             if isinstance(v, list):
                 lst = [x for x in v if isinstance(x, dict)]
             elif isinstance(v, dict):
@@ -279,7 +277,7 @@ def load_alert_notifications_df(source_json: str | Path) -> pd.DataFrame:
     if not alerts:
         return pd.DataFrame(columns=base_cols)
 
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
 
     for i, alert in enumerate(alerts):
         # parent alert context
@@ -315,7 +313,7 @@ def load_alert_notifications_df(source_json: str | Path) -> pd.DataFrame:
                 normalized = _normalize_for_json(masked)
                 params_json = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
-                row: Dict[str, Any] = {
+                row: dict[str, Any] = {
                     "alert_index": i,
                     "alert_name": name,
                     "settings.repos": repos_json,

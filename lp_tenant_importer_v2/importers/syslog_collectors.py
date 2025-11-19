@@ -30,15 +30,16 @@ Diff subset (node-agnostic):
 """
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter
 from ..core.config import NodeRef
 from ..core.director_client import DirectorClient
 from ..utils.validators import ValidationError
+from .base import BaseImporter
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def _s(x: Any) -> str:
     return "" if _is_blank(x) else str(x).strip()
 
 
-def _extract_from_dict(d: Dict[str, Any]) -> str:
+def _extract_from_dict(d: dict[str, Any]) -> str:
     """Best-effort extraction of a meaningful string from dict items returned by some APIs."""
     for k in ("ip", "hostname", "name", "address", "value"):
         if k in d and _s(d[k]):
@@ -75,7 +76,7 @@ def _extract_from_dict(d: Dict[str, Any]) -> str:
     return _s(d)
 
 
-def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str]:
+def _split_multi(cell: Any, seps: tuple[str, ...] = ("|", ",", ";")) -> list[str]:
     """
     Split a multi-valued cell by allowed separators, trim, dedupe, sort.
 
@@ -86,7 +87,7 @@ def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",", ";")) -> List[str
     """
     # list-like → aplatir proprement
     if isinstance(cell, (list, tuple, set)):
-        parts: List[str] = []
+        parts: list[str] = []
         for e in cell:
             if isinstance(e, dict):
                 parts.append(_extract_from_dict(e))
@@ -137,8 +138,8 @@ class _DesiredSC:
     parser: str
     charset: str
     proxy_condition: str  # "use_as_proxy" | "uses_proxy" | "None"
-    proxy_ips: List[str]
-    hostnames: List[str]
+    proxy_ips: list[str]
+    hostnames: list[str]
     processpolicy_name: str  # empty string means "not set"
 
 
@@ -166,13 +167,13 @@ class SyslogCollectorsImporter(BaseImporter):
     RESOURCE = "SyslogCollector"
 
     # Per-node caches
-    _device_name_to_id: Dict[str, Dict[str, str]]
-    _device_name_to_ip: Dict[str, Dict[str, str]]
-    _pp_name_to_id: Dict[str, Dict[str, str]]
-    _pp_id_to_name: Dict[str, Dict[str, str]]
-    _available_proxy_ips: Dict[str, set]
-    _xlsx_policy_id_to_clean_name: Dict[str, str]
-    _sheet_key: Optional[str]
+    _device_name_to_id: dict[str, dict[str, str]]
+    _device_name_to_ip: dict[str, dict[str, str]]
+    _pp_name_to_id: dict[str, dict[str, str]]
+    _pp_id_to_name: dict[str, dict[str, str]]
+    _available_proxy_ips: dict[str, set]
+    _xlsx_policy_id_to_clean_name: dict[str, str]
+    _sheet_key: str | None
 
     def __init__(self) -> None:
         super().__init__()
@@ -186,7 +187,7 @@ class SyslogCollectorsImporter(BaseImporter):
 
     # ----------------------------- validate --------------------------------
 
-    def _choose_sheet_with_rows(self, sheets: Dict[str, pd.DataFrame]) -> Optional[str]:
+    def _choose_sheet_with_rows(self, sheets: dict[str, pd.DataFrame]) -> str | None:
         """Pick the first candidate sheet containing at least one app == 'SyslogCollector' row."""
         for s in self.sheet_names:
             if s not in sheets:
@@ -204,7 +205,7 @@ class SyslogCollectorsImporter(BaseImporter):
                 return s
         return None
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         """
         Choose sheet robustly and perform minimal structural validation.
         If no candidate sheet has SyslogCollector rows, we no-op gracefully.
@@ -245,7 +246,7 @@ class SyslogCollectorsImporter(BaseImporter):
         if xpp is not None:
             xpp.columns = [str(c).strip() for c in xpp.columns]
 
-            def pick_col(df_: pd.DataFrame, *cands: str) -> Optional[str]:
+            def pick_col(df_: pd.DataFrame, *cands: str) -> str | None:
                 for c in cands:
                     if c in df_.columns:
                         return c
@@ -268,7 +269,7 @@ class SyslogCollectorsImporter(BaseImporter):
 
     # -------------------------- XLSX → desired -----------------------------
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         """
         Yield desired rows in three-phase order:
           1) use_as_proxy
@@ -282,7 +283,7 @@ class SyslogCollectorsImporter(BaseImporter):
         # lowercase map for tolerant header matching
         cols = {str(c).strip().lower(): str(c) for c in df.columns}
 
-        def col(*names: str) -> Optional[str]:
+        def col(*names: str) -> str | None:
             aliases = {
                 "device_name": ("device_name", "device", "name"),
                 "parser": ("parser",),
@@ -321,9 +322,9 @@ class SyslogCollectorsImporter(BaseImporter):
         if df.empty:
             return
 
-        phase_A: List[Dict[str, Any]] = []
-        phase_B: List[Dict[str, Any]] = []
-        phase_C: List[Dict[str, Any]] = []
+        phase_A: list[dict[str, Any]] = []
+        phase_B: list[dict[str, Any]] = []
+        phase_C: list[dict[str, Any]] = []
 
         for _, row in df.iterrows():
             device_name = _s(row[c_dev])
@@ -366,10 +367,10 @@ class SyslogCollectorsImporter(BaseImporter):
     # --------------------------- canonical (diff) --------------------------
 
     @staticmethod
-    def key_fn(desired_row: Dict[str, Any]) -> str:
+    def key_fn(desired_row: dict[str, Any]) -> str:
         return _s(desired_row.get("device_name"))
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return {
             "proxy_condition": _norm_condition(desired_row.get("proxy_condition")),
             "parser": _s(desired_row.get("parser")),
@@ -379,7 +380,7 @@ class SyslogCollectorsImporter(BaseImporter):
             "processpolicy_name": _s(desired_row.get("processpolicy_name")),
         }
 
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         # existing_obj['proxy_ips'] / ['hostnames'] sont déjà normalisés via _split_multi
@@ -394,7 +395,7 @@ class SyslogCollectorsImporter(BaseImporter):
 
     # ----------------------------- read existing ---------------------------
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> dict[str, dict[str, Any]]:
         """
         Return {device_name -> existing_obj} for the node, and fill caches:
           - device name → id / ip
@@ -414,7 +415,7 @@ class SyslogCollectorsImporter(BaseImporter):
             dev_items = dev_raw
         dev_items = [x for x in (dev_items or []) if isinstance(x, dict)]
 
-        def _dev_ip(d: Dict[str, Any]) -> str:
+        def _dev_ip(d: dict[str, Any]) -> str:
             for k in ("ip", "ip_address", "ipaddress", "device_ip", "management_ip"):
                 v = d.get(k)
                 if _s(v):
@@ -447,7 +448,7 @@ class SyslogCollectorsImporter(BaseImporter):
                 self._pp_id_to_name[node.id][pid] = nm
 
         # --- Existing SyslogCollector per device + proxy index by device IP ---
-        existing: Dict[str, Dict[str, Any]] = {}
+        existing: dict[str, dict[str, Any]] = {}
         proxy_ips: set = set()
 
         for dev in dev_items:
@@ -474,7 +475,7 @@ class SyslogCollectorsImporter(BaseImporter):
                 if _s(p.get("app")) != "SyslogCollector":
                     continue
 
-                obj: Dict[str, Any] = {
+                obj: dict[str, Any] = {
                     "id": _s(p.get("uuid") or p.get("id")),
                     "device_id": dev_id,
                     "device_name": dev_name,
@@ -504,7 +505,7 @@ class SyslogCollectorsImporter(BaseImporter):
 
     # --------------------------- payload builders ---------------------------
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         """
         Build POST payload. Device id and PP id are resolved using per-node caches
         and the _current_node sentinel set in apply().
@@ -517,7 +518,7 @@ class SyslogCollectorsImporter(BaseImporter):
         if not dev_id:
             raise RuntimeError(f"Device not found: '{_s(desired_row.get('device_name'))}'")
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "device_id": dev_id,
             "proxy_condition": _norm_condition(desired_row.get("proxy_condition")),
             "parser": _s(desired_row.get("parser")),
@@ -547,7 +548,7 @@ class SyslogCollectorsImporter(BaseImporter):
             payload["hostname"] = host
         return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         return self.build_payload_create(desired_row)
 
     # -------------------------------- apply --------------------------------
@@ -558,8 +559,8 @@ class SyslogCollectorsImporter(BaseImporter):
         pool_uuid: str,
         node: NodeRef,
         decision,
-        existing_id: Optional[str],
-    ) -> Dict[str, Any]:
+        existing_id: str | None,
+    ) -> dict[str, Any]:
         """
         Apply decision with strict validation and dependency checks on the *node*.
         Returns a dict for BaseImporter to enrich the report row.

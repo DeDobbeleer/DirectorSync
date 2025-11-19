@@ -16,13 +16,14 @@ explicitly provided as columns in the spreadsheet (defensive default).
 """
 
 import logging
-from typing import Any, Dict, Iterable, List, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
 from ..utils.validators import ValidationError
+from .base import BaseImporter, NodeRef
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def _to_str(v: Any) -> str:
     return str(v).strip()
 
 
-def _split_multi(cell: Any, seps: Tuple[str, ...] = ("|", ",")) -> List[str]:
+def _split_multi(cell: Any, seps: tuple[str, ...] = ("|", ",")) -> list[str]:
     """Split multi-valued cells on '|' or ',' and return trimmed parts (empty if none)."""
     raw = _to_str(cell)
     if not raw:
@@ -95,8 +96,8 @@ class DevicesImporter(BaseImporter):
     DG_RESOURCE = "DeviceGroups"
 
     # per-node caches
-    _dg_name_to_id: Dict[str, Dict[str, str]]  # node_id -> {name -> id}
-    _dg_id_to_name: Dict[str, Dict[str, str]]  # node_id -> {id -> name}
+    _dg_name_to_id: dict[str, dict[str, str]]  # node_id -> {name -> id}
+    _dg_id_to_name: dict[str, dict[str, str]]  # node_id -> {id -> name}
 
     def __init__(self) -> None:
         self._dg_name_to_id = {}
@@ -104,7 +105,7 @@ class DevicesImporter(BaseImporter):
 
     # ---------------------------- validation ---------------------------------
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         """Custom validation with *alias* and *case* tolerance for columns."""
         if "Device" not in sheets:
             raise ValidationError("Missing required sheet: Device")
@@ -130,7 +131,7 @@ class DevicesImporter(BaseImporter):
 
     # ------------------------- XLSX → desired rows ---------------------------
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         df: pd.DataFrame = sheets["Device"].copy()
         # Map columns case-insensitively and accept common aliases
         cols = {str(c).strip().lower(): str(c) for c in df.columns}
@@ -161,7 +162,7 @@ class DevicesImporter(BaseImporter):
             name = _to_str(row[c_name])
             if not name:
                 continue
-            desired: Dict[str, Any] = {
+            desired: dict[str, Any] = {
                 "name": name,
                 "ip": [_to_str(x) for x in _split_multi(row[c_ip])],
                 "availability": _norm_risk(row[c_av]),
@@ -184,10 +185,10 @@ class DevicesImporter(BaseImporter):
     # ------------------------ canonicalization (diff) ------------------------
 
     @staticmethod
-    def key_fn(desired_row: Dict[str, Any]) -> str:
+    def key_fn(desired_row: dict[str, Any]) -> str:
         return _to_str(desired_row.get("name"))
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return {
             "ip": sorted([_to_str(x) for x in desired_row.get("ip", [])]),
             "timezone": _to_str(desired_row.get("timezone")),
@@ -197,7 +198,7 @@ class DevicesImporter(BaseImporter):
             "dg_names": sorted([_to_str(x) for x in desired_row.get("dg_names", [])]),
         }
 
-    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         # risks may be at top-level or nested under risk_values
@@ -227,8 +228,8 @@ class DevicesImporter(BaseImporter):
         if node.id in self._dg_name_to_id and node.id in self._dg_id_to_name:
             return
         raw = client.list_resource(pool_uuid, node.id, self.DG_RESOURCE) or []
-        id_to_name: Dict[str, str] = {}
-        name_to_id: Dict[str, str] = {}
+        id_to_name: dict[str, str] = {}
+        name_to_id: dict[str, str] = {}
         if isinstance(raw, list):
             for item in raw:
                 if not isinstance(item, dict):
@@ -258,7 +259,7 @@ class DevicesImporter(BaseImporter):
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         self._ensure_dg_maps(client, pool_uuid, node)
         # List devices; payload may be list or a dict with `data`/`items`/`devices`.
         data = client.list_resource(pool_uuid, node.id, self.RESOURCE) or []
@@ -277,7 +278,7 @@ class DevicesImporter(BaseImporter):
             items = []
 
         id_to_name = self._dg_id_to_name.get(node.id, {})
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for it in items:
             name = _to_str(it.get("name"))
             if not name:
@@ -296,10 +297,10 @@ class DevicesImporter(BaseImporter):
 
     # --------------------------- payload builders ----------------------------
 
-    def _dg_ids_for_names(self, node: NodeRef, names: List[str]) -> Tuple[List[str], List[str]]:
+    def _dg_ids_for_names(self, node: NodeRef, names: list[str]) -> tuple[list[str], list[str]]:
         name_to_id = self._dg_name_to_id.get(node.id, {})
-        ids: List[str] = []
-        missing: List[str] = []
+        ids: list[str] = []
+        missing: list[str] = []
         for n in names or []:
             key = _to_str(n)
             gid = name_to_id.get(key) or name_to_id.get(key.strip())
@@ -309,8 +310,8 @@ class DevicesImporter(BaseImporter):
                 missing.append(key)
         return ids, missing
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "name": _to_str(desired_row.get("name")),
             "ip": [_to_str(x) for x in desired_row.get("ip", []) if _to_str(x)],
             "availability": _norm_risk(desired_row.get("availability")),
@@ -338,7 +339,7 @@ class DevicesImporter(BaseImporter):
         # We *do not* inject empty lists for distributed_collector/logpolicy by default.
         return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         p = self.build_payload_create(desired_row)
         if existing_obj and existing_obj.get("id"):
             p["id"] = _to_str(existing_obj["id"])
@@ -368,7 +369,6 @@ class DevicesImporter(BaseImporter):
             dict stats: {"updated": int, "noop": int, "missing": int, "errors": int}
         """
         from collections import defaultdict
-        from typing import DefaultDict, Set, Dict, Any, List
 
         log.info("device_groups: reconciling memberships [node=%s]", node.name)
 
@@ -396,7 +396,7 @@ class DevicesImporter(BaseImporter):
         else:
             dev_items = []
 
-        target: DefaultDict[str, Set[str]] = defaultdict(set)  # group_id -> {device_id}
+        target: defaultdict[str, set[str]] = defaultdict(set)  # group_id -> {device_id}
         for it in dev_items:
             dev_id = _to_str(it.get("id"))
             if not dev_id:
@@ -432,7 +432,7 @@ class DevicesImporter(BaseImporter):
             dg_items = []
 
         # id -> {"name": str, "description": str, "devices": set(str)}
-        current_by_id: Dict[str, Dict[str, Any]] = {}
+        current_by_id: dict[str, dict[str, Any]] = {}
         for g in dg_items:
             gid = _to_str(g.get("id"))
             if not gid:
@@ -535,7 +535,7 @@ class DevicesImporter(BaseImporter):
         node: NodeRef,
         decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         # Remember node for DG name→id resolution during payload build
         self._current_node = node  # type: ignore[attr-defined]
         desired = decision.desired or {}

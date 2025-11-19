@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 from dotenv import find_dotenv, load_dotenv
@@ -50,8 +50,8 @@ class TenantConfig:
     """
     name: str
     pool_uuid: str
-    siems: Dict[str, List[NodeRef]]
-    defaults: Dict[str, Any]
+    siems: dict[str, list[NodeRef]]
+    defaults: dict[str, Any]
 
 
 @dataclass
@@ -62,7 +62,7 @@ class Config:
     tenants_file: Path
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         """Load `.env` and build a :class:`Config` instance.
         Raises:
             ConfigError: If required environment variables are missing.
@@ -94,13 +94,13 @@ class Config:
 
         return cls(director_url=director_url, api_token=api_token, tenants_file=Path(tenants_file))
 
-    def load_tenants(self) -> Dict[str, Any]:
+    def load_tenants(self) -> dict[str, Any]:
         """Read and parse the tenants YAML into a raw dict.
 
         Raises:
             ConfigError: If mandatory top-level keys are missing.
         """
-        with open(self.tenants_file, "r", encoding="utf-8") as fh:
+        with open(self.tenants_file, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         if "tenants" not in data or "defaults" not in data:
             raise ConfigError("tenants.yml must contain 'tenants' and 'defaults' top-level keys")
@@ -131,8 +131,8 @@ class Config:
         if "target" not in defaults:
             raise ConfigError("Global 'defaults.target' missing in tenants.yml")
 
-        def to_nodes(lst: Optional[List[Dict[str, str]]]) -> List[NodeRef]:
-            res: List[NodeRef] = []
+        def to_nodes(lst: list[dict[str, str]] | None) -> list[NodeRef]:
+            res: list[NodeRef] = []
             for it in lst or []:
                 nid, nname, nip, nip_private = it.get("id"), it.get("name"), it.get("ip", ""), it.get("ip_private", "")
                 if not nid or not nname:
@@ -153,7 +153,7 @@ class Config:
             defaults=defaults,
         )
 
-    def get_targets(self, tenant: TenantConfig, element: str) -> List[NodeRef]:
+    def get_targets(self, tenant: TenantConfig, element: str) -> list[NodeRef]:
         """Resolve target nodes for a given element from **global** defaults only.
 
         Args:
@@ -176,7 +176,7 @@ class Config:
             "all_in_one": tenant.siems["all_in_one"],
         }
 
-        nodes: List[NodeRef] = []
+        nodes: list[NodeRef] = []
         for role in targets_cfg:
             nodes.extend(role_to_nodes.get(role, []))
         # Dedup by (id, name)

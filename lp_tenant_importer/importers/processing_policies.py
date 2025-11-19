@@ -1,9 +1,9 @@
-import logging
-import pandas as pd
-from typing import Dict, List, Any, Tuple
 import json
-import requests
+import logging
+from typing import Any
 
+import pandas as pd
+import requests
 from core.http import DirectorClient
 from core.nodes import Node
 
@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 def import_processing_policies_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List[Node]],
+    nodes: dict[str, list[Node]],
     xlsx_path: str,
     dry_run: bool,
-    targets: List[str],
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str],
+) -> tuple[list[dict[str, Any]], bool]:
     """Import processing policies for the specified nodes.
 
     Reads the 'ProcessingPolicy', 'EnrichmentPolicy', and 'RoutingPolicy' sheets from the XLSX file,
@@ -63,8 +63,8 @@ def import_processing_policies_for_nodes(
         return [], True
 
     # Build source ID to name mappings
-    ep_mapping = dict(zip(ep_df["policy_id"], ep_df["policy_name"]))
-    rp_mapping = dict(zip(rp_df["policy_id"], rp_df["cleaned_policy_name"]))
+    ep_mapping = dict(zip(ep_df["policy_id"], ep_df["policy_name"], strict=False))
+    rp_mapping = dict(zip(rp_df["policy_id"], rp_df["cleaned_policy_name"], strict=False))
 
     # Process per node
     for target_type in targets:
@@ -151,7 +151,7 @@ def import_processing_policies_for_nodes(
                     continue
 
                 # Map enrich_policy
-                enrich_policy_name = ep_mapping.get(enrich_policy_src_id, None) if enrich_policy_src_id else None
+                enrich_policy_name = ep_mapping.get(enrich_policy_src_id) if enrich_policy_src_id else None
                 enrich_policy_dest_id = "None" if not enrich_policy_src_id else enrich_policies.get(enrich_policy_name, "None")
                 if enrich_policy_src_id and enrich_policy_dest_id == "None":
                     row_result = {
@@ -186,7 +186,7 @@ def import_processing_policies_for_nodes(
                     logger.warning("Skipping %s on %s: %s", policy_name, logpoint_id, row_result["error"])
                     continue
 
-                routing_policy_name = rp_mapping.get(routing_policy_src_id, None)
+                routing_policy_name = rp_mapping.get(routing_policy_src_id)
                 if not routing_policy_name:
                     row_result = {
                         "siem": logpoint_id,
@@ -256,9 +256,9 @@ def _process_policy_action(
                 pool_uuid: str,
                 logpoint_id: str,
                 dry_run: bool,
-                policy: Dict[str, Any],
-                existing_policy: Dict[str, Any] = None
-            ) -> Tuple[str, str, str]:
+                policy: dict[str, Any],
+                existing_policy: dict[str, Any] = None
+            ) -> tuple[str, str, str]:
     """Determine and execute action for a single processing policy.
 
     Args:

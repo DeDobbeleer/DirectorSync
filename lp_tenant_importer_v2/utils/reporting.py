@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 
 def _derive_status(op_result: dict) -> str:
     """Final status for the row, with monitor_ok taking precedence."""
-    mon_ok = op_result.get("monitor_ok", None)
+    mon_ok = op_result.get("monitor_ok")
     if mon_ok is True:
         return "Success"
     if mon_ok is False:
@@ -32,7 +32,7 @@ def _monitor_icon(mon_ok: object) -> str:
     return "—"
 
 
-def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_row(row: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize a raw result row so the table is consistent:
     - status derived from monitor_ok when present,
@@ -68,7 +68,7 @@ def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return r
 
 
-def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
+def print_rows(rows: list[dict[str, Any]], fmt: str = "table") -> None:
     """Render importer result rows as a table or JSON.
 
     Args:
@@ -111,7 +111,7 @@ def print_rows(rows: List[Dict[str, Any]], fmt: str = "table") -> None:
         return json.dumps(norm_rows, indent=2)
 
     # Table mode
-    cols: List[str] = []
+    cols: list[str] = []
     for c in candidates:
         if (c in mandatory) or any(_present(r.get(c)) for r in norm_rows):
             cols.append(c)

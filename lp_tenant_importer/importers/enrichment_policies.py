@@ -1,11 +1,8 @@
 import logging
-import pandas as pd
-from typing import Dict, List, Any, Tuple
-import json
-import numpy as np
+from typing import Any
 
-from core.http import DirectorClient
-from core.nodes import Node
+import numpy as np
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +11,7 @@ def build_enrichment_payloads(
     df_policy: pd.DataFrame,
     df_rules: pd.DataFrame,
     df_criteria: pd.DataFrame
-) -> Tuple[Dict[str, Dict], Dict[str, List[str]]]:
+) -> tuple[dict[str, dict], dict[str, list[str]]]:
     """
     Builds the enrichment policy payloads from the provided DataFrames.
 
@@ -121,10 +118,10 @@ def build_enrichment_payloads(
 def check_existing_per_node(
     client,
     pool_uuid: str,
-    node: List[Dict],
-    payloads: Dict[str, Dict],
-    es_per_policy: Dict[str, List[str]]
-) -> Dict[str, Dict]:
+    node: list[dict],
+    payloads: dict[str, dict],
+    es_per_policy: dict[str, list[str]]
+) -> dict[str, dict]:
     """
     Checks existing Enrichment Policies (EP) and Enrichment Sources (ES) per node.
 
@@ -141,7 +138,7 @@ def check_existing_per_node(
     Returns:
     Dict[str, Dict]: Dictionary of results per policy_id, with node-specific actions.
     """
-    results = {policy_id: {} for policy_id in payloads.keys()}
+    results = {policy_id: {} for policy_id in payloads}
 
 
     node_id = node.id
@@ -213,7 +210,7 @@ def check_existing_per_node(
 
     return results
 
-def _compare_specifications(existing: List[Dict], new: List[Dict]) -> bool:
+def _compare_specifications(existing: list[dict], new: list[dict]) -> bool:
     """
     Compares two lists of specifications for equality.
 
@@ -228,7 +225,7 @@ def _compare_specifications(existing: List[Dict], new: List[Dict]) -> bool:
     """
     if len(existing) != len(new):
         return False
-    for ex_spec, new_spec in zip(existing, new):
+    for ex_spec, new_spec in zip(existing, new, strict=False):
         if ex_spec.get('source') != new_spec.get('source'):
             return False
         
@@ -246,10 +243,10 @@ def _compare_specifications(existing: List[Dict], new: List[Dict]) -> bool:
 def execute_actions_per_node(
     client,
     pool_uuid: str,
-    nodes: List[Dict],
-    payloads: Dict[str, Dict],
-    check_results: Dict[str, Dict]
-) -> List[Dict]:
+    nodes: list[dict],
+    payloads: dict[str, dict],
+    check_results: dict[str, dict]
+) -> list[dict]:
     """
     Executes the actions (CREATE, UPDATE) for each policy per node.
 
@@ -339,8 +336,8 @@ def import_enrichment_policies_for_nodes(
     nodes: Any,
     xlsx_path: str,
     dry_run: bool = False,
-    targets: List[str] = None
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str] = None
+) -> tuple[list[dict[str, Any]], bool]:
     """
     Imports enrichment policies for specified nodes from an XLSX file.
 

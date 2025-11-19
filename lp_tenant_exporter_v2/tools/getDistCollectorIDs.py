@@ -43,6 +43,7 @@ No external deps required (pure Python). Tested on Python 3.10+.
 
 """
 from __future__ import annotations
+
 import argparse
 import json
 import re
@@ -50,7 +51,6 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 SEPARATORS_REGEX = re.compile(r"[;,\n\r\t\s]+")
 
@@ -58,7 +58,7 @@ SEPARATORS_REGEX = re.compile(r"[;,\n\r\t\s]+")
 class Options:
     backend_json: Path
     out_dir: Path
-    tenants: List[str]
+    tenants: list[str]
     collector_field: str = "distributed_collector"
     name_field: str = "name"
     left_of_colon: bool = False
@@ -67,10 +67,10 @@ class Options:
     verbose: bool = False
 
 
-def load_backend(path: Path, verbose: bool = False) -> Dict:
+def load_backend(path: Path, verbose: bool = False) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Backend JSON not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict) or "Sync" not in data or "Device" not in data["Sync"]:
         raise ValueError("Unexpected backend JSON. Expected dict with Sync.Device list.")
@@ -79,7 +79,7 @@ def load_backend(path: Path, verbose: bool = False) -> Dict:
     return data
 
 
-def parse_collectors(value) -> List[str]:
+def parse_collectors(value) -> list[str]:
     """Parse a distributed_collector value into a list of clean IDs."""
     if value is None:
         return []
@@ -106,8 +106,8 @@ def parse_collectors(value) -> List[str]:
     return [s] if s else []
 
 
-def normalize_collectors(parts: List[str], left_of_colon: bool) -> List[str]:
-    clean: List[str] = []
+def normalize_collectors(parts: list[str], left_of_colon: bool) -> list[str]:
+    clean: list[str] = []
     seen = set()
     for p in parts:
         if left_of_colon and ":" in p:
@@ -119,7 +119,7 @@ def normalize_collectors(parts: List[str], left_of_colon: bool) -> List[str]:
     return clean
 
 
-def match_tenant_by_name(device_name: str, tenants: List[str]) -> Optional[str]:
+def match_tenant_by_name(device_name: str, tenants: list[str]) -> str | None:
     name_l = (device_name or "").lower()
     # Longest slug first to avoid partial collisions
     for slug in sorted(tenants, key=len, reverse=True):
@@ -128,7 +128,7 @@ def match_tenant_by_name(device_name: str, tenants: List[str]) -> Optional[str]:
     return None
 
 
-def top_vote(tenant_counts: Dict[str, int], tenants_order: List[str], tie_policy: str) -> Tuple[str, int, bool]:
+def top_vote(tenant_counts: dict[str, int], tenants_order: list[str], tie_policy: str) -> tuple[str, int, bool]:
     """Return (tenant, votes, tie) from counts for a collector."""
     if not tenant_counts:
         return ("Unassigned", 0, False)
@@ -148,11 +148,11 @@ def top_vote(tenant_counts: Dict[str, int], tenants_order: List[str], tie_policy
         return (winners[0], max_votes, False)
 
 
-def aggregate_majority(backend: Dict, opts: Options) -> Tuple[List[Tuple[str, str, int, bool, Dict[str,int]]], Dict[str, List[str]]]:
+def aggregate_majority(backend: dict, opts: Options) -> tuple[list[tuple[str, str, int, bool, dict[str,int]]], dict[str, list[str]]]:
     devices = backend["Sync"]["Device"]
 
     # 1) Count votes per collector from devices that DO have tenant in name
-    per_collector_counts: Dict[str, Counter] = defaultdict(Counter)
+    per_collector_counts: dict[str, Counter] = defaultdict(Counter)
 
     for dev in devices:
         name = str(dev.get(opts.name_field, ""))
@@ -167,8 +167,8 @@ def aggregate_majority(backend: Dict, opts: Options) -> Tuple[List[Tuple[str, st
             per_collector_counts[cid][tenant] += 1
 
     # 2) Build majority mapping per collector
-    mapping_rows: List[Tuple[str, str, int, bool, Dict[str,int]]] = []  # (collector_id, tenant, votes, tie, breakdown)
-    tenant_to_collectors: Dict[str, List[str]] = defaultdict(list)
+    mapping_rows: list[tuple[str, str, int, bool, dict[str,int]]] = []  # (collector_id, tenant, votes, tie, breakdown)
+    tenant_to_collectors: dict[str, list[str]] = defaultdict(list)
 
     for cid, counts in sorted(per_collector_counts.items()):
         # convert Counter to regular dict for JSON
@@ -187,8 +187,9 @@ def aggregate_majority(backend: Dict, opts: Options) -> Tuple[List[Tuple[str, st
 
 # -------------------- Writers (CSV and Markdown) --------------------
 
-def write_csv_mapping(rows: List[Tuple[str, str, int, bool, Dict[str,int]]], out_path: Path) -> None:
-    import csv, json
+def write_csv_mapping(rows: list[tuple[str, str, int, bool, dict[str,int]]], out_path: Path) -> None:
+    import csv
+    import json
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["collector_id", "tenant", "votes", "tie", "breakdown_json"])
@@ -196,7 +197,7 @@ def write_csv_mapping(rows: List[Tuple[str, str, int, bool, Dict[str,int]]], out
             w.writerow([cid, tenant, votes, str(tie).lower(), json.dumps(breakdown, ensure_ascii=False)])
 
 
-def write_csv_summary(tenant_to_collectors: Dict[str, List[str]], out_path: Path) -> None:
+def write_csv_summary(tenant_to_collectors: dict[str, list[str]], out_path: Path) -> None:
     import csv
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
@@ -205,7 +206,7 @@ def write_csv_summary(tenant_to_collectors: Dict[str, List[str]], out_path: Path
             w.writerow([tenant, ", ".join(tenant_to_collectors[tenant])])
 
 
-def write_md_table(headers: List[str], rows: List[List[str]], out_path: Path) -> None:
+def write_md_table(headers: list[str], rows: list[list[str]], out_path: Path) -> None:
     # Build Markdown table content
     lines = []
     lines.append("| " + " | ".join(headers) + " |")
@@ -215,10 +216,10 @@ def write_md_table(headers: List[str], rows: List[List[str]], out_path: Path) ->
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_md_mapping(rows: List[Tuple[str, str, int, bool, Dict[str,int]]], out_path: Path) -> None:
+def write_md_mapping(rows: list[tuple[str, str, int, bool, dict[str,int]]], out_path: Path) -> None:
     import json
     headers = ["collector_id", "tenant", "votes", "tie", "breakdown_json"]
-    md_rows: List[List[str]] = []
+    md_rows: list[list[str]] = []
     for cid, tenant, votes, tie, breakdown in rows:
         md_rows.append([
             str(cid),
@@ -230,9 +231,9 @@ def write_md_mapping(rows: List[Tuple[str, str, int, bool, Dict[str,int]]], out_
     write_md_table(headers, md_rows, out_path)
 
 
-def write_md_summary(tenant_to_collectors: Dict[str, List[str]], out_path: Path) -> None:
+def write_md_summary(tenant_to_collectors: dict[str, list[str]], out_path: Path) -> None:
     headers = ["tenant", "collector_ids"]
-    rows: List[List[str]] = []
+    rows: list[list[str]] = []
     for tenant in sorted(tenant_to_collectors.keys()):
         rows.append([tenant, ", ".join(tenant_to_collectors[tenant])])
     write_md_table(headers, rows, out_path)
@@ -254,7 +255,7 @@ def main() -> int:
 
     args = p.parse_args()
 
-    tenants_list: List[str] = [s.strip() for s in args.tenants.split(",") if s.strip()]
+    tenants_list: list[str] = [s.strip() for s in args.tenants.split(",") if s.strip()]
     opts = Options(
         backend_json=args.backend_json,
         out_dir=args.out_dir,

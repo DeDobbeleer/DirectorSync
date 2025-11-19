@@ -1,11 +1,10 @@
 
-import os
 import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional
+import os
+from typing import Any
+
 import yaml
 from dotenv import load_dotenv
-
 from logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,7 @@ def load_env() -> None:
         raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 
 
-def load_tenants_file(tenants_file: str) -> Dict[str, Any]:
+def load_tenants_file(tenants_file: str) -> dict[str, Any]:
     """Load and validate tenants YAML configuration file.
 
     Args:
@@ -45,7 +44,7 @@ def load_tenants_file(tenants_file: str) -> Dict[str, Any]:
         logger.error("Tenants file not found: %s", tenants_file)
         raise FileNotFoundError(f"Tenants file not found: {tenants_file}")
 
-    with open(tenants_file, "r", encoding="utf-8") as file:
+    with open(tenants_file, encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
 
     if not isinstance(config, dict) or "tenants" not in config:
@@ -63,7 +62,7 @@ def load_tenants_file(tenants_file: str) -> Dict[str, Any]:
     return config
 
 
-def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
+def get_tenant(config: dict[str, Any], tenant_name: str) -> dict[str, Any]:
     """Retrieve tenant configuration by name.
 
     Args:
@@ -86,7 +85,7 @@ def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
 
     if not defaults :
         logger.error("defaults not found in configuration file")
-        raise ValueError(f"defaults not found in configuration file")
+        raise ValueError("defaults not found in configuration file")
     
     tenant["defaults"] = defaults
 
@@ -105,7 +104,7 @@ def get_tenant(config: Dict[str, Any], tenant_name: str) -> Dict[str, Any]:
     return tenant
 
 
-def get_targets(tenant: Dict[str, Any], element: str) -> List[str]:
+def get_targets(tenant: dict[str, Any], element: str) -> list[str]:
     """Get target SIEM roles for a configuration element from tenant YAML.
 
     Args:

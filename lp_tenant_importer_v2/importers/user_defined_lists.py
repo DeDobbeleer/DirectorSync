@@ -56,15 +56,20 @@ Notes
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Tuple
 import ast
 import json
 import logging
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef, ValidationError, TenantConfig  # re-exported via base
 from ..core.director_client import DirectorClient
+from .base import (  # re-exported via base
+    BaseImporter,
+    NodeRef,
+    ValidationError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -88,12 +93,12 @@ def _to_int(v: Any) -> int:
         return 0
     try:
         return int(float(str(v).strip()))
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return 0
 
 
 
-def _parse_list_field(raw: Any) -> List[str]:
+def _parse_list_field(raw: Any) -> list[str]:
     """
     Parse a cell value into a clean list[str].
 
@@ -157,7 +162,7 @@ def _parse_list_field(raw: Any) -> List[str]:
             seen.add(v)
     return out
 
-def split_seconds(total_seconds: int) -> Tuple[int, int, int, int]:
+def split_seconds(total_seconds: int) -> tuple[int, int, int, int]:
     """
     Split an integer number of seconds into days, hours, minutes, seconds.
     Uses step-by-step 'defalqué' (deduct remainder) logic.
@@ -177,7 +182,7 @@ def split_seconds(total_seconds: int) -> Tuple[int, int, int, int]:
     return days, hours, minutes, seconds
 
 
-def split_seconds_dhm(total_seconds: int) -> Tuple[int, int, int]:
+def split_seconds_dhm(total_seconds: int) -> tuple[int, int, int]:
     """
     Same as above but returns only (days, hours, minutes),
     ignoring leftover seconds.
@@ -194,12 +199,12 @@ class UserDefinedListsImporter(BaseImporter):
     """
 
     resource_name: str = "user_defined_lists"
-    sheet_names: Tuple[str, ...] = ("UserDefinedList",)
+    sheet_names: tuple[str, ...] = ("UserDefinedList",)
     # Only absolute minimum here; conditional validation is done in `iter_desired`.
-    required_columns: Tuple[str, ...] = ("name", "list_type", "lists")
+    required_columns: tuple[str, ...] = ("name", "list_type", "lists")
 
     # Compare keys (subset) used by DiffEngine
-    compare_keys: Tuple[str, ...] = (
+    compare_keys: tuple[str, ...] = (
         "name",
         "lists",
         "age_limit",
@@ -210,7 +215,7 @@ class UserDefinedListsImporter(BaseImporter):
 
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Return name -> existing list object mapping for a node.
 
         Uses: GET configapi/{pool}/{node}/Lists
@@ -220,7 +225,7 @@ class UserDefinedListsImporter(BaseImporter):
         except Exception as exc:  # noqa: BLE001
             log.error("fetch_existing failed [node=%s]: %s", node.name, exc)
             raise
-        idx: Dict[str, Dict[str, Any]] = {}
+        idx: dict[str, dict[str, Any]] = {}
         for it in rows or []:
             nm = _s(it.get("name")).upper()  # API returns 'name' in UPPER
             if not nm:
@@ -229,7 +234,7 @@ class UserDefinedListsImporter(BaseImporter):
         log.info("fetch_existing: %d lists [node=%s]", len(idx), node.name)
         return idx
 
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         """Yield canonical desired rows parsed from Excel.
 
         Column set:
@@ -263,7 +268,7 @@ class UserDefinedListsImporter(BaseImporter):
             if list_type not in {"static_list", "dynamic_list"}:
                 raise ValidationError(f"Invalid list 'type': {list_type!r}")
 
-            desired: Dict[str, Any] = {
+            desired: dict[str, Any] = {
                 "name": name,
                 "list_type": list_type,
                 "lists": [],
@@ -294,11 +299,11 @@ class UserDefinedListsImporter(BaseImporter):
 
             yield desired
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:  # noqa: D401
+    def key_fn(self, desired_row: dict[str, Any]) -> str:  # noqa: D401
         """Return unique key — the list name (uppercased)."""
         return _s(desired_row.get("name")).upper()
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:  # noqa: D401
         """Comparable subset for a desired row."""
         return {
             "list_type": desired_row.get("list_type"),
@@ -307,7 +312,7 @@ class UserDefinedListsImporter(BaseImporter):
             "last_updated": str(desired_row.get("last_updated") or ""),
         }
 
-    def canon_existing(self, existing_obj: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
+    def canon_existing(self, existing_obj: dict[str, Any]) -> dict[str, Any]:  # noqa: D401
         """Comparable subset for an existing object returned by GET Lists."""
         if not isinstance(existing_obj, dict):
             return {}
@@ -328,7 +333,7 @@ class UserDefinedListsImporter(BaseImporter):
     def _resource_for_type(typ: str) -> str:
         return RESOURCE_STATIC if typ == "static_list" else RESOURCE_DYNAMIC
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         typ = _s(desired_row.get("list_type"))
         name = _s(desired_row.get("name"))
         if typ == "static_list":
@@ -347,8 +352,8 @@ class UserDefinedListsImporter(BaseImporter):
         return d
 
     def build_payload_update(
-        self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, desired_row: dict[str, Any], existing_obj: dict[str, Any]
+    ) -> dict[str, Any]:
         return self.build_payload_create(desired_row)
     
     # ------------------------ apply ------------------------
@@ -360,7 +365,7 @@ class UserDefinedListsImporter(BaseImporter):
         node: NodeRef,
         decision,  # DiffEngine.Decision
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Execute CREATE/UPDATE/NOOP based on decision.
         Delete is intentionally **opt-in** and should be wired by policy before use.

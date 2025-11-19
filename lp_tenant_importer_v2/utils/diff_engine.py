@@ -8,8 +8,7 @@ comparison between **desired** and **existing** representations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal
-
+from typing import Any, Literal
 
 Op = Literal["NOOP", "CREATE", "UPDATE", "SKIP"]
 
@@ -26,11 +25,11 @@ class Decision:
     """
     op: Op
     reason: str
-    desired: Dict[str, Any] | None = None
-    existing: Dict[str, Any] | None = None
+    desired: dict[str, Any] | None = None
+    existing: dict[str, Any] | None = None
 
 
-def decide(desired: Dict[str, Any], existing: Dict[str, Any] | None, *, compare_keys: List[str]) -> Decision:
+def decide(desired: dict[str, Any], existing: dict[str, Any] | None, *, compare_keys: list[str]) -> Decision:
     """Compute a :class:`Decision` from desired vs existing states.
 
     The comparison is limited to ``compare_keys`` so importers can ignore

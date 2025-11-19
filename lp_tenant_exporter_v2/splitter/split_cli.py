@@ -1,5 +1,4 @@
 # splitter/split_cli.py
-# -*- coding: utf-8 -*-
 """
 Wrapper CLI pour lancer le split via un template de commande JSON.
 Ajoute le paramètre --input-sh : si fourni, il sera accessible dans le template via {input_sh}.
@@ -18,6 +17,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+
 
 def main():
     ap = argparse.ArgumentParser(description="Split wrapper (template-driven)")

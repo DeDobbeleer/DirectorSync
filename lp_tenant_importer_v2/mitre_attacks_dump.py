@@ -37,8 +37,9 @@ import logging
 import os
 import time
 import warnings
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any
 
 import requests
 
@@ -58,20 +59,20 @@ LOG = logging.getLogger("mitre_dump")
 
 # ------------------------- Utilities ------------------------- #
 
-def _parse_bool(val: Optional[str], default: bool = False) -> bool:
+def _parse_bool(val: str | None, default: bool = False) -> bool:
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def load_env_file(path: Optional[Path]) -> Dict[str, str]:
+def load_env_file(path: Path | None) -> dict[str, str]:
     """Load KEY=VALUE lines from a .env file (simple parser, no external deps).
 
     - Ignores blank lines and lines starting with '#'.
     - Accepts values with optional quotes (single/double) and unescapes basic cases.
     - Returns a dict of loaded keys (without touching os.environ).
     """
-    cfg: Dict[str, str] = {}
+    cfg: dict[str, str] = {}
     if path is None:
         # Auto-detect: prefer .env in cwd if present
         auto = Path(".env")
@@ -188,7 +189,7 @@ def _follow_monitor_order(
         try:
             success = resp.json().get("response",{}).get("success", "false")
             LOG.debug(f"response - success: {success}")
-            rows: List[Dict] = resp.json().get("response",{}).get("rows", [])
+            rows: list[dict] = resp.json().get("response",{}).get("rows", [])
         except json.JSONDecodeError:
             LOG.debug("Monitor returned non-JSON; length=%d", len(resp.text))
             return {"data": resp.text}
@@ -213,7 +214,7 @@ def fetch_mitre_attacks(
     timeout: float = 30.0,
     poll_timeout: float = 60.0,
     poll_interval: float = 1.5,
-    envfile_vars: Optional[Mapping[str, str]] = None,
+    envfile_vars: Mapping[str, str] | None = None,
 ) -> Mapping[str, Any]:
     """Call the Director API and return parsed JSON (follows monitorapi if provided)."""
     # Optional suppression of TLS warnings
@@ -294,11 +295,11 @@ def _json_serializeable(val: Any) -> Any:
     return val
 
 
-def normalize_rows(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+def normalize_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Normalize rows so every value is flat and JSON-serializable."""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for row in rows:
-        flat: Dict[str, Any] = {}
+        flat: dict[str, Any] = {}
         for k, v in row.items():
             flat[str(k)] = _json_serializeable(v)
         out.append(flat)
@@ -307,7 +308,7 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
 
 # ------------------------- Writers ------------------------- #
 
-def write_json(payload: Mapping[str, Any], out_path: Optional[Path]) -> None:
+def write_json(payload: Mapping[str, Any], out_path: Path | None) -> None:
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if out_path:
         out_path.write_text(text, encoding="utf-8")
@@ -316,7 +317,7 @@ def write_json(payload: Mapping[str, Any], out_path: Optional[Path]) -> None:
         print(text)
 
 
-def write_csv_tables(tables: List[Mapping[str, Any]], out: Path) -> None:
+def write_csv_tables(tables: list[Mapping[str, Any]], out: Path) -> None:
     if pd is None:
         raise SystemExit(
             "pandas is required for CSV/XLSX export. Install with: pip install pandas openpyxl"
@@ -342,7 +343,7 @@ def write_csv_tables(tables: List[Mapping[str, Any]], out: Path) -> None:
     LOG.info("Wrote CSV: %s (%d rows)", csv_path, len(df))
 
 
-def write_xlsx_tables(tables: Mapping[str, List[Mapping[str, Any]]], out_path: Path) -> None:
+def write_xlsx_tables(tables: Mapping[str, list[Mapping[str, Any]]], out_path: Path) -> None:
     if pd is None:
         raise SystemExit(
             "pandas is required for CSV/XLSX export. Install with: pip install pandas openpyxl"
@@ -357,7 +358,7 @@ def write_xlsx_tables(tables: Mapping[str, List[Mapping[str, Any]]], out_path: P
 
 # ------------------------- CLI ------------------------- #
 
-def _read_token(cli_token: Optional[str], token_file: Optional[Path], env: Mapping[str, str]) -> str:
+def _read_token(cli_token: str | None, token_file: Path | None, env: Mapping[str, str]) -> str:
     if cli_token:
         return cli_token
     if token_file and token_file.exists():
@@ -417,7 +418,7 @@ def configure_logging(debug: bool) -> None:
     )
 
 
-def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -> Tuple[str, str, str, bool, float]:
+def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -> tuple[str, str, str, bool, float]:
     """Resolve base_url, pool_uuid, logpoint_id, verify flag, and timeout from CLI/ENV/.env.
 
     Precedence: CLI > envfile_vars > process env.
@@ -493,7 +494,7 @@ def _resolve_config(args: argparse.Namespace, envfile_vars: Mapping[str, str]) -
     return str(base_url), str(pool_uuid), str(logpoint_id), bool(verify), float(timeout)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     configure_logging(args.debug)
 

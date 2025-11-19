@@ -1,10 +1,12 @@
 # /lp_tenant_import/test_http.py
 import logging
+
 logging.basicConfig(level="DEBUG")
-from core.http import DirectorClient
-from config_loader import load_env
-import os
 import json
+import os
+
+from config_loader import load_env
+from core.http import DirectorClient
 
 # Charger .env
 load_env()

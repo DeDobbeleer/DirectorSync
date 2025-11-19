@@ -23,8 +23,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
 
 # Optional .env support
 try:
@@ -41,7 +41,7 @@ try:
         from urllib3.util.retry import Retry  # type: ignore
     except Exception:  # pragma: no cover
         Retry = None  # type: ignore
-except ImportError as exc:  # pragma: no cover
+except ImportError:  # pragma: no cover
     print("[error] Missing dependency: requests. Install with `pip install requests`.", file=sys.stderr)
     raise
 
@@ -52,7 +52,7 @@ class GitHubError(RuntimeError):
     """Raised when GitHub API returns an unexpected error."""
 
 
-def load_env_token() -> Optional[str]:
+def load_env_token() -> str | None:
     """
     Load GITHUB_TOKEN from .env or environment.
     - If python-dotenv is installed, it loads .env automatically.
@@ -75,7 +75,7 @@ def redact_token(text: str) -> str:
     return text
 
 
-def parse_repo_url(url: str) -> Tuple[str, str]:
+def parse_repo_url(url: str) -> tuple[str, str]:
     """
     Parse a GitHub repo URL and return (owner, repo).
     Accepts forms like:
@@ -158,7 +158,7 @@ def get_default_branch(session: requests.Session, owner: str, repo: str) -> str:
     return default_branch
 
 
-def get_tree_recursive(session: requests.Session, owner: str, repo: str, ref: str) -> List[dict]:
+def get_tree_recursive(session: requests.Session, owner: str, repo: str, ref: str) -> list[dict]:
     """
     List the entire repository tree (files and directories) at a given ref (branch/commit),
     using the Git Trees API with recursive=1.
@@ -176,7 +176,7 @@ def get_tree_recursive(session: requests.Session, owner: str, repo: str, ref: st
     return tree
 
 
-def matches_filters(path: str, prefix: Optional[str], exts: Optional[Iterable[str]]) -> bool:
+def matches_filters(path: str, prefix: str | None, exts: Iterable[str] | None) -> bool:
     """Return True if the given path matches the optional prefix and extension filters."""
     if prefix:
         norm_prefix = prefix.strip("/").lower()
@@ -205,7 +205,7 @@ def write_lines(paths: Iterable[str], out_file: Path) -> None:
                 fh.write("\n")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Collect GitHub 'raw' URLs into a text file."
     )

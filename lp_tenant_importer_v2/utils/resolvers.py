@@ -9,13 +9,14 @@ re-fetching data repeatedly within a single run.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Tuple
+
+from typing import Any
 
 
 class ResolverCache:
     """A tiny in-memory cache keyed by (pool_uuid, node_id, resource)."""
     def __init__(self) -> None:
-        self._cache: Dict[Tuple[str, str, str], Any] = {}
+        self._cache: dict[tuple[str, str, str], Any] = {}
 
     def get(self, pool_uuid: str, node_id: str, resource: str):
         """Return a cached value or None."""

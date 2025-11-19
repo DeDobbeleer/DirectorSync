@@ -1,15 +1,14 @@
-import logging
-import pandas as pd
-from typing import Dict, List, Any, Tuple
 import json
-import numpy as np
+import logging
+from typing import Any
 
-from core.http import DirectorClient
+import numpy as np
+import pandas as pd
 from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def build_device_group_payloads(df_group: pd.DataFrame) -> Tuple[Dict[str, Dict], Dict[str, List[str]]]:
+def build_device_group_payloads(df_group: pd.DataFrame) -> tuple[dict[str, dict], dict[str, list[str]]]:
     """
     Builds the device group payloads from the provided DataFrame.
 
@@ -59,9 +58,9 @@ def check_existing_per_node(
     client,
     pool_uuid: str,
     node: Node,
-    payloads: Dict[str, Dict],
-    es_per_group: Dict[str, List[str]]
-) -> Dict[str, Dict]:
+    payloads: dict[str, dict],
+    es_per_group: dict[str, list[str]]
+) -> dict[str, dict]:
     """
     Checks existing DeviceGroups per node.
 
@@ -78,7 +77,7 @@ def check_existing_per_node(
     Returns:
     Dict[str, Dict]: Dictionary of results per group_id, with node-specific actions.
     """
-    results = {group_id: {} for group_id in payloads.keys()}
+    results = {group_id: {} for group_id in payloads}
 
     node_id = node.id
     node_name = node.name
@@ -139,10 +138,10 @@ def check_existing_per_node(
 def execute_actions_per_node(
     client,
     pool_uuid: str,
-    nodes: List[Node],
-    payloads: Dict[str, Dict],
-    check_results: Dict[str, Dict]
-) -> List[Dict]:
+    nodes: list[Node],
+    payloads: dict[str, dict],
+    check_results: dict[str, dict]
+) -> list[dict]:
     """
     Executes the actions (CREATE, UPDATE) for each device group per node.
 
@@ -226,8 +225,8 @@ def import_device_groups_for_nodes(
     nodes: Any,
     xlsx_path: str,
     dry_run: bool = False,
-    targets: List[str] = None
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str] = None
+) -> tuple[list[dict[str, Any]], bool]:
     """
     Imports device groups for specified nodes from an XLSX file.
 

@@ -1,15 +1,14 @@
-import logging
-import pandas as pd
-from typing import Dict, List, Any, Tuple
 import json
-import numpy as np
+import logging
+from typing import Any
 
+import pandas as pd
 from core.http import DirectorClient
 from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def build_device_payloads(df_device: pd.DataFrame) -> Dict[str, Dict]:
+def build_device_payloads(df_device: pd.DataFrame) -> dict[str, dict]:
     """
     Builds the device payloads from the provided DataFrame.
 
@@ -67,8 +66,8 @@ def check_existing_per_node(
     client: DirectorClient,
     pool_uuid: str,
     node: Node,
-    payloads: Dict[str, Dict]
-) -> Dict[str, Dict]:
+    payloads: dict[str, dict]
+) -> dict[str, dict]:
     """
     Checks existing Devices per node.
 
@@ -86,7 +85,7 @@ def check_existing_per_node(
     Returns:
     Dict[str, Dict]: Dictionary of results per device_id, with node-specific actions and mapped data.
     """
-    results = {device_id: {} for device_id in payloads.keys()}
+    results = {device_id: {} for device_id in payloads}
 
     node_id = node.id
     node_name = node.name
@@ -122,7 +121,7 @@ def check_existing_per_node(
         ids = [group_map.get(n.lower()) for n in names]
         logger.debug(f"Mapping device_groups for {device_id}: names={names}, ids={ids}")
         if any(id is None for id in ids):
-            missing = [n for n, id_ in zip(names, ids) if id_ is None]
+            missing = [n for n, id_ in zip(names, ids, strict=False) if id_ is None]
             results[device_id][node_name] = {
                 'action': 'SKIP',
                 'error': f"Missing devicegroup(s): {', '.join(missing)}"
@@ -195,11 +194,11 @@ def check_existing_per_node(
 def import_devices_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List[Node]],
+    nodes: dict[str, list[Node]],
     xlsx_path: str,
     dry_run: bool = False,
-    targets: List[str] = None
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str] = None
+) -> tuple[list[dict[str, Any]], bool]:
     """
     Imports devices for specified nodes from an XLSX file.
 

@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
-from typing import Optional
 from datetime import datetime
+from pathlib import Path
 
 # Optional .env loader; silently continue if not available
 try:
@@ -79,10 +78,10 @@ def _build_log_filename(tenant: str, action: str) -> str:
 
 
 def setup_logging(
-    level: Optional[str] = None,
+    level: str | None = None,
     *,
-    tenant: Optional[str] = None,
-    action: Optional[str] = None,
+    tenant: str | None = None,
+    action: str | None = None,
 ) -> None:
     """Configure the root logger with console + optional file handlers.
 
@@ -134,6 +133,6 @@ def setup_logging(
     root.setLevel(root_level)
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     """Return a child logger with the given name."""
     return logging.getLogger(name or "lp_v2")

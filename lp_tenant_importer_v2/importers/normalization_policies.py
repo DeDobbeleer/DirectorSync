@@ -20,13 +20,14 @@ Notes
 """
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef
 from ..core.director_client import DirectorClient
 from ..utils.validators import require_columns
+from .base import BaseImporter, NodeRef
 
 log = logging.getLogger(__name__)
 
@@ -46,18 +47,18 @@ def _norm(x: Any) -> str:
     return "" if _is_blank(x) else str(x).strip()
 
 
-def _split_any(cell: Any, seps: Tuple[str, ...] = ("|", ",")) -> List[str]:
+def _split_any(cell: Any, seps: tuple[str, ...] = ("|", ",")) -> list[str]:
     s = _norm(cell)
     if not s:
         return []
-    parts: List[str] = [s]
+    parts: list[str] = [s]
     for sep in seps:
-        next_parts: List[str] = []
+        next_parts: list[str] = []
         for chunk in parts:
             next_parts.extend(chunk.split(sep))
         parts = next_parts
-    out: List[str] = []
-    seen: Set[str] = set()
+    out: list[str] = []
+    seen: set[str] = set()
     for p in (x.strip() for x in parts):
         if p and p not in seen:
             out.append(p)
@@ -90,13 +91,13 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     def __init__(self) -> None:
         super().__init__()
-        self._pkg_name_to_id: Dict[str, Dict[str, str]] = {}  # node.id -> {name:id}
-        self._pkg_id_to_name: Dict[str, Dict[str, str]] = {}  # node.id -> {id:name}
-        self._compiled_names: Dict[str, Set[str]] = {}        # node.id -> {name}
+        self._pkg_name_to_id: dict[str, dict[str, str]] = {}  # node.id -> {name:id}
+        self._pkg_id_to_name: dict[str, dict[str, str]] = {}  # node.id -> {id:name}
+        self._compiled_names: dict[str, set[str]] = {}        # node.id -> {name}
 
     # ---------- validation ----------
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         sheet = self.sheet_names[0]
         require_columns(sheets[sheet], self.required_columns, context=f"sheet '{sheet}'")
         log.info("normalization_policies: using sheet '%s'", sheet)
@@ -104,7 +105,7 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     # ---------- desired ----------
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         df: pd.DataFrame = sheets[self.sheet_names[0]]
         cols = {c.lower(): c for c in df.columns}
 
@@ -124,19 +125,19 @@ class NormalizationPoliciesImporter(BaseImporter):
                 "skip_empty": (not pkgs and not compiled),
             }
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return desired_row["name"]
 
     # ---------- canonicalization for diff ----------
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return {
             "name": desired_row.get("name", ""),
             "normalization_packages": sorted(desired_row.get("normalization_packages") or []),
             "compiled_normalizer": sorted(desired_row.get("compiled_normalizer") or []),
         }
 
-    def canon_existing(self, existing_obj: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         node_id = existing_obj.get("_node_id_for_cache") or ""
@@ -161,7 +162,7 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     # ---------- fetch existing & caches ----------
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> dict[str, dict[str, Any]]:
         node_t = _node_tag(node)
         log.info("fetch_existing: start [node=%s]", node_t)
 
@@ -181,7 +182,7 @@ class NormalizationPoliciesImporter(BaseImporter):
         elif isinstance(data, list):
             items = [x for x in data if isinstance(x, dict)]
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for it in items:
             name = _norm(it.get("name"))
             if not name:
@@ -194,7 +195,7 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     # ---------- payload builders (CSV) ----------
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         node_id = desired_row.get("_node_id") or ""
         pkg_ids, _missing = self._map_pkg_names_to_ids(desired_row, node_id)
         return {
@@ -203,7 +204,7 @@ class NormalizationPoliciesImporter(BaseImporter):
             "compiled_normalizer": _csv(desired_row.get("compiled_normalizer") or []),
         }
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         node_id = desired_row.get("_node_id") or ""
         pkg_ids, _missing = self._map_pkg_names_to_ids(desired_row, node_id)
         return {
@@ -220,8 +221,8 @@ class NormalizationPoliciesImporter(BaseImporter):
         pool_uuid: str,
         node: NodeRef,
         decision,
-        existing_id: Optional[str],
-    ) -> Dict[str, Any]:
+        existing_id: str | None,
+    ) -> dict[str, Any]:
         node_t = _node_tag(node)
         desired = dict(decision.desired or {})
         desired["_node_id"] = node.id
@@ -264,7 +265,7 @@ class NormalizationPoliciesImporter(BaseImporter):
 
     # ---------- internals ----------
 
-    def _list_packages(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Tuple[Dict[str, str], Dict[str, str]]:
+    def _list_packages(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> tuple[dict[str, str], dict[str, str]]:
         data = client.list_resource(pool_uuid, node.id, self.PACKAGES_RESOURCE) or []
         if isinstance(data, dict):
             items = [x for x in (data.get("data") or data.get("items") or data.get("results") or []) if isinstance(x, dict)]
@@ -272,8 +273,8 @@ class NormalizationPoliciesImporter(BaseImporter):
             items = [x for x in data if isinstance(x, dict)]
         else:
             items = []
-        name_to_id: Dict[str, str] = {}
-        id_to_name: Dict[str, str] = {}
+        name_to_id: dict[str, str] = {}
+        id_to_name: dict[str, str] = {}
         for it in items:
             nm = _norm(it.get("name"))
             pid = _norm(it.get("id"))
@@ -282,9 +283,9 @@ class NormalizationPoliciesImporter(BaseImporter):
                 id_to_name[pid] = nm
         return name_to_id, id_to_name
 
-    def _list_compiled_normalizers(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Set[str]:
+    def _list_compiled_normalizers(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> set[str]:
         data = client.list_subresource(pool_uuid, node.id, self.PACKAGES_RESOURCE, self.COMPILED_SUBPATH) or []
-        names: Set[str] = set()
+        names: set[str] = set()
         if isinstance(data, list):
             for it in data:
                 if isinstance(it, dict):
@@ -301,10 +302,10 @@ class NormalizationPoliciesImporter(BaseImporter):
                         names.add(nm)
         return names
 
-    def _map_pkg_names_to_ids(self, desired_row: Dict[str, Any], node_id: str) -> Tuple[List[str], List[str]]:
+    def _map_pkg_names_to_ids(self, desired_row: dict[str, Any], node_id: str) -> tuple[list[str], list[str]]:
         name_to_id = self._pkg_name_to_id.get(node_id, {})
-        ids: List[str] = []
-        missing: List[str] = []
+        ids: list[str] = []
+        missing: list[str] = []
         for nm in (desired_row.get("normalization_packages") or []):
             key = _norm(nm)
             if not key:
@@ -316,9 +317,9 @@ class NormalizationPoliciesImporter(BaseImporter):
                 missing.append(key)
         return ids, missing
 
-    def _verify_dependencies(self, node_id: str, desired: Dict[str, Any]) -> Tuple[Set[str], Set[str]]:
-        missing_pkgs: Set[str] = set()
-        missing_comp: Set[str] = set()
+    def _verify_dependencies(self, node_id: str, desired: dict[str, Any]) -> tuple[set[str], set[str]]:
+        missing_pkgs: set[str] = set()
+        missing_comp: set[str] = set()
         pkg_name_to_id = self._pkg_name_to_id.get(node_id, {})
         for nm in (desired.get("normalization_packages") or []):
             n = _norm(nm)

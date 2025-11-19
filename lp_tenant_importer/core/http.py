@@ -1,16 +1,15 @@
-import requests
-import time
-from typing import Dict, List, Any, Optional
+import json
 import logging
 import os.path
-import json
+import time
+from typing import Any
 
-from logging_utils import setup_logging
+import requests
 
 logger = logging.getLogger(__name__)
 
 class DirectorClient:
-    def __init__(self, base_url: str, api_token: str, verify: bool = True, timeout: int = 30, proxies: Dict = None):
+    def __init__(self, base_url: str, api_token: str, verify: bool = True, timeout: int = 30, proxies: dict = None):
         """Initialize the DirectorClient with API credentials and settings.
 
         Args:
@@ -34,15 +33,15 @@ class DirectorClient:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.get(full_url, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
 
-    def post(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
+    def post(self, url: str, json: dict = None, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.post(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)
 
-    def put(self, url: str, json: Dict = None, **kwargs) -> requests.Response:
+    def put(self, url: str, json: dict = None, **kwargs) -> requests.Response:
         full_url = url if url.startswith("http") else f"{self.base_url}/{url.lstrip('/')}"
         return self.session.put(full_url, json=json, verify=self.verify, timeout=self.timeout, proxies=self.proxies, **kwargs)  
 
-    def check_storage_paths(self, pool_uuid: str, logpoint_id: str, paths: List[str]) -> List[str]:
+    def check_storage_paths(self, pool_uuid: str, logpoint_id: str, paths: list[str]) -> list[str]:
         """Check which storage paths exist on the SIEM.
 
         Args:
@@ -71,7 +70,7 @@ class DirectorClient:
             logger.error("Failed to check storage paths: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
             return paths
 
-    def get_existing_repos(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+    def get_existing_repos(self, pool_uuid: str, logpoint_id: str) -> list[dict]:
         """Fetch existing repositories from the SIEM.
 
         Args:
@@ -103,7 +102,7 @@ class DirectorClient:
             logger.error("Failed to fetch existing repos: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
             return []
 
-    def create_repo(self, pool_uuid: str, logpoint_id: str, repo: Dict) -> Dict:
+    def create_repo(self, pool_uuid: str, logpoint_id: str, repo: dict) -> dict:
         """Create a new repository (async) or mark as NOOP if exists.
 
         Args:
@@ -153,7 +152,7 @@ class DirectorClient:
             logger.error("Failed to create repo %s: %s (Response: %s)", repo_name, str(e), getattr(e.response, 'text', 'No response'))
             raise
 
-    def update_repo(self, pool_uuid: str, logpoint_id: str, repo_id: str, repo: Dict) -> Dict:
+    def update_repo(self, pool_uuid: str, logpoint_id: str, repo_id: str, repo: dict) -> dict:
         """Update an existing repository (async) using Excel as the sole source of truth.
 
         Args:
@@ -193,7 +192,7 @@ class DirectorClient:
             logger.error("Failed to update repo %s: %s (Response: %s)", repo_id, str(e), getattr(e.response, 'text', 'No response'))
             raise
     
-    def monitor_job(self, monitorapi: str, max_attempts: int = 30, interval: float = 2) -> Dict:
+    def monitor_job(self, monitorapi: str, max_attempts: int = 30, interval: float = 2) -> dict:
         """Monitor an async job until completion (success: true or false).
 
         Args:
@@ -235,7 +234,7 @@ class DirectorClient:
         logger.error("Job monitoring timed out after %d attempts", max_attempts)
         return {"success": False, "error": "Timeout"}        
 
-    def check_repos(self, pool_uuid: str, logpoint_id: str, repo_names: List[str]) -> List[str]:
+    def check_repos(self, pool_uuid: str, logpoint_id: str, repo_names: list[str]) -> list[str]:
         """Check which repositories exist on the SIEM.
 
         Args:
@@ -252,7 +251,7 @@ class DirectorClient:
         logger.debug("Checked repos: existing=%s, missing=%s", existing_names, missing_repos)
         return missing_repos
 
-    def get_existing_routing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+    def get_existing_routing_policies(self, pool_uuid: str, logpoint_id: str) -> list[dict]:
         """Fetch existing routing policies from the SIEM.
 
         Args:
@@ -275,7 +274,7 @@ class DirectorClient:
             logger.error("Failed to fetch existing routing policies: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
             return []
 
-    def create_routing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+    def create_routing_policy(self, pool_uuid: str, logpoint_id: str, policy: dict) -> dict:
         """Create a new routing policy (async).
 
         Args:
@@ -301,7 +300,7 @@ class DirectorClient:
             logger.error("Failed to create routing policy %s: %s (Response: %s)", policy["policy_name"], str(e), getattr(e.response, 'text', 'No response'))
             raise
 
-    def update_routing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+    def update_routing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: dict) -> dict:
         """Update an existing routing policy (async).
 
         Args:
@@ -328,7 +327,7 @@ class DirectorClient:
             logger.error("Failed to update routing policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
             raise
     
-    def get_existing_normalization_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+    def get_existing_normalization_policies(self, pool_uuid: str, logpoint_id: str) -> list[dict]:
         """Fetch existing normalization policies from the SIEM.
 
         Args:
@@ -351,7 +350,7 @@ class DirectorClient:
             logger.error("Failed to fetch existing normalization policies: %s (Response: %s)", str(e), getattr(e.response, 'text', 'No response'))
             return []
 
-    def create_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+    def create_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy: dict) -> dict:
         """Create a new normalization policy (async).
 
         Args:
@@ -395,7 +394,7 @@ class DirectorClient:
             logger.error("Failed to create normalization policy %s: %s (Response: %s)", policy["name"], str(e), getattr(e.response, 'text', 'No response'))
             return {"status": "failed", "error": str(e)}
 
-    def update_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+    def update_normalization_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: dict) -> dict:
         """Update an existing normalization policy (async).
 
         Args:
@@ -439,7 +438,7 @@ class DirectorClient:
             logger.error("Failed to update normalization policy %s: %s (Response: %s)", policy_id, str(e), getattr(e.response, 'text', 'No response'))
             return {"status": "failed", "error": str(e)}
    
-    def get_existing_processing_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict]:
+    def get_existing_processing_policies(self, pool_uuid: str, logpoint_id: str) -> list[dict]:
         """Fetch existing processing policies from the SIEM."""
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
         try:
@@ -454,7 +453,7 @@ class DirectorClient:
             logger.error("Failed to fetch existing processing policies: %s", str(e.response.text))
             return []
 
-    def create_processing_policy(self, pool_uuid: str, logpoint_id: str, policy: Dict) -> Dict:
+    def create_processing_policy(self, pool_uuid: str, logpoint_id: str, policy: dict) -> dict:
         """Create a new processing policy (async)."""
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy"
         payload = {
@@ -489,7 +488,7 @@ class DirectorClient:
             logger.error("Failed to create processing policy %s: %s", policy["name"], str(e.response.text))
             return {"status": "failed", "error": str(e)}
 
-    def update_processing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: Dict) -> Dict:
+    def update_processing_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy: dict) -> dict:
         """Update an existing processing policy (async)."""
         url = f"{self.base_url}/configapi/{pool_uuid}/{logpoint_id}/ProcessingPolicy/{policy_id}"
         payload = {
@@ -523,7 +522,7 @@ class DirectorClient:
             logger.error("Failed to update processing policy %s: %s", policy_id, str(e.response.text))
             return {"status": "failed", "error": str(e.response.text)}
 
-    def get_enrichment_sources(self, pool_uuid: str, logpoint_id: str) -> List[str]:
+    def get_enrichment_sources(self, pool_uuid: str, logpoint_id: str) -> list[str]:
         """Fetch available enrichment sources for a specific node.
 
         Args:
@@ -548,7 +547,7 @@ class DirectorClient:
         logger.debug("Retrieved %d sources: %s", len(sources), sources)
         return sources
 
-    def get_enrichment_policies(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+    def get_enrichment_policies(self, pool_uuid: str, logpoint_id: str) -> list[dict[str, Any]]:
         """Retrieve existing enrichment policies for a node.
 
         Args:
@@ -569,7 +568,7 @@ class DirectorClient:
         logger.debug("Found %d existing policies", len(policies))
         return policies
 
-    def create_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_data: dict[str, Any]) -> dict[str, Any]:
         """Create a new enrichment policy with async job monitoring.
 
         Args:
@@ -605,7 +604,7 @@ class DirectorClient:
             logger.error("Creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def update_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_enrichment_policy(self, pool_uuid: str, logpoint_id: str, policy_id: str, policy_data: dict[str, Any]) -> dict[str, Any]:
         """Update an existing enrichment policy with async job monitoring.
 
         Args:
@@ -642,7 +641,7 @@ class DirectorClient:
             logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
          
-    def get_device_groups(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+    def get_device_groups(self, pool_uuid: str, logpoint_id: str) -> list[dict[str, Any]]:
         """Retrieve existing device groups for a node.
 
         Args:
@@ -663,7 +662,7 @@ class DirectorClient:
         logger.debug("Found %d existing device groups", len(device_groups))
         return device_groups
 
-    def create_device_group(self, pool_uuid: str, logpoint_id: str, group_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_device_group(self, pool_uuid: str, logpoint_id: str, group_data: dict[str, Any]) -> dict[str, Any]:
         """Create a new device group with async job monitoring.
 
         Args:
@@ -699,7 +698,7 @@ class DirectorClient:
             logger.error("Creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def update_device_group(self, pool_uuid: str, logpoint_id: str, group_id: str, group_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_device_group(self, pool_uuid: str, logpoint_id: str, group_id: str, group_data: dict[str, Any]) -> dict[str, Any]:
         """Update an existing device group with async job monitoring.
 
         Args:
@@ -736,7 +735,7 @@ class DirectorClient:
             logger.error("Update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}   
         
-    def get_devices(self, pool_uuid: str, logpoint_id: str) -> List[Dict[str, Any]]:
+    def get_devices(self, pool_uuid: str, logpoint_id: str) -> list[dict[str, Any]]:
         """Retrieve existing devices for a node.
 
         Args:
@@ -757,7 +756,7 @@ class DirectorClient:
         logger.debug("Found %d existing devices", len(devices))
         return devices
 
-    def create_device(self, pool_uuid: str, logpoint_id: str, device_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_device(self, pool_uuid: str, logpoint_id: str, device_data: dict[str, Any]) -> dict[str, Any]:
         """Create a new device with async job monitoring.
 
         Args:
@@ -793,7 +792,7 @@ class DirectorClient:
             logger.error("Device creation failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def update_device(self, pool_uuid: str, logpoint_id: str, device_id: str, device_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_device(self, pool_uuid: str, logpoint_id: str, device_id: str, device_data: dict[str, Any]) -> dict[str, Any]:
         """Update an existing device with async job monitoring.
 
         Args:
@@ -830,7 +829,7 @@ class DirectorClient:
             logger.error("Device update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def create_syslog_collector(self, pool_uuid: str, logpoint_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def create_syslog_collector(self, pool_uuid: str, logpoint_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a new Syslog Collector with async job monitoring.
 
         Args:
@@ -867,7 +866,7 @@ class DirectorClient:
             logger.error("Syslog Collector creation failed on %s: %s", logpoint_id, error)
             return {"status": "Fail", "error": error}
 
-    def update_syslog_collector(self, pool_uuid: str, logpoint_id: str, collector_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def update_syslog_collector(self, pool_uuid: str, logpoint_id: str, collector_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Update an existing Syslog Collector with async job monitoring.
 
         Args:
@@ -903,7 +902,7 @@ class DirectorClient:
             logger.error("Syslog Collector update failed on %s: %s", logpoint_id, result.get("error", "Unknown error"))
             return {"status": "Fail", "error": result.get("error", "Unknown error")}
 
-    def delete_syslog_collector(self, pool_uuid: str, logpoint_id: str, collector_id: str) -> Dict[str, Any]:
+    def delete_syslog_collector(self, pool_uuid: str, logpoint_id: str, collector_id: str) -> dict[str, Any]:
         """Delete an existing Syslog Collector with async job monitoring (optional).
 
         Args:

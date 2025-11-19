@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 AlertRules importer (DirectorSync v2)
 
@@ -17,18 +18,19 @@ Key points:
   MitreAttacks catalog (FetchMitreAttacks) cached per pool.
 """
 
-from typing import Any, Dict, Iterable, List, Tuple
 import ast
 import json
 import logging
 import math
 import os
 import re
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from .base import BaseImporter, NodeRef, ValidationError, TenantConfig
 from ..core.director_client import DirectorClient
+from .base import BaseImporter, NodeRef, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ def _to_int(v: Any, *, ceil_from_seconds: bool = False) -> int:
         raise ValidationError(f"invalid integer value: {v!r}")
 
 
-def _parse_list_field(raw: Any) -> List[str]:
+def _parse_list_field(raw: Any) -> list[str]:
     """
     Parse a cell value into a clean list[str].
 
@@ -145,7 +147,7 @@ def _get_repo_port_from_profiles() -> int:
     if not os.path.exists(res_path):
         return 5504
     try:
-        with open(res_path, "r", encoding="utf-8") as fh:
+        with open(res_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         port = (((data.get("profiles") or {})
                  .get("AlertRules") or {})
@@ -163,12 +165,12 @@ def _expand_local_repo(token: str, port: int) -> str:
     return f"127.0.0.1:{port}/{name}"
 
 
-def _build_repo_paths_for_backends(repo_name: str | None, backend_ips: List[str], port: int) -> List[str]:
+def _build_repo_paths_for_backends(repo_name: str | None, backend_ips: list[str], port: int) -> list[str]:
     """
     Generate '<ip>:<port>/<repo_name>' for each backend/private IP.
     If repo_name is falsy (None/empty), generate '<ip>:<port>' to target all repos.
     """
-    paths: List[str] = []
+    paths: list[str] = []
     for ip in backend_ips:
         if not ip:
             continue
@@ -208,16 +210,16 @@ class AlertRulesImporter(BaseImporter):
         super().__init__(*args, **kwargs)
 
         # caches
-        self._existing_cache: Dict[str, Dict[str, Any]] = {}   # node.id -> { name: payload }
-        self._users_cache: Dict[str, Dict[str, str]] = {}      # node.id -> lower_key -> user_id
+        self._existing_cache: dict[str, dict[str, Any]] = {}   # node.id -> { name: payload }
+        self._users_cache: dict[str, dict[str, str]] = {}      # node.id -> lower_key -> user_id
         self._users_loaded: set[str] = set()
 
         # Provided/filled by runner if needed:
-        self._repo_map: Dict[str, str] = {}     # original -> cleaned name
-        self.tenant_nodes: List[Dict[str, Any]] | None = None  # nodes of tenant (to collect ip_private)
-        self._incident_groups_cache: Dict[str, Dict[str, str]] = {}  # node.id -> lower_name_or_id -> id
+        self._repo_map: dict[str, str] = {}     # original -> cleaned name
+        self.tenant_nodes: list[dict[str, Any]] | None = None  # nodes of tenant (to collect ip_private)
+        self._incident_groups_cache: dict[str, dict[str, str]] = {}  # node.id -> lower_name_or_id -> id
         self._incident_groups_loaded: set[str] = set()
-        self._mitre_cache_by_pool: Dict[str, Dict[str, str]] = {}     # pool_uuid -> lower_token -> attack_id
+        self._mitre_cache_by_pool: dict[str, dict[str, str]] = {}     # pool_uuid -> lower_token -> attack_id
         self._mitre_loaded_pools: set[str] = set()
 
     def _resolve_user_id(self, client: DirectorClient, pool_uuid: str, node: NodeRef, lookup: str) -> str:
@@ -244,7 +246,7 @@ class AlertRulesImporter(BaseImporter):
                     break
             except Exception:
                 raw = []
-        idx: Dict[str, str] = {}
+        idx: dict[str, str] = {}
         for g in raw:
             gid = _s(g.get("id"))
             if not gid:
@@ -257,11 +259,11 @@ class AlertRulesImporter(BaseImporter):
         self._incident_groups_loaded.add(node.id)
         log.debug("Incident groups cache loaded: node=%s size=%d", node.name, len(idx))
 
-    def _resolve_incident_group_ids(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
+    def _resolve_incident_group_ids(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: list[str]) -> list[str]:
         """Resolve list of names/ids into list of ids; quietly drop unknown with WARNING."""
         self._load_incident_groups_for_node(client, pool_uuid, node)
         idx = self._incident_groups_cache.get(node.id) or {}
-        out: List[str] = []
+        out: list[str] = []
         for it in (items or []):
             key = _s(it).lower()
             if not key:
@@ -284,7 +286,7 @@ class AlertRulesImporter(BaseImporter):
         """Fetch MITRE catalog once per pool; map various tokens (id/name/technique/hash) -> id."""
         if pool_uuid in self._mitre_loaded_pools:
             return
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         try:
             # Standardized fetch via monitor API, similar to other fetch_* flows
             res = client.fetch_resource(
@@ -322,13 +324,13 @@ class AlertRulesImporter(BaseImporter):
         self._mitre_loaded_pools.add(pool_uuid)
         log.debug("MITRE cache loaded: pool=%s size=%d", pool_uuid, len(mapping))
 
-    def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: List[str]) -> List[str]:
+    def _resolve_attack_tags(self, client: DirectorClient, pool_uuid: str, node: NodeRef, items: list[str]) -> list[str]:
         """Resolve mixed tokens (hash/id/technique/name or 'token|label') to MITRE ids; drop unknown with WARNING."""
         idx = self._mitre_cache_by_pool.get(node.id) or {}
         
         log.debug(f"_resolve_attack_tags raw xlsx dump; {items}")
         
-        out: List[str] = []
+        out: list[str] = []
         for it in (items or []):
             token = _s(it)
             if not token:
@@ -355,12 +357,12 @@ class AlertRulesImporter(BaseImporter):
         return s in {"1", "y", "yes", "true", "on"}
 
     @staticmethod
-    def _parse_metadata(raw: Any) -> List[Dict[str, str]]:
+    def _parse_metadata(raw: Any) -> list[dict[str, str]]:
         """
         Accept JSON array of {field,value} objects or 'k=v; k2=v2' csv-ish string.
         Return a list sorted by 'field' for stable diffs; invalid pairs are ignored with WARNING.
         """
-        items: List[Dict[str, str]] = []
+        items: list[dict[str, str]] = []
         if raw is None:
             return items
         txt = str(raw).strip()
@@ -393,20 +395,20 @@ class AlertRulesImporter(BaseImporter):
                 else:
                     log.warning("metadata kv missing field/value -> skipped: %r", chunk)
         # sort by field and dedupe (last wins)
-        dedup: Dict[str, str] = {}
+        dedup: dict[str, str] = {}
         for it in items:
             dedup[it["field"]] = it["value"]
         canon = [{"field": k, "value": dedup[k]} for k in sorted(dedup)]
         return canon
 
     @property
-    def repo_name_map(self) -> Dict[str, str]:
+    def repo_name_map(self) -> dict[str, str]:
         """Shortcut to the 'original -> cleaned' repository name map."""
         return self._repo_map
 
     # ------------------------ validation ------------------------
 
-    def _build_repo_name_map(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, str]:
+    def _build_repo_name_map(self, sheets: dict[str, pd.DataFrame]) -> dict[str, str]:
         """Build mapping {original_repo_name -> cleaned_repo_name} from optional 'Repo' sheet."""
         if "Repo" not in sheets:
             return {}
@@ -417,7 +419,7 @@ class AlertRulesImporter(BaseImporter):
         if not src or not dst:
             return {}
 
-        mapping: Dict[str, str] = {}
+        mapping: dict[str, str] = {}
         for _, row in df.iterrows():
             k = _s(row.get(src))
             v = _s(row.get(dst))
@@ -425,7 +427,7 @@ class AlertRulesImporter(BaseImporter):
                 mapping[k] = v
         return mapping
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:  # type: ignore[override]
         if "Alert" not in sheets:
             raise ValidationError("Missing required sheet: Alert")
         df = sheets["Alert"]
@@ -459,10 +461,10 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------ desired rows ------------------------
 
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:  # type: ignore[override]
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:  # type: ignore[override]
         df = sheets["Alert"].fillna("")
         for _, r in df.iterrows():
-            d: Dict[str, Any] = {
+            d: dict[str, Any] = {
                 "name": _s(r.get("name")),
                 "owner": (_s(r.get("settings.user")) or _s(r.get("owner"))),
                 "risk": _s(r.get("settings.risk")).lower(),
@@ -515,10 +517,10 @@ class AlertRulesImporter(BaseImporter):
             yield d
 
     @staticmethod
-    def key_fn(desired_row: Dict[str, Any]) -> str:
+    def key_fn(desired_row: dict[str, Any]) -> str:
         return _s(desired_row.get("name"))
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         base = {
             "risk": _s(desired_row.get("risk")).lower(),
             "repos_csv": ",".join(sorted([_s(x) for x in desired_row.get("repos") or []])),
@@ -553,7 +555,7 @@ class AlertRulesImporter(BaseImporter):
             base["metadata_json"] = json.dumps(meta, separators=(",", ":"), ensure_ascii=False)
         return base        
     
-    def canon_existing(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_existing(self, row: dict[str, Any]) -> dict[str, Any]:
         base = {
             "risk": _s(row.get("risk")).lower(),
             "repos_csv": ",".join(sorted([_s(x) for x in row.get("repos") or []])),
@@ -585,7 +587,7 @@ class AlertRulesImporter(BaseImporter):
             # normalize to our canonical shape
             meta_norm = [{"field": _s(m.get("field")), "value": _s(m.get("value"))} for m in meta if _s(m.get("field")) and _s(m.get("value"))]
             # sort/dedupe by field
-            dedup: Dict[str, str] = {}
+            dedup: dict[str, str] = {}
             for it in meta_norm:
                 dedup[it["field"]] = it["value"]
             meta_canon = [{"field": k, "value": dedup[k]} for k in sorted(dedup)]
@@ -605,7 +607,7 @@ class AlertRulesImporter(BaseImporter):
         if not os.path.exists(res_path):
             return ""
         try:
-            with open(res_path, "r", encoding="utf-8") as fh:
+            with open(res_path, encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}
             prof = (data.get("profiles") or {}).get("AlertRules") or {}
             opts = prof.get("options") or {}
@@ -622,7 +624,7 @@ class AlertRulesImporter(BaseImporter):
             raw = client.list_resource(pool_uuid, node.id, "Users") or []
         except Exception:
             raw = []
-        idx: Dict[str, str] = {}
+        idx: dict[str, str] = {}
         for u in raw:
             uid = _s(u.get("id"))
             if not uid:
@@ -653,12 +655,12 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------ repos expansion ------------------------
 
-    def _collect_backend_ips(self) -> List[str]:
+    def _collect_backend_ips(self) -> list[str]:
         """
         Collect private OpenVPN IPs from tenant nodes (backend/all_in_one).
         Runner should set self.tenant_nodes.
         """
-        ips: List[str] = []
+        ips: list[str] = []
         tenant_siems = self.tenant_ctx.siems if self.tenant_ctx.siems else None
         log.debug(f"tenant siems content: {tenant_siems}")
         if tenant_siems:
@@ -680,7 +682,7 @@ class AlertRulesImporter(BaseImporter):
                 seen.add(ip)
         return out
 
-    def _normalize_and_expand_repos(self, raw_value: Any, node: NodeRef) -> List[str]:
+    def _normalize_and_expand_repos(self, raw_value: Any, node: NodeRef) -> list[str]:
         """
         Convert 'settings.repos' into final repo paths according to the rules described in the module docstring.
         """
@@ -693,7 +695,7 @@ class AlertRulesImporter(BaseImporter):
         backend_ips = self.backend_ips or []
         special_local = {"default", "_logpoint", "_LogPointAlerts"}
 
-        final: List[str] = []
+        final: list[str] = []
         for t in tokens:
             
             log.debug("repo start for loop '%s'", t)
@@ -731,7 +733,7 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------ fetch existing (framework) ------------------------
 
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> dict[str, dict[str, Any]]:
         """
         Fetch all alert rules visible to the current user on the given node using the framework:
         - POST (no payload) to AlertRules/MyAlertRules/fetch
@@ -757,11 +759,11 @@ class AlertRulesImporter(BaseImporter):
             rows = response.get("rows") or []
         else:
             log.warning("fetch_existing: monitor not OK on node=%s; returning empty map", node.name)
-            mapping: Dict[str, Dict[str, Any]] = {}
+            mapping: dict[str, dict[str, Any]] = {}
             self._existing_cache[node.id] = mapping
             return mapping
 
-        mapping: Dict[str, Dict[str, Any]] = {}
+        mapping: dict[str, dict[str, Any]] = {}
         for item in rows:
             nm = item.get("name")
             if nm:
@@ -773,7 +775,7 @@ class AlertRulesImporter(BaseImporter):
 
     # ------------------------ payloads ------------------------
 
-    def build_payload_create(self, desired_row: Dict[str, Any], node: NodeRef | None = None) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any], node: NodeRef | None = None) -> dict[str, Any]:
         """Build payload for create; performs repo expansion if node is provided."""
         owner_raw = desired_row.get("owner")
         if isinstance(owner_raw, (list, tuple)) and owner_raw:
@@ -785,7 +787,7 @@ class AlertRulesImporter(BaseImporter):
         if not owner_id:
             raise ValidationError("owner is required and could not be resolved")
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "name": _s(desired_row.get("name")),
             "owner": owner_id,
             "risk": _s(desired_row.get("risk")).lower(),
@@ -866,7 +868,7 @@ class AlertRulesImporter(BaseImporter):
         log.debug("build_payload_create: payload_keys=%s", sorted(payload.keys()))
         return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_row: Dict[str, Any], node: NodeRef | None = None) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_row: dict[str, Any], node: NodeRef | None = None) -> dict[str, Any]:
         """Build payload for update; same fields as create."""
         return self.build_payload_create(desired_row, node=node)
 
@@ -879,7 +881,7 @@ class AlertRulesImporter(BaseImporter):
         node: NodeRef,
         decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         desired = decision.desired or {}
         name = _s(desired.get("name")) or "(unnamed)"
 
@@ -955,9 +957,9 @@ class AlertRulesImporter(BaseImporter):
     def _monitor_result(
         client: DirectorClient,  # noqa: ARG002 (kept for parity with Repos importer)
         node: NodeRef,           # noqa: ARG002
-        res: Dict[str, Any],
+        res: dict[str, Any],
         action: str,             # noqa: ARG002
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Normalize async monitor result (kept minimal and consistent)."""
         status = "Success"
         mon_ok = None

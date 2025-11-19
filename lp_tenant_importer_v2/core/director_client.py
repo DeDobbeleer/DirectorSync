@@ -19,22 +19,22 @@ Example:
 """
 from __future__ import annotations
 
-import time
-import os
-import uuid
 import json
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, List, Union, Tuple
-
+import os
+import time
+import uuid
 import warnings
-import urllib3
+from dataclasses import dataclass
+from typing import Any, Union
+
 import requests
+import urllib3
 
 from .logging_utils import get_logger
 
 log = get_logger(__name__)
 
-JSON = Union[Dict[str, Any], List[Any]]
+JSON = Union[dict[str, Any], list[Any]]
 me = os.getenv("LP_SUPPRESS_TLS_WARNINGS")
 
 _LOG_PREVIEW = int(os.getenv("LP_HTTP_PREVIEW", "600"))
@@ -92,7 +92,7 @@ class DirectorClient:
         options: Optional :class:`ClientOptions` to fine-tune behavior.
         verify: Optional SSL verification override (if provided, overrides ``options.verify``).
     """
-    def __init__(self, base_url: str, api_token: str, *, options: Optional[ClientOptions] = None, verify: bool | None = None) -> None:
+    def __init__(self, base_url: str, api_token: str, *, options: ClientOptions | None = None, verify: bool | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({
@@ -127,7 +127,7 @@ class DirectorClient:
         """Resolve an absolute URL from a relative *path*."""
         return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
 
-    def _req(self, method: str, path: str, *, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _req(self, method: str, path: str, *, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Perform an HTTP request and return the JSON response (or empty dict).
 
         Raises:
@@ -162,15 +162,15 @@ class DirectorClient:
         """GET a JSON resource and return it as a dict (empty dict on no-content)."""
         return self._req("GET", path)
 
-    def post_json(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def post_json(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
         """POST a JSON payload and return the parsed JSON response."""
         return self._req("POST", path, json_body=data)
 
-    def put_json(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def put_json(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
         """PUT a JSON payload and return the parsed JSON response."""
         return self._req("PUT", path, json_body=data)
 
-    def delete_json(self, path: str) -> Dict[str, Any]:
+    def delete_json(self, path: str) -> dict[str, Any]:
         """DELETE a JSON resource and return the parsed JSON response (if any)."""
         return self._req("DELETE", path)
 
@@ -187,14 +187,14 @@ class DirectorClient:
 
 # --- Helpers: extract monitor path and job id from response ---
 
-    def _extract_monitor_path(self, response: Dict[str, Any]) -> Optional[str]:
+    def _extract_monitor_path(self, response: dict[str, Any]) -> str | None:
         msg = isinstance(response, dict) and response.get("message")
         if isinstance(msg, str) and msg.lstrip().startswith(("monitorapi/", "/monitorapi/")):
             return msg.lstrip("/")
         return None
 
 
-    def _extract_job_id(self, response: Dict[str, Any]) -> Optional[str]:
+    def _extract_job_id(self, response: dict[str, Any]) -> str | None:
         if not isinstance(response, dict):
             return None
         for key in ("job", "orderId", "id"):
@@ -211,7 +211,7 @@ class DirectorClient:
 
 # --- Monitor by job id: modern flow, but also accept response.success ---
 
-    def _monitor_error_text(data: Dict[str, Any]) -> str:
+    def _monitor_error_text(data: dict[str, Any]) -> str:
         """
         Produce a short human-readable error from a monitor payload.
         Looks into legacy `response.errors/message` and top-level `message/status`.
@@ -250,14 +250,14 @@ class DirectorClient:
 
         return "monitor: failed (no error details)"
 
-    def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> Tuple[bool, Dict[str, Any]]:
+    def monitor_job(self, pool_uuid: str, node_id: str, job_id: str) -> tuple[bool, dict[str, Any]]:
         """
         Poll 'monitorapi/{pool}/{node}/orders/{job_id}'.
         Return (ok, last_payload).
         """
         deadline = time.time() + self.options.monitor_timeout_sec
         seen_status, stagnant = None, 0
-        last: Dict[str, Any] = {}
+        last: dict[str, Any] = {}
 
         while time.time() < deadline:
             data = self.get_json(self.monitorapi(pool_uuid, node_id, job_id)) or {}
@@ -297,7 +297,7 @@ class DirectorClient:
 
 # --- Monitor by URL: legacy flow reading response.success ---
 
-    def monitor_job_url(self, monitor_path: str) -> Tuple[bool, Dict[str, Any]]:
+    def monitor_job_url(self, monitor_path: str) -> tuple[bool, dict[str, Any]]:
         """
         Poll a legacy monitor endpoint like 'monitorapi/...'.
         Return (ok, last_payload).
@@ -305,7 +305,7 @@ class DirectorClient:
         path = monitor_path.lstrip("/")
         deadline = time.time() + self.options.monitor_timeout_sec
         seen_status, stagnant = None, 0
-        last: Dict[str, Any] = {}
+        last: dict[str, Any] = {}
 
         while time.time() < deadline:
             data = self.get_json(path) or {}
@@ -358,9 +358,9 @@ class DirectorClient:
         pool_uuid: str,
         node_id: str,
         resource: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         monitor: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         corr = uuid.uuid4().hex[:8]
         path = self.configapi(pool_uuid, node_id, resource)
         safe_payload = _redact({"data": payload})
@@ -400,9 +400,9 @@ class DirectorClient:
         node_id: str,
         resource: str,
         resource_id: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         monitor: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         
         corr = uuid.uuid4().hex[:8]
         base = self.configapi(pool_uuid, node_id, resource)
@@ -445,7 +445,7 @@ class DirectorClient:
         resource: str,
         resource_id: str,
         monitor: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         corr = uuid.uuid4().hex[:8]
         base = self.configapi(pool_uuid, node_id, resource)
         path = f"{base}/{resource_id}"
@@ -483,9 +483,9 @@ class DirectorClient:
         node_id: str,
         resource: str,
         action: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         monitor: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         POST an action under configapi:  {base}/{resource}/{action}
         This is the canonical way to call endpoints like:

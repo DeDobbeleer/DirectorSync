@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any
 
 import pandas as pd
 
-from lp_tenant_importer_v2.importers.base import BaseImporter
 from lp_tenant_importer_v2.core.config import NodeRef
 from lp_tenant_importer_v2.core.director_client import DirectorClient
+from lp_tenant_importer_v2.importers.base import BaseImporter
 from lp_tenant_importer_v2.utils.validators import ValidationError
-
 
 log = logging.getLogger(__name__)
 
@@ -42,20 +42,20 @@ class EnrichmentPoliciesImporter(BaseImporter):
     """
 
     resource_name: str = "enrichment_policies"
-    sheet_names: Tuple[str, ...] = ("EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria")
-    required_columns: Tuple[str, ...] = ("policy_name", "spec_index")  # validated per sheet by BaseImporter
-    compare_keys: Tuple[str, ...] = ("specifications",)  # add "description" if you want description changes to trigger UPDATE
+    sheet_names: tuple[str, ...] = ("EnrichmentPolicy", "EnrichmentRules", "EnrichmentCriteria")
+    required_columns: tuple[str, ...] = ("policy_name", "spec_index")  # validated per sheet by BaseImporter
+    compare_keys: tuple[str, ...] = ("specifications",)  # add "description" if you want description changes to trigger UPDATE
 
     # ---------------------------------------------------------------------
     # Existing state
     # ---------------------------------------------------------------------
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> dict[str, dict[str, Any]]:
         """Return name -> object for EnrichmentPolicy from the node."""
         path = client.configapi(pool_uuid, node.id, "EnrichmentPolicy")
         data = client.get_json(path) or []
         if isinstance(data, dict) and "data" in data:
             data = data.get("data") or []
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         if not isinstance(data, list):
             log.warning("fetch_existing: unexpected list payload type from %s: %s", path, type(data))
             return out
@@ -71,7 +71,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
     # ---------------------------------------------------------------------
     # Desired state from XLSX (aggregated by SOURCE)
     # ---------------------------------------------------------------------
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         ep = sheets["EnrichmentPolicy"].copy()
         rules = sheets["EnrichmentRules"].copy()
         crit = sheets["EnrichmentCriteria"].copy()
@@ -99,7 +99,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
             return _Key(policy=str(sr["policy_name"]).strip(), index=int(sr["spec_index"]))
 
         # Index rules/criteria by (policy_name, spec_index)
-        rules_by_key: Dict[_Key, List[Dict[str, Any]]] = {}
+        rules_by_key: dict[_Key, list[dict[str, Any]]] = {}
         for _, r in rules.iterrows():
             k = _key(r)
             rr = {kf: r.get(kf) for kf in _ALLOWED_RULE_KEYS if kf in r and pd.notna(r.get(kf))}
@@ -109,7 +109,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
                 rr["operation"] = "Equals"
             rules_by_key.setdefault(k, []).append(rr)
 
-        crit_by_key: Dict[_Key, List[Dict[str, Any]]] = {}
+        crit_by_key: dict[_Key, list[dict[str, Any]]] = {}
         for _, c in crit.iterrows():
             k = _key(c)
             cc = {kf: c.get(kf) for kf in _ALLOWED_CRITERIA_KEYS if kf in c}
@@ -123,10 +123,10 @@ class EnrichmentPoliciesImporter(BaseImporter):
             crit_by_key.setdefault(k, []).append(cc)
 
         # Aggregate by policy_name → one desired row per policy (1 spec per SOURCE)
-        desired_by_policy: Dict[str, Dict[str, Any]] = {}
+        desired_by_policy: dict[str, dict[str, Any]] = {}
         for policy_name, grp in ep.groupby(ep["policy_name"].map(lambda v: str(v).strip())):
             # 1) group rows for this policy by SOURCE (not spec_index)
-            by_source: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+            by_source: dict[str, dict[str, list[dict[str, Any]]]] = {}
             description = ""
             for _, row in grp.sort_values("spec_index").iterrows():
                 k = _key(row)
@@ -143,12 +143,12 @@ class EnrichmentPoliciesImporter(BaseImporter):
                 bucket["criteria"].extend(crit_by_key.get(k, []))
 
             # 2) build specifications list (deduplicate + keep stable order)
-            specs: List[Dict[str, Any]] = []
+            specs: list[dict[str, Any]] = []
             for src, coll in sorted(by_source.items(), key=lambda kv: kv[0]):
                 # Deduplicate rules/criteria by canonical JSON
-                def _uniq(items: List[Dict[str, Any]], canon_fn) -> List[Dict[str, Any]]:
+                def _uniq(items: list[dict[str, Any]], canon_fn) -> list[dict[str, Any]]:
                     seen = set()
-                    out: List[Dict[str, Any]] = []
+                    out: list[dict[str, Any]] = []
                     for it in items:
                         c = json.dumps(canon_fn(it), sort_keys=True)
                         if c not in seen:
@@ -182,7 +182,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
     # Canonicalization for diff (order-insensitive)
     # ---------------------------------------------------------------------
     @staticmethod
-    def _canon_rule(rr: Dict[str, Any]) -> Dict[str, Any]:
+    def _canon_rule(rr: dict[str, Any]) -> dict[str, Any]:
         out = {k: rr.get(k) for k in _ALLOWED_RULE_KEYS if k in rr}
         if "prefix" in out:
             out["prefix"] = bool(out["prefix"])  # ensure bool
@@ -191,14 +191,14 @@ class EnrichmentPoliciesImporter(BaseImporter):
         return out
 
     @staticmethod
-    def _canon_criteria(cc: Dict[str, Any]) -> Dict[str, Any]:
+    def _canon_criteria(cc: dict[str, Any]) -> dict[str, Any]:
         out = {k: cc.get(k, "") for k in _ALLOWED_CRITERIA_KEYS}
         if out.get("value") is None:
             out["value"] = ""
         return out
 
     @classmethod
-    def _canon_spec(cls, spec: Dict[str, Any]) -> Dict[str, Any]:
+    def _canon_spec(cls, spec: dict[str, Any]) -> dict[str, Any]:
         src = str(spec.get("source") or "").strip()
         crules = [cls._canon_rule(r) for r in (spec.get("rules") or [])]
         ccrit = [cls._canon_criteria(c) for c in (spec.get("criteria") or [])]
@@ -206,10 +206,10 @@ class EnrichmentPoliciesImporter(BaseImporter):
         ccrit_sorted = sorted(ccrit, key=lambda d: json.dumps(d, sort_keys=True))
         return {"source": src, "rules": crules_sorted, "criteria": ccrit_sorted}
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return str(desired_row.get("name") or "").strip()
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         specs = desired_row.get("specifications") or []
         cspecs = [self._canon_spec(s) for s in specs]
         cspecs_sorted = sorted(cspecs, key=lambda s: (s.get("source"), json.dumps(s, sort_keys=True)))
@@ -219,7 +219,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         #     out["description"] = desired_row["description"]
         return out
 
-    def canon_existing(self, existing_obj: Dict[str, Any]) -> Dict[str, Any] | None:
+    def canon_existing(self, existing_obj: dict[str, Any]) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         specs = existing_obj.get("specifications") or []
@@ -235,7 +235,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
     # EnrichmentSource checks — ONLY the List endpoint; match on `source_name`
     # ---------------------------------------------------------------------
     @staticmethod
-    def _list_enrichment_sources(client: DirectorClient, pool_uuid: str, node: NodeRef) -> List[str]:
+    def _list_enrichment_sources(client: DirectorClient, pool_uuid: str, node: NodeRef) -> list[str]:
         """Collect available enrichment sources on the node.
 
         Endpoint used: /configapi/{pool}/{node}/EnrichmentSource (GET)
@@ -245,7 +245,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         data = client.get_json(path) or []
         if isinstance(data, dict) and "data" in data:
             data = data.get("data") or []
-        names: List[str] = []
+        names: list[str] = []
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, dict):
@@ -256,7 +256,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         log.debug("EnrichmentSource list on %s: %s", node.name, unique)
         return unique
 
-    def _ensure_sources(self, client: DirectorClient, pool_uuid: str, node: NodeRef, desired_row: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    def _ensure_sources(self, client: DirectorClient, pool_uuid: str, node: NodeRef, desired_row: dict[str, Any]) -> tuple[bool, list[str]]:
         want = {str(spec.get("source") or "").strip() for spec in desired_row.get("specifications", [])}
         want = {w for w in want if w}
         have = set(self._list_enrichment_sources(client, pool_uuid, node))
@@ -266,7 +266,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
     # ---------------------------------------------------------------------
     # Payload builders
     # ---------------------------------------------------------------------
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         payload = {
             "name": desired_row["name"],
             "specifications": desired_row["specifications"],
@@ -275,7 +275,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
             payload["description"] = desired_row["description"]
         return payload
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         # PUT accepts the same body shape as POST
         return self.build_payload_create(desired_row)
 
@@ -289,7 +289,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         node: NodeRef,
         decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         desired = decision.desired or {}
 
         # Preflight 1: strict source validation — if a source is missing on the node, we SKIP
@@ -311,7 +311,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         resource = "EnrichmentPolicy"
 
         # Helper to interpret API responses when no monitor is provided
-        def _result_from_response(resp: Dict[str, Any] | None) -> Tuple[bool, Dict[str, Any]]:
+        def _result_from_response(resp: dict[str, Any] | None) -> tuple[bool, dict[str, Any]]:
             if not isinstance(resp, dict):
                 return False, {"message": "empty or non-dict response"}
             status = str(resp.get("status") or "").strip().lower()
@@ -357,7 +357,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         job_id = getattr(client, "_extract_job_id", lambda r: None)(resp)
         monitor_path = getattr(client, "_extract_monitor_path", lambda r: None)(resp)
         mon_ok = True
-        last: Dict[str, Any] = {}
+        last: dict[str, Any] = {}
         branch = "none"
         if job_id and getattr(client.options, "monitor_enabled", True):
             branch = "job"
@@ -368,7 +368,7 @@ class EnrichmentPoliciesImporter(BaseImporter):
         else:
             mon_ok, last = _result_from_response(resp)
 
-        result: Dict[str, Any] = {"status": "Success" if mon_ok else "Failed", "monitor_ok": mon_ok, "monitor_branch": branch}
+        result: dict[str, Any] = {"status": "Success" if mon_ok else "Failed", "monitor_ok": mon_ok, "monitor_branch": branch}
         if not mon_ok:
             result["error"] = last.get("message") or last.get("status") or "monitor failed"
         return result

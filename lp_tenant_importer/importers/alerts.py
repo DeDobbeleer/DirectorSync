@@ -1,20 +1,20 @@
-import logging
-import pandas as pd
-from typing import List, Dict, Any, Tuple
-from pathlib import Path
-from core.http import DirectorClient
 import json
+import logging
+from pathlib import Path
+
+import pandas as pd
+from core.http import DirectorClient
 
 logger = logging.getLogger(__name__)
 
 def import_alerts_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List],
+    nodes: dict[str, list],
     xlsx_path: str,
     dry_run: bool,
-    targets: List[str],
-) -> Tuple[List[Dict], bool]:
+    targets: list[str],
+) -> tuple[list[dict], bool]:
     """Import alerts from XLSX to specified SIEM nodes (typically search_heads).
 
     Args:

@@ -1,16 +1,21 @@
 import argparse
 import json
-import os
-import sys
 import logging
-import pandas as pd
-from typing import List, Dict
+import os
 import re
+import sys
 from collections import defaultdict
 
-from device_tenant_resolver import determine_device_tenant  # <= NEW
+import pandas as pd
+
 # === NEW (alerts) ===
-from alert_export import load_alerts_df, load_userlist_df, ALERT_SHEET, USERLIST_SHEET  # <= NEW
+from alert_export import (  # <= NEW
+    ALERT_SHEET,
+    USERLIST_SHEET,
+    load_alerts_df,
+    load_userlist_df,
+)
+from device_tenant_resolver import determine_device_tenant  # <= NEW
 
 SCRIPT_NAME = "logpoint_config_splitter"
 DEFAULT_CONFIG_NAME = f"{SCRIPT_NAME}-config.json"
@@ -23,10 +28,10 @@ logging.basicConfig(
     format='[%(levelname)s] %(message)s'
 )
 
-def load_json(filepath: str) -> Dict:
+def load_json(filepath: str) -> dict:
     """Load JSON file with error handling."""
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         logging.error(f"File '{filepath}' not found.")
@@ -35,7 +40,7 @@ def load_json(filepath: str) -> Dict:
         logging.error(f"Failed to decode JSON - {e}")
         sys.exit(1)
 
-def clean_name(name: str, tenant_list: List[str]) -> str:
+def clean_name(name: str, tenant_list: list[str]) -> str:
     """
     Clean a name by removing tenant identifiers and joining remaining parts with underscore.
     Handles separators like -, _, and .
@@ -47,7 +52,7 @@ def clean_name(name: str, tenant_list: List[str]) -> str:
     return "_".join(cleaned_tokens)
 
 # --- NEW: simple fallback name matcher (même logique que str.contains) -----
-def match_tenant_by_name(name: str, tenant_list: List[str]) -> str | None:
+def match_tenant_by_name(name: str, tenant_list: list[str]) -> str | None:
     low = (name or "").lower()
     # on itère par longueur décroissante pour éviter les collisions genre "es" avant "esrin"
     for t in sorted(tenant_list, key=lambda x: len(x), reverse=True):
@@ -57,7 +62,7 @@ def match_tenant_by_name(name: str, tenant_list: List[str]) -> str | None:
 
 # === EXPORTS D’ENTITÉS — inchangés par rapport à l’original (copy) ===
 
-def extract_repos(sync_data: Dict, tenant_list: List[str]) -> pd.DataFrame:
+def extract_repos(sync_data: dict, tenant_list: list[str]) -> pd.DataFrame:
     """Extract Repo information from the configuration JSON."""
     repos_raw = sync_data.get("Repo", [])
     repo_rows = []
@@ -89,7 +94,7 @@ def extract_repos(sync_data: Dict, tenant_list: List[str]) -> pd.DataFrame:
 
     return pd.DataFrame(repo_rows)
 
-def extract_routing_policies(sync_data: Dict, tenant_list: List[str]) -> pd.DataFrame:
+def extract_routing_policies(sync_data: dict, tenant_list: list[str]) -> pd.DataFrame:
     """Extract RoutingPolicy details including rule criteria."""
     policies = sync_data.get("RoutingPolicy", [])
     rows = []
@@ -133,7 +138,7 @@ def extract_routing_policies(sync_data: Dict, tenant_list: List[str]) -> pd.Data
 
     return pd.DataFrame(rows)
 
-def extract_normalization_policies(sync_data: Dict) -> pd.DataFrame:
+def extract_normalization_policies(sync_data: dict) -> pd.DataFrame:
     """Extract NormalizationPolicy information, excluding default system policies."""
     policies = sync_data.get("NormPolicy", [])
     filtered = [p for p in policies if p.get("name") not in EXCLUDED_NORMPOLICIES]
@@ -148,7 +153,7 @@ def extract_normalization_policies(sync_data: Dict) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-def extract_enrichment_policy_tables(sync_data: Dict) -> Dict[str, pd.DataFrame]:
+def extract_enrichment_policy_tables(sync_data: dict) -> dict[str, pd.DataFrame]:
     policies = sync_data.get("EnrichmentPolicy", [])
     summary_rows = []
     rule_rows = []
@@ -203,7 +208,7 @@ def extract_enrichment_policy_tables(sync_data: Dict) -> Dict[str, pd.DataFrame]
         "EnrichmentCriteria": pd.DataFrame(criteria_rows)
     }
 
-def extract_processing_policies(sync_data: Dict, tenant_list: List[str]) -> pd.DataFrame:
+def extract_processing_policies(sync_data: dict, tenant_list: list[str]) -> pd.DataFrame:
     policies = sync_data.get("ProcessingPolicy", [])
     rows = []
 
@@ -226,7 +231,7 @@ def extract_processing_policies(sync_data: Dict, tenant_list: List[str]) -> pd.D
 
     return pd.DataFrame(rows)
 
-def extract_devices(sync_data: Dict) -> Dict[str, pd.DataFrame]:
+def extract_devices(sync_data: dict) -> dict[str, pd.DataFrame]:
     devices = sync_data.get("Device", [])
     device_rows = []
     fetcher_rows = []
@@ -263,7 +268,7 @@ def extract_devices(sync_data: Dict) -> Dict[str, pd.DataFrame]:
         "DeviceFetcher": pd.DataFrame(fetcher_rows)
     }
 
-def extract_device_groups(sync_data: Dict) -> pd.DataFrame:
+def extract_device_groups(sync_data: dict) -> pd.DataFrame:
     """Extract all DeviceGroups (multitenant, non filtrés)."""
     groups = sync_data.get("DeviceGroup", [])
     rows = []
@@ -280,7 +285,7 @@ def extract_device_groups(sync_data: Dict) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-def extract_users(sync_data: Dict) -> pd.DataFrame:
+def extract_users(sync_data: dict) -> pd.DataFrame:
     """
     Extract users as a flat DataFrame. Dashboards are intentionally ignored.
     The function is non-opinionated (no tenant routing); replication is handled later.
@@ -302,7 +307,7 @@ def extract_users(sync_data: Dict) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-def extract_user_groups(sync_data: Dict) -> pd.DataFrame:
+def extract_user_groups(sync_data: dict) -> pd.DataFrame:
     """Extract user groups as a flat DataFrame (global, no tenant routing)."""
     groups = sync_data.get("UserGroup", [])
     rows = []
@@ -318,10 +323,10 @@ def extract_user_groups(sync_data: Dict) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
-def load_tenant_list(config_dir: str) -> List[str]:
+def load_tenant_list(config_dir: str) -> list[str]:
     config_path = os.path.join(config_dir, DEFAULT_CONFIG_NAME)
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, encoding='utf-8') as f:
             config_data = json.load(f)
             return config_data.get("tenant_list", [])
     except FileNotFoundError:
@@ -332,10 +337,10 @@ def load_tenant_list(config_dir: str) -> List[str]:
         sys.exit(1)
 
 # --- NEW: charger la config complète (pour collector_to_tenant, etc.) ------
-def load_full_config(config_dir: str) -> Dict:
+def load_full_config(config_dir: str) -> dict:
     config_path = os.path.join(config_dir, DEFAULT_CONFIG_NAME)
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(config_path, encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         logging.error(f"Config file '{config_path}' not found.")
@@ -345,10 +350,10 @@ def load_full_config(config_dir: str) -> Dict:
         sys.exit(1)
 
 # === split & export ===
-def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
-                             tenant_list: List[str],
+def split_entities_by_tenant(entities: dict[str, pd.DataFrame],
+                             tenant_list: list[str],
                              output_dir: str,
-                             config_dict: Dict,
+                             config_dict: dict,
                              alerts_df=None,
                              user_list_df=None) -> None:  # <= NEW param, défaut None
     os.makedirs(output_dir, exist_ok=True)
@@ -356,7 +361,7 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
 
     # --- mapping device_id -> tenant (collector-first) ---
     device_df = entities.get("Device", pd.DataFrame())
-    device_id_to_tenant: Dict[str, str] = {}
+    device_id_to_tenant: dict[str, str] = {}
     if not device_df.empty:
         for _, row in device_df.iterrows():
             row_dict = row.to_dict()
@@ -372,7 +377,7 @@ def split_entities_by_tenant(entities: Dict[str, pd.DataFrame],
                 device_id_to_tenant[device_id] = tenant
 
     # --- mapping repo_name -> tenant (pour Alert routing) ---
-    repo_name_to_tenant: Dict[str, str] = {}
+    repo_name_to_tenant: dict[str, str] = {}
     repo_df = entities.get("Repo", pd.DataFrame())
     if not repo_df.empty:
         name_col = "original_repo_name" if "original_repo_name" in repo_df.columns else (

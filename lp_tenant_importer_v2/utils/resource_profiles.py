@@ -16,11 +16,11 @@ Rules:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 import pandas as pd
-
 
 # ---------------------------- helpers (generic) ----------------------------
 
@@ -60,7 +60,7 @@ def _to_str(value: Any) -> str:
     return str(value)
 
 
-def _split_multi(cell: Any, seps: Iterable[str]) -> List[str]:
+def _split_multi(cell: Any, seps: Iterable[str]) -> list[str]:
     """Split a cell into multiple string values using any of the separators."""
     raw = _to_str(cell)
     if raw == "":
@@ -79,13 +79,13 @@ def _ensure_trailing_slash(path: str) -> str:
     return s if s.endswith("/") else s + "/"
 
 
-def _canon_list_of_dict_unordered(items: List[Dict[str, Any]], key_fields: List[str], value_fields: List[str]) -> List[Tuple]:
+def _canon_list_of_dict_unordered(items: list[dict[str, Any]], key_fields: list[str], value_fields: list[str]) -> list[tuple]:
     """Return a stable, order-insensitive canonical representation.
 
     Example: [{"path": "/a/", "retention": "365"}] with key_fields=["path"]
              becomes [("/a/", ("retention","365"))]
     """
-    out: List[Tuple] = []
+    out: list[tuple] = []
     for it in items or []:
         key = tuple(_to_str(it.get(k)) for k in key_fields)
         val = tuple((vf, _to_str(it.get(vf))) for vf in value_fields)
@@ -103,24 +103,24 @@ class ReposProfile:
     # XLSX parsing config
     sheet: str = "Repo"
     col_name: str = "name"
-    col_name_aliases: Tuple[str, ...] = ("cleaned_repo_name",)
+    col_name_aliases: tuple[str, ...] = ("cleaned_repo_name",)
     col_storage_paths: str = "storage_paths"
     col_retention_days: str = "retention_days"
     col_repoha_li: str = "repoha_li"     # optional
     col_repoha_day: str = "repoha_day"   # optional
-    split_on: Tuple[str, ...] = ("|", ",")
+    split_on: tuple[str, ...] = ("|", ",")
 
     # API whitelist (Director 2.7) for payloads
     api_resource: str = "Repos"
-    api_post_fields: Tuple[str, ...] = ("name", "hiddenrepopath", "repoha")
-    api_put_fields: Tuple[str, ...] = ("id", "hiddenrepopath", "repoha")
+    api_post_fields: tuple[str, ...] = ("name", "hiddenrepopath", "repoha")
+    api_put_fields: tuple[str, ...] = ("id", "hiddenrepopath", "repoha")
 
     # Subresource for verification
     sub_repo_paths: str = "RepoPaths"
-    repo_paths_candidates: Tuple[str, ...] = ("0.paths", "paths")  # tolerate list-of-dict or dict
+    repo_paths_candidates: tuple[str, ...] = ("0.paths", "paths")  # tolerate list-of-dict or dict
 
     # Comparison fields (NOOP vs UPDATE)
-    compare_fields: Tuple[str, ...] = ("hiddenrepopath", "repoha")
+    compare_fields: tuple[str, ...] = ("hiddenrepopath", "repoha")
 
     # ----------------- parsing & canonicalization -----------------
 
@@ -132,7 +132,7 @@ class ReposProfile:
                 return _to_str(row.get(c)).strip()
         return ""
 
-    def parse_row(self, row: pd.Series) -> Dict[str, Any]:
+    def parse_row(self, row: pd.Series) -> dict[str, Any]:
         """Parse and normalize a single XLSX row to desired canonical fields.
 
         Output keys:
@@ -147,9 +147,9 @@ class ReposProfile:
         if len(paths) != len(rets):
             raise ValueError(f"Row '{name}': storage_paths and retention_days length mismatch ({len(paths)} vs {len(rets)})")
 
-        hiddenrepopath = [{"path": p, "retention": _to_str(r)} for p, r in zip(paths, rets)]
+        hiddenrepopath = [{"path": p, "retention": _to_str(r)} for p, r in zip(paths, rets, strict=False)]
 
-        repoha: List[Dict[str, str]] = []
+        repoha: list[dict[str, str]] = []
         if self.col_repoha_li in row or self.col_repoha_day in row:
             li = [_to_str(x) for x in _split_multi(row.get(self.col_repoha_li), self.split_on)]
             dy = [_to_str(x) for x in _split_multi(row.get(self.col_repoha_day), self.split_on)]
@@ -157,7 +157,7 @@ class ReposProfile:
                 # zip len must match if either provided
                 if len(li) != len(dy):
                     raise ValueError(f"Row '{name}': repoha_li and repoha_day length mismatch ({len(li)} vs {len(dy)})")
-                repoha = [{"ha_li": _to_str(a), "ha_day": _to_str(b)} for a, b in zip(li, dy)]
+                repoha = [{"ha_li": _to_str(a), "ha_day": _to_str(b)} for a, b in zip(li, dy, strict=False)]
 
         return {
             "name": name,
@@ -165,7 +165,7 @@ class ReposProfile:
             "repoha": repoha or None,
         }
 
-    def canon_for_compare(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_for_compare(self, obj: dict[str, Any]) -> dict[str, Any]:
         """Return a stable comparable subset for NOOP vs UPDATE decisions.
 
         - Convert list-of-dicts to order-insensitive tuples keyed by their stable key.
@@ -193,9 +193,9 @@ class ReposProfile:
 
     # ----------------- payload builders -----------------
 
-    def build_post_payload(self, desired: Dict[str, Any]) -> Dict[str, Any]:
+    def build_post_payload(self, desired: dict[str, Any]) -> dict[str, Any]:
         """Construct payload (POST) using only documented fields."""
-        data: Dict[str, Any] = {
+        data: dict[str, Any] = {
             "name": _to_str(desired.get("name")),
             "hiddenrepopath": [
                 {"path": _to_str(x.get("path")), "retention": _to_int(x.get("retention"))}
@@ -211,9 +211,9 @@ class ReposProfile:
         # Filter by whitelist fields
         return {k: v for k, v in data.items() if k in self.api_post_fields}
 
-    def build_put_payload(self, existing_id: str, desired: Dict[str, Any]) -> Dict[str, Any]:
+    def build_put_payload(self, existing_id: str, desired: dict[str, Any]) -> dict[str, Any]:
         """Construct payload (PUT) using only documented fields."""
-        data: Dict[str, Any] = {
+        data: dict[str, Any] = {
             "id": _to_str(existing_id),
             "hiddenrepopath": [
                 {"path": _to_str(x.get("path")), "retention": _to_int(x.get("retention"))}
@@ -229,7 +229,7 @@ class ReposProfile:
 
     # ----------------- verification -----------------
 
-    def extract_repo_paths(self, raw: Any) -> List[str]:
+    def extract_repo_paths(self, raw: Any) -> list[str]:
         """Extract the list of valid RepoPaths from API response.
 
         Tolerates:

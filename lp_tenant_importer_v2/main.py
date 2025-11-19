@@ -11,16 +11,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Tuple, List, Dict, Any
+from typing import Any
 
 import requests
 
 from .core.config import Config, ConfigError
 from .core.director_client import DirectorClient
-from .core.logging_utils import setup_logging, get_logger
+from .core.logging_utils import get_logger, setup_logging
+from .importers.registry import get_spec_by_key, iter_specs
 from .utils.reporting import print_rows
 from .utils.validators import ValidationError
-from .importers.registry import get_spec_by_key, iter_specs
 
 EXIT_OK = 0
 EXIT_GENERIC_ERROR = 1
@@ -31,7 +31,7 @@ EXIT_NETWORK_ERROR = 4
 log = get_logger(__name__)
 
 
-def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
+def _prepare_context(args) -> tuple[DirectorClient, str, str, str, Config]:
     """Resolve environment/config and return runtime artifacts.
 
     Returns:
@@ -65,17 +65,17 @@ def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Config]:
     return client, pool_uuid, tenant.name, args.xlsx, cfg
 
 
-def _enrich_rows_for_output(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _enrich_rows_for_output(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize a few fields for nicer table output:
     - If 'error' is a list (e.g., missing repos), stringify as 'missing repos: a, b'.
     - Ensure monitor_ok / monitor_branch are printable (fallback to '—' if None/empty).
     """
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for r in rows:
         rr = dict(r)  # shallow copy
 
         err = rr.get("error")
-        if isinstance(err, List):
+        if isinstance(err, list):
             rr["error"] = f"missing repos: {', '.join(err)}" if err else "—"
         elif err in (None, ""):
             # try to synthesize from nested result if present (defensive)
@@ -103,11 +103,11 @@ def cmd_import_generic(args):
         # Early check: XLSX path exists
         if not os.path.isfile(args.xlsx):
             raise FileNotFoundError(
-                (
+                
                     f"XLSX file not found: {args.xlsx}. "
                     "Hint: try ./lp_tenant_importer_v2/samples/core_config.xlsx "
                     "or provide an absolute path."
-                )
+                
             )
 
         spec_key = getattr(args, "importer_key", None)

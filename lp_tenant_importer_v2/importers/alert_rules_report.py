@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
 
 import pandas as pd
 
-from .base import BaseImporter, ImportResult
 from ..core.config import NodeRef
 from ..core.director_client import DirectorClient
+from .base import BaseImporter, ImportResult
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class AlertRulesXlsxLister(BaseImporter):
     resource_name: str = "alert_rules_report"
 
     # Accept multiple possible sheet names (aliases) to be resilient across files.
-    SHEET_ALIASES: Tuple[str, ...] = (
+    SHEET_ALIASES: tuple[str, ...] = (
         "Alert",
         "MyAlertRules",
         "SharedAlertRules",
@@ -45,7 +45,7 @@ class AlertRulesXlsxLister(BaseImporter):
 
     # Column aliases, normalized to "lower snake case" during parsing.
     # We only *require* `name`; other fields are optional.
-    COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+    COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
         "name": ("name", "alert_name", "rule_name", "alert", "rule"),
         "owner": ("settings_user", "owner", "owner_login", "owner_user", "owner_name"),
         "assign_to": (
@@ -90,13 +90,13 @@ class AlertRulesXlsxLister(BaseImporter):
         df.columns = [norm(c) for c in df.columns]
         return df
 
-    def _resolve_colmap(self, df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    def _resolve_colmap(self, df: pd.DataFrame) -> dict[str, str | None]:
         """
         Resolve actual column names present in the DataFrame for each canonical key.
         Returns a mapping: canonical -> actual_column_name_or_None.
         """
         cols = set(df.columns)
-        colmap: Dict[str, Optional[str]] = {}
+        colmap: dict[str, str | None] = {}
 
         for canonical, aliases in self.COLUMN_ALIASES.items():
             found = next((a for a in aliases if a in cols), None)
@@ -122,7 +122,7 @@ class AlertRulesXlsxLister(BaseImporter):
         return colmap
 
     @staticmethod
-    def _pick_sheet(xl: Dict[str, pd.DataFrame], aliases: Iterable[str]) -> Tuple[str, pd.DataFrame]:
+    def _pick_sheet(xl: dict[str, pd.DataFrame], aliases: Iterable[str]) -> tuple[str, pd.DataFrame]:
         """
         Pick the first available sheet among the provided aliases.
         """
@@ -132,7 +132,7 @@ class AlertRulesXlsxLister(BaseImporter):
         raise KeyError(f"None of the expected sheets are present: {', '.join(aliases)}")
 
     @staticmethod
-    def _parse_visible(value: object) -> Optional[str]:
+    def _parse_visible(value: object) -> str | None:
         """
         Convert a cell into a normalized, comma-separated list string.
         Accepts lists, sets, tuples, or delimited strings; returns None if empty.
@@ -148,7 +148,7 @@ class AlertRulesXlsxLister(BaseImporter):
         if not s:
             return None
         # Split on common delimiters and normalize
-        parts: List[str] = []
+        parts: list[str] = []
         for piece in [p.strip() for d in (",", ";", "|") for p in s.split(d)]:
             if piece:
                 parts.append(piece)
@@ -160,7 +160,7 @@ class AlertRulesXlsxLister(BaseImporter):
         self,
         client: DirectorClient,
         pool_uuid: str,
-        nodes: List[NodeRef],
+        nodes: list[NodeRef],
         xlsx_path: str,
         dry_run: bool,
         tenant_name: str = None,
@@ -183,7 +183,7 @@ class AlertRulesXlsxLister(BaseImporter):
         except Exception as exc:
             logger.error("Failed to read Excel file: %s", exc, exc_info=True)
             # Keep the contract: return a result object with a single error row per node
-            rows: List[Dict[str, object]] = []
+            rows: list[dict[str, object]] = []
             for node in nodes or []:
                 rows.append({
                     "siem": node.id if isinstance(node, NodeRef) else "",
@@ -201,7 +201,7 @@ class AlertRulesXlsxLister(BaseImporter):
             sheet_name, df = self._pick_sheet(xl, self.SHEET_ALIASES)
         except Exception as exc:
             logger.error("Sheet selection failed: %s", exc, exc_info=True)
-            rows: List[Dict[str, object]] = []
+            rows: list[dict[str, object]] = []
             for node in nodes or []:
                 rows.append({
                     "siem": node.id if isinstance(node, NodeRef) else "",
@@ -220,7 +220,7 @@ class AlertRulesXlsxLister(BaseImporter):
             colmap = self._resolve_colmap(df)
         except Exception as exc:
             logger.error("Column resolution failed: %s", exc, exc_info=True)
-            rows: List[Dict[str, object]] = []
+            rows: list[dict[str, object]] = []
             for node in nodes or []:
                 rows.append({
                     "siem": node.id if isinstance(node, NodeRef) else "",
@@ -234,7 +234,7 @@ class AlertRulesXlsxLister(BaseImporter):
             return ImportResult(rows=rows, any_error=True)
 
         # Build report rows
-        out_rows: List[Dict[str, object]] = []
+        out_rows: list[dict[str, object]] = []
         alerts_count = 0
 
         name_col = colmap["name"]

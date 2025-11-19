@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Set, Tuple, Union
 import logging
+from collections.abc import Iterable
+from typing import Any, Union
+
 import pandas as pd
 
 from ..core.director_client import DirectorClient
-from ..utils.validators import ValidationError
 from ..utils.resource_profiles import REPOS_PROFILE
+from ..utils.validators import ValidationError
 from .base import BaseImporter, NodeRef
 
-JSON = Union[Dict[str, Any], List[Any]]
+JSON = Union[dict[str, Any], list[Any]]
 log = logging.getLogger(__name__)
 
 
@@ -33,7 +35,7 @@ class ReposImporter(BaseImporter):
 
     # ------------ XLSX parsing / canonicalisation ------------
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         df: pd.DataFrame = sheets[REPOS_PROFILE.sheet]
         cols = set(df.columns.str.lower())
         if (REPOS_PROFILE.col_name not in cols) and not any(a in cols for a in REPOS_PROFILE.col_name_aliases):
@@ -44,13 +46,13 @@ class ReposImporter(BaseImporter):
         for _, row in df.iterrows():
             yield REPOS_PROFILE.parse_row(row)
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return desired_row["name"]
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return REPOS_PROFILE.canon_for_compare(desired_row)
 
-    def canon_existing(self, existing_obj: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    def canon_existing(self, existing_obj: dict[str, Any] | None) -> dict[str, Any] | None:
         return REPOS_PROFILE.canon_for_compare(existing_obj) if existing_obj else None
 
     # -------------------- Read existing --------------------
@@ -60,7 +62,7 @@ class ReposImporter(BaseImporter):
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Return {name -> object}, tolerating list/dict from the API."""
         node_t = _node_tag(node)
         log.info("fetch_existing: start [node=%s]", node_t)
@@ -81,7 +83,7 @@ class ReposImporter(BaseImporter):
         else:
             items = []
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         for it in items:
             name = (it.get("name") or it.get("label") or "").strip()
             if name:
@@ -92,9 +94,9 @@ class ReposImporter(BaseImporter):
 
     # -------------------- RepoPaths verification --------------------
 
-    def _extract_paths(self, raw: Any) -> Set[str]:
+    def _extract_paths(self, raw: Any) -> set[str]:
         """Collect valid RepoPaths from common shapes."""
-        paths: Set[str] = set()
+        paths: set[str] = set()
         if raw is None:
             return paths
 
@@ -132,8 +134,8 @@ class ReposImporter(BaseImporter):
         client: DirectorClient,
         pool_uuid: str,
         node: NodeRef,
-        storage_paths: List[str],
-    ) -> List[str]:
+        storage_paths: list[str],
+    ) -> list[str]:
         node_t = _node_tag(node)
         if not storage_paths:
             log.info("verify_paths: nothing to verify (empty) [node=%s]", node_t)
@@ -162,10 +164,10 @@ class ReposImporter(BaseImporter):
 
     # -------------------- Payloads --------------------
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         return REPOS_PROFILE.build_post_payload(desired_row)
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         return REPOS_PROFILE.build_put_payload(existing_obj.get("id", ""), desired_row)
 
     # -------------------- Apply (RAW desired) --------------------
@@ -177,7 +179,7 @@ class ReposImporter(BaseImporter):
         node: NodeRef,
         decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         node_t = _node_tag(node)
         desired = (decision.desired or {}).copy()
         repo_name = desired.get("name") or "(unnamed)"

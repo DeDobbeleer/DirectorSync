@@ -1,8 +1,8 @@
-import logging
-import pandas as pd
-from typing import Dict, List, Any, Tuple
 import json
+import logging
+from typing import Any
 
+import pandas as pd
 from core.http import DirectorClient
 from core.nodes import Node
 
@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 def import_normalization_policies_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List[Node]],
+    nodes: dict[str, list[Node]],
     xlsx_path: str,
     dry_run: bool,
-    targets: List[str],
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str],
+) -> tuple[list[dict[str, Any]], bool]:
     """Import normalization policies for the specified nodes.
 
     Reads the 'NormalizationPolicy' sheet from the XLSX file, processes each policy,
@@ -169,8 +169,8 @@ def _process_policy_action(
     pool_uuid: str,
     logpoint_id: str,
     dry_run: bool,
-    policy: Dict[str, Any]
-) -> Tuple[str, str, str]:
+    policy: dict[str, Any]
+) -> tuple[str, str, str]:
     """Determine and execute action for a single policy.
 
     Args:

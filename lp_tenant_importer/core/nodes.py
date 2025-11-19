@@ -1,4 +1,3 @@
-from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,7 +8,7 @@ class Node:
         self.id = id
         self.name = name
 
-def collect_nodes(tenant_config: Dict) -> Dict[str, List[Node]]:
+def collect_nodes(tenant_config: dict) -> dict[str, list[Node]]:
     """Collect nodes from tenant configuration.
 
     Args:

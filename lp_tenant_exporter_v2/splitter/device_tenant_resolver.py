@@ -1,16 +1,17 @@
 from __future__ import annotations
-import re
+
 import json
 import logging
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Any
 
 log = logging.getLogger(__name__)
 
-def _cfg_get(cfg: Dict[str, Any], key: str, default: Any) -> Any:
+def _cfg_get(cfg: dict[str, Any], key: str, default: Any) -> Any:
     v = cfg.get(key, default)
     return v if v is not None else default
 
-def _parse_collectors(value: Any, split_regex: str, left_of_colon: bool) -> List[str]:
+def _parse_collectors(value: Any, split_regex: str, left_of_colon: bool) -> list[str]:
     """
     Transforme la valeur du champ 'distributed_collector' en liste d'IDs normalisés.
     - Accepte: None, liste Python, liste JSON sous forme de string, ou string simple.
@@ -21,7 +22,7 @@ def _parse_collectors(value: Any, split_regex: str, left_of_colon: bool) -> List
     if value is None:
         return []
 
-    parts: List[str]
+    parts: list[str]
     if isinstance(value, list):
         parts = [str(x).strip() for x in value if str(x).strip()]
     elif isinstance(value, str):
@@ -54,17 +55,17 @@ def _parse_collectors(value: Any, split_regex: str, left_of_colon: bool) -> List
     return uniq
 
 def resolve_device_tenant_by_collectors(
-    device_row: Dict[str, Any],
-    tenants: List[str],
-    cfg: Dict[str, Any]
-) -> Tuple[str | None, str]:
+    device_row: dict[str, Any],
+    tenants: list[str],
+    cfg: dict[str, Any]
+) -> tuple[str | None, str]:
     """
     Retourne (tenant_ou_None, method):
       - method = "collector" si mapping unique trouvé par collector
       - method = "name" si aucun mapping collector trouvé → fallback par nom
       - method = "none" si aucune info (laisse l'appelant décider)
     """
-    collector_map: Dict[str, str] = _cfg_get(cfg, "collector_to_tenant", {})
+    collector_map: dict[str, str] = _cfg_get(cfg, "collector_to_tenant", {})
     if not collector_map:
         return None, "none"
 
@@ -95,9 +96,9 @@ def resolve_device_tenant_by_collectors(
     return None, "name"
 
 def determine_device_tenant(
-    device_row: Dict[str, Any],
-    tenants: List[str],
-    cfg: Dict[str, Any],
+    device_row: dict[str, Any],
+    tenants: list[str],
+    cfg: dict[str, Any],
     name_matcher,  # callback: (name: str, tenants: List[str]) -> str | None
     default_unassigned: str = "Unassigned",
 ) -> str:

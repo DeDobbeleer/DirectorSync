@@ -1,16 +1,14 @@
 import logging
-import requests
-import pandas as pd
-from typing import Dict, List, Any, Tuple
-import json
-import numpy as np
+from typing import Any
 
+import pandas as pd
+import requests
 from core.http import DirectorClient
 from core.nodes import Node
 
 logger = logging.getLogger(__name__)
 
-def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
+def build_syslog_collector_payloads(df: pd.DataFrame) -> dict[str, dict]:
     """
     Builds the Syslog Collector payloads from the DeviceFetcher DataFrame.
 
@@ -86,7 +84,7 @@ def build_syslog_collector_payloads(df: pd.DataFrame) -> Dict[str, Dict]:
 
     return payloads
 
-def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, payloads: Dict[str, Dict], df: pd.DataFrame) -> Dict[str, Dict]:
+def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, payloads: dict[str, dict], df: pd.DataFrame) -> dict[str, dict]:
     """
     Checks existing Syslog Collectors per node.
 
@@ -103,7 +101,7 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
     Returns:
         Dict[str, Dict]: Dictionary of results per device_id, with node-specific actions.
     """
-    results = {device_id: {} for device_id in payloads.keys()}
+    results = {device_id: {} for device_id in payloads}
     node_id = node.id
     node_name = node.name
     siem = node_name  # Assuming siem is node_name
@@ -192,7 +190,7 @@ def check_existing_per_node(client: DirectorClient, pool_uuid: str, node: Node, 
 
     return results
 
-def _compare_syslog_collector(existing: Dict, new: Dict) -> bool:
+def _compare_syslog_collector(existing: dict, new: dict) -> bool:
     """
     Compares two Syslog Collector configurations for equality.
 
@@ -212,7 +210,7 @@ def _compare_syslog_collector(existing: Dict, new: Dict) -> bool:
             return False
     return True
 
-def execute_actions_per_node(client: DirectorClient, pool_uuid: str, nodes: List[Node], payloads: Dict[str, Dict], check_results: Dict[str, Dict]) -> List[Dict]:
+def execute_actions_per_node(client: DirectorClient, pool_uuid: str, nodes: list[Node], payloads: dict[str, dict], check_results: dict[str, dict]) -> list[dict]:
     """
     Executes the actions (CREATE, UPDATE) for each Syslog Collector per node.
 
@@ -299,11 +297,11 @@ def execute_actions_per_node(client: DirectorClient, pool_uuid: str, nodes: List
 def import_syslog_collectors_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List[Node]],
+    nodes: dict[str, list[Node]],
     xlsx_path: str,
     dry_run: bool = False,
-    targets: List[str] = None
-) -> Tuple[List[Dict[str, Any]], bool]:
+    targets: list[str] = None
+) -> tuple[list[dict[str, Any]], bool]:
     """
     Imports Syslog Collectors for specified nodes from an XLSX file.
 

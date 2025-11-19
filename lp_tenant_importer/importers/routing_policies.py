@@ -2,10 +2,9 @@
 import json
 import logging
 import re
-from typing import Dict, List, Tuple, Any
+from typing import Any
 
 import pandas as pd
-
 from core.http import DirectorClient
 from core.nodes import Node
 
@@ -36,12 +35,12 @@ def normalize_repo_name(repo_name: str, tenant: str) -> str:
 def import_routing_policies_for_nodes(
     client: DirectorClient,
     pool_uuid: str,
-    nodes: Dict[str, List[Node]],
+    nodes: dict[str, list[Node]],
     xlsx_path: str,
     dry_run: bool,
-    targets: List[str],
+    targets: list[str],
     tenant: str = 'core'
-) -> Tuple[List[Dict], bool]:
+) -> tuple[list[dict], bool]:
     """Import or update routing policies for specified nodes.
 
     Groups rows by cleaned_policy_name to handle multi-line policies with multiple criteria.
@@ -308,7 +307,7 @@ def import_routing_policies_for_nodes(
     return rows, any_error
 
 
-def _needs_update(existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
+def _needs_update(existing: dict[str, Any], new: dict[str, Any]) -> bool:
     """Check if an existing policy needs updating by comparing key fields.
 
     Args:
@@ -328,7 +327,7 @@ def _needs_update(existing: Dict[str, Any], new: Dict[str, Any]) -> bool:
     new_criteria = new.get("routing_criteria", [])
     if len(existing_criteria) != len(new_criteria):
         return True
-    for existing_crit, new_crit in zip(existing_criteria, new_criteria):
+    for existing_crit, new_crit in zip(existing_criteria, new_criteria, strict=False):
         if existing_crit != new_crit:
             return True
 

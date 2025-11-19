@@ -17,13 +17,14 @@ Design:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import pandas as pd
 
-from lp_tenant_importer_v2.importers.base import BaseImporter
 from lp_tenant_importer_v2.core.config import NodeRef
 from lp_tenant_importer_v2.core.director_client import DirectorClient
+from lp_tenant_importer_v2.importers.base import BaseImporter
 from lp_tenant_importer_v2.utils.validators import ValidationError, require_columns
 
 log = logging.getLogger(__name__)
@@ -33,24 +34,24 @@ class DeviceGroupsImporter(BaseImporter):
     """Importer for DeviceGroups (MVP: name + description)."""
 
     resource_name: str = "device_groups"
-    sheet_names: Tuple[str, ...] = ("DeviceGroups",)
-    required_columns: Tuple[str, ...] = ("name",)  # description is optional
+    sheet_names: tuple[str, ...] = ("DeviceGroups",)
+    required_columns: tuple[str, ...] = ("name",)  # description is optional
     # Diff only on "description" (key is implicit via BaseImporter)
-    compare_keys: Tuple[str, ...] = ("description",)
+    compare_keys: tuple[str, ...] = ("description",)
 
     # ------------------------------------------------------------------
     # Existing state
     # ------------------------------------------------------------------
     def fetch_existing(
         self, client: DirectorClient, pool_uuid: str, node: NodeRef
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Return name -> existing object for this node."""
         path = client.configapi(pool_uuid, node.id, "DeviceGroups")
         data = client.get_json(path) or []
         if isinstance(data, dict) and "data" in data:
             data = data.get("data") or []
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
         if not isinstance(data, list):
             log.warning(
                 "DeviceGroups.fetch_existing: unexpected payload type from %s: %s",
@@ -76,7 +77,7 @@ class DeviceGroupsImporter(BaseImporter):
     # ------------------------------------------------------------------
     # Desired state from XLSX
     # ------------------------------------------------------------------
-    def iter_desired(self, sheets: Dict[str, pd.DataFrame]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         df = sheets["DeviceGroups"].copy()
         # normalize headers and enforce required columns
         df.columns = [str(c).strip() for c in df.columns]
@@ -89,7 +90,7 @@ class DeviceGroupsImporter(BaseImporter):
             return str(val).strip()
 
         # detect duplicates by 'name'
-        names: List[str] = []
+        names: list[str] = []
         for _, row in df.iterrows():
             name = _norm_str(row.get("name"))
             if not name:
@@ -104,7 +105,7 @@ class DeviceGroupsImporter(BaseImporter):
         for _, row in df.iterrows():
             name = _norm_str(row.get("name"))
             description = _norm_str(row.get("description"))
-            desired: Dict[str, Any] = {"name": name}
+            desired: dict[str, Any] = {"name": name}
             if description:
                 desired["description"] = description
             yield desired
@@ -112,15 +113,15 @@ class DeviceGroupsImporter(BaseImporter):
     # ------------------------------------------------------------------
     # Canonicalization for diff
     # ------------------------------------------------------------------
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         return str(desired_row.get("name") or "").strip()
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         # Always include 'description' for consistent subset comparison
         desc = str(desired_row.get("description") or "")
         return {"description": desc}
 
-    def canon_existing(self, existing_obj: Dict[str, Any]) -> Dict[str, Any] | None:
+    def canon_existing(self, existing_obj: dict[str, Any]) -> dict[str, Any] | None:
         if not existing_obj:
             return None
         desc = str(existing_obj.get("description") or "")
@@ -129,17 +130,17 @@ class DeviceGroupsImporter(BaseImporter):
     # ------------------------------------------------------------------
     # Payload builders
     # ------------------------------------------------------------------
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         payload = {"name": desired_row["name"]}
         if desired_row.get("description"):
             payload["description"] = desired_row["description"]
         return payload
 
     def build_payload_update(
-        self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, desired_row: dict[str, Any], existing_obj: dict[str, Any]
+    ) -> dict[str, Any]:
         # MVP: allow updating description only (no rename)
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         existing_name = (existing_obj.get("name") or "").strip()
         # required by API:
         payload["name"] = existing_name
@@ -153,8 +154,8 @@ class DeviceGroupsImporter(BaseImporter):
     # Apply plan
     # ------------------------------------------------------------------
     def _monitor_if_any(
-        self, client: DirectorClient, pool_uuid: str, node: NodeRef, response: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, client: DirectorClient, pool_uuid: str, node: NodeRef, response: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Best-effort monitoring:
         - Try job-id based (monitorapi/{pool}/{node}/orders/{job})
@@ -197,7 +198,7 @@ class DeviceGroupsImporter(BaseImporter):
         node: NodeRef,
         decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         resource = "DeviceGroups"
 
         # --- CREATE ---

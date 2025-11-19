@@ -1,15 +1,15 @@
-import os
-import logging
 import json
+import logging
+import os
 from pathlib import Path
-from typing import Optional
+
 from dotenv import load_dotenv
 
 logger = logging.getLogger("__name__")
 
 
 def configure_logging(
-    log_level: str = "INFO", log_json: bool = False, log_dir: Optional[str] = None
+    log_level: str = "INFO", log_json: bool = False, log_dir: str | None = None
 ) -> None:
     """Configure logging with selectable level and format.
 

@@ -4,21 +4,22 @@ equality, and payload building. Everything else is handled here.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any
 
 import pandas as pd
 
 from ..core.config import NodeRef, TenantConfig
 from ..core.director_client import DirectorClient
 from ..utils.diff_engine import Decision, decide
-from ..utils.validators import require_sheets, require_columns, ValidationError
+from ..utils.validators import require_columns, require_sheets
 
 
 @dataclass
 class ImportResult:
     """Aggregate result for a run across multiple nodes."""
-    rows: List[Dict[str, Any]]
+    rows: list[dict[str, Any]]
     any_error: bool
 
 
@@ -35,12 +36,12 @@ class BaseImporter:
     """
 
     resource_name: str = "resource"
-    sheet_names: Tuple[str, ...] = ()
-    required_columns: Tuple[str, ...] = ()
-    compare_keys: Tuple[str, ...] = ()
+    sheet_names: tuple[str, ...] = ()
+    required_columns: tuple[str, ...] = ()
+    compare_keys: tuple[str, ...] = ()
 
     # ----- IO helpers -----------------------------------------------------
-    def load_xlsx(self, xlsx_path: str) -> Dict[str, pd.DataFrame]:
+    def load_xlsx(self, xlsx_path: str) -> dict[str, pd.DataFrame]:
         """Load an Excel workbook into a dict of DataFrames keyed by sheet name.
 
         Raises:
@@ -58,38 +59,38 @@ class BaseImporter:
             raise RuntimeError(f"Failed to read {xlsx_path}: {exc}") from exc
         return xl
 
-    def validate(self, sheets: Dict[str, pd.DataFrame]) -> None:
+    def validate(self, sheets: dict[str, pd.DataFrame]) -> None:
         """Validate presence of required sheets and columns."""
         require_sheets(sheets, self.sheet_names)
         for sheet in self.sheet_names:
             require_columns(sheets[sheet], self.required_columns)
 
     # ----- hooks to implement --------------------------------------------
-    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> Dict[str, Dict[str, Any]]:
+    def fetch_existing(self, client: DirectorClient, pool_uuid: str, node: NodeRef) -> dict[str, dict[str, Any]]:
         """Return a mapping ``name -> existing_obj`` for the node."""
         raise NotImplementedError
 
-    def iter_desired(self, sheets: Dict[str, "pd.DataFrame"]) -> Iterable[Dict[str, Any]]:
+    def iter_desired(self, sheets: dict[str, pd.DataFrame]) -> Iterable[dict[str, Any]]:
         """Yield canonical desired rows parsed from the Excel sheets."""
         raise NotImplementedError
 
-    def key_fn(self, desired_row: Dict[str, Any]) -> str:
+    def key_fn(self, desired_row: dict[str, Any]) -> str:
         """Return the unique key (usually name) for a desired row."""
         raise NotImplementedError
 
-    def canon_desired(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_desired(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         """Return the comparable subset for a desired row."""
         raise NotImplementedError
 
-    def canon_existing(self, existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def canon_existing(self, existing_obj: dict[str, Any]) -> dict[str, Any]:
         """Return the comparable subset for an existing object."""
         raise NotImplementedError
 
-    def build_payload_create(self, desired_row: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_create(self, desired_row: dict[str, Any]) -> dict[str, Any]:
         """Build the API create payload for a desired row."""
         raise NotImplementedError
 
-    def build_payload_update(self, desired_row: Dict[str, Any], existing_obj: Dict[str, Any]) -> Dict[str, Any]:
+    def build_payload_update(self, desired_row: dict[str, Any], existing_obj: dict[str, Any]) -> dict[str, Any]:
         """Build the API update payload for a desired row given the existing object."""
         raise NotImplementedError
 
@@ -109,7 +110,7 @@ class BaseImporter:
         node: NodeRef,
         decision: Decision,
         existing_id: str | None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Execute the decided operation (CREATE/UPDATE/NOOP/SKIP) on the API."""
         raise NotImplementedError
 
@@ -118,7 +119,7 @@ class BaseImporter:
         self,
         client: DirectorClient,
         pool_uuid: str,
-        nodes: List[NodeRef],
+        nodes: list[NodeRef],
         xlsx_path: str,
         dry_run: bool,
         tenant_name: str = None,
@@ -139,7 +140,7 @@ class BaseImporter:
         sheets = self.load_xlsx(xlsx_path)
         self.validate(sheets)
 
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         any_error = False
 
         for node in nodes:

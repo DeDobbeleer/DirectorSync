@@ -2,9 +2,10 @@
 """Importer registry for DirectorSync v2."""
 
 from __future__ import annotations
+
+from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Callable, Dict, Iterable, Type
 
 # -------- Importer classes (full pipeline) ----------------------------------
 
@@ -21,7 +22,7 @@ class ImporterSpec:
         mod = import_module(self.module)
         return getattr(mod, self.class_name)
 
-_IMPORTERS: Dict[str, ImporterSpec] = {
+_IMPORTERS: dict[str, ImporterSpec] = {
     # Repositories
     "repos": ImporterSpec(
         key="repos",

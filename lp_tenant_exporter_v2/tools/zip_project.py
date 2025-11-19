@@ -3,8 +3,8 @@ import argparse
 import os
 import sys
 import zipfile
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # pathspec est optionnel (pip install pathspec). Si absent, on degrade en fnmatch.
 try:
@@ -138,7 +138,7 @@ def main():
         manifest_lines = [
             f"project: {PROJECT_ROOT.name}",
             f"created_at: {datetime.now().isoformat()}",
-            f"tool: zip_project.py",
+            "tool: zip_project.py",
             "excluded_rules:",
             *[f"  - {p}" for p in patterns],
             "files:",

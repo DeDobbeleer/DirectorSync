@@ -1,22 +1,21 @@
-import json
 import argparse
+import json
 import logging
 import os
 import sys
-from typing import Tuple, Dict, List
-from dotenv import load_dotenv
 
-from config_loader import load_tenants_file, get_tenant
+from config_loader import get_tenant, load_tenants_file
 from core.http import DirectorClient
 from core.nodes import Node, collect_nodes
-from importers.repos import import_repos_for_nodes
-from importers.routing_policies import import_routing_policies_for_nodes
+from dotenv import load_dotenv
+from importers.alerts import import_alerts_for_nodes
+from importers.device_groups import import_device_groups_for_nodes
+from importers.devices import import_devices_for_nodes
+from importers.enrichment_policies import import_enrichment_policies_for_nodes
 from importers.normalization_policies import import_normalization_policies_for_nodes
 from importers.processing_policies import import_processing_policies_for_nodes
-from importers.enrichment_policies import import_enrichment_policies_for_nodes
-from importers.device_groups import import_device_groups_for_nodes
-from importers.alerts import import_alerts_for_nodes
-from importers.devices import import_devices_for_nodes
+from importers.repos import import_repos_for_nodes
+from importers.routing_policies import import_routing_policies_for_nodes
 from importers.syslog_fetcher import import_syslog_collectors_for_nodes
 
 logging_utils = __import__("logging_utils")
@@ -34,7 +33,7 @@ env_path = os.path.join(script_dir, '.env')
 load_dotenv(env_path)
 
 
-def _prepare_context(args) -> Tuple[DirectorClient, str, str, str, Dict[str, List[Node]], str]:
+def _prepare_context(args) -> tuple[DirectorClient, str, str, str, dict[str, list[Node]], str]:
     """Prepare the context for the command execution.
 
     Args:

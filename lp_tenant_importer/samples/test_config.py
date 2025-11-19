@@ -1,7 +1,13 @@
 # /lp_tenant_import/test_config.py
 import logging
+
 logging.basicConfig(level="DEBUG")
-from lp_tenant_importer.config_loader import load_env, load_tenants_file, get_tenant, get_targets
+from lp_tenant_importer.config_loader import (
+    get_targets,
+    get_tenant,
+    load_env,
+    load_tenants_file,
+)
 
 # Simuler .env
 with open(".env", "w") as f:

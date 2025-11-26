@@ -1,0 +1,33 @@
+resources:
+  routing_policies:
+    data_source:
+      type: sql
+      table: routing_policies
+      tenant_column: tenant_code
+      external_id_column: external_id
+      unique_key: ["name"]
+
+    api:
+      core:
+        list:
+          endpoint: /api/director/v2/routing-policies
+          method: GET
+        create:
+          endpoint: /api/director/v2/routing-policies
+          method: POST
+        update:
+          endpoint: /api/director/v2/routing-policies/{id}
+          method: PUT
+
+    mapping:
+      fields:
+        name: name
+        catch_all: catch_all
+
+    comparison:
+      key_fields: ["name"]
+      canonical_fields:
+        - catch_all
+
+    preprocess: []
+    postprocess: []

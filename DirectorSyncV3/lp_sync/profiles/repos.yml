@@ -1,0 +1,32 @@
+resources:
+  repos:
+    data_source:
+      type: sql
+      table: repos
+      tenant_column: tenant_code
+      external_id_column: external_id
+      unique_key: ["name"]
+
+    api:
+      core:
+        list:
+          endpoint: /api/director/v2/repos
+          method: GET
+        create:
+          endpoint: /api/director/v2/repos
+          method: POST
+        update:
+          endpoint: /api/director/v2/repos/{id}
+          method: PUT
+
+    mapping:
+      fields:
+        name: name
+
+    comparison:
+      key_fields: ["name"]
+      canonical_fields:
+        - name
+
+    preprocess: []
+    postprocess: []

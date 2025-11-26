@@ -1,0 +1,16 @@
+[project]
+name = "DirectorSyncV3"
+version = "0.1.0"
+description = "DirectorSync V3 generic synchronization engine for Logpoint."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Gaetan and Co-Authors", email = "example@example.com" },
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

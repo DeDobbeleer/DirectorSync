@@ -6,3 +6,4 @@
 - We now rely solely on **global** `defaults.target[...]` (tenant-specific overrides ignored with a WARNING).
 - All HTTP operations go through `DirectorClient` (JSON helpers + monitor polling).
 - Importers implement only resource-specific bits (validation, equality, payload builders).
+    ²

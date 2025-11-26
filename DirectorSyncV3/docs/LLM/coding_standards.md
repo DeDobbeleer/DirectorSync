@@ -1,9 +1,3 @@
-
----
-
-## 3️⃣ `coding_standards.md`
-
-```markdown
 # Coding Standards – DirectorSyncV3
 
 ## 1. Purpose

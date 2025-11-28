@@ -51,86 +51,109 @@ that should exist in Logpoint Director for each tenant.
 
 Each row corresponds to **one repository definition** in the desired state.
 
-In V2 XLSX templates, repositories were described with columns such as:
+Unlike V2, the V3 schema is **aligned directly with the Director API
+payload fields**, so that the DB can be mapped to JSON with minimal
+transformation.
 
-- `repo_number`
-- `original_repo_name`
-- `cleaned_repo_name`
-- `storage_paths`
-- `retention_days`
-- `active`
-- `used_size`
+Typical Director API fields for a repository include:
 
-In V3, we keep the functional semantics but remove migration-specific naming.
-`name` becomes the canonical repository name, typically derived from the former
-`cleaned_repo_name`. The remaining fields are kept in a form that is easy to
-populate from XLSX while being stable for the Sync Engine.
+- `name` (string)
+- `active` (boolean)
+- `hiddenrepopath` (list of objects: `{ "path": str, "retention": int }`)
+- `repoha` (list of objects: `{ "ha_day": int, "ha_li": str }`)
+- `used_size` (numeric, informational)
+- `repo_number` (numeric, informational)
+- `tid` (string, internal identifier)
 
-### 3.2 Table Definition (Logical)
+The V3 DB schema mirrors these fields as closely as possible.
+
+### 3.2 Table Definition
 
 ```sql
-CREATE TABLE desired_repos (
+CREATE TABLE IF NOT EXISTS desired_repos (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant          VARCHAR(255) NOT NULL,
-    name            VARCHAR(255) NOT NULL,  -- V3 canonical repo name
-    description     TEXT,
-    order_index     INTEGER,                -- typically from XLSX repo_number
-    storage_paths   TEXT,                   -- raw, e.g. "/data_hot | /cold_nfs"
-    retention_days  TEXT,                   -- raw, e.g. "90 | 275"
-    is_enabled      BOOLEAN,                -- from XLSX "active"
-    used_size       TEXT,                   -- raw "11583.08301 MB"
+    name            VARCHAR(255) NOT NULL,
+    active          BOOLEAN NOT NULL,
+    hiddenrepopath  TEXT NOT NULL,
+    repoha          TEXT,
+    used_size       BIGINT,
+    repo_number     INTEGER,
+    tid             VARCHAR(255),
     created_at      TIMESTAMP NULL,
     updated_at      TIMESTAMP NULL,
     CONSTRAINT uq_desired_repos_tenant_name
         UNIQUE (tenant, name)
 );
-```
+````
 
-Field semantics:
-
-- `tenant`: logical owner of the repository (e.g. `CORE`).
-- `name`: canonical repository name in V3.
-- `description`: optional free-text description.
-- `order_index`: optional ordering hint, usually imported from XLSX
-  `repo_number`.
-- `storage_paths`: raw representation of paths, often a pipe-separated list
-  (e.g. `"/data_hot | /cold_nfs"`). Transformers can later normalize this into
-  a structured format for the Director API.
-- `retention_days`: raw representation of retention configuration, possibly
-  multi-valued (e.g. `"90 | 275"`).
-- `is_enabled`: whether the repo should be active (from XLSX `active`).
-- `used_size`: raw size string, including units, as present in the source.
-- `created_at`, `updated_at`: optional timestamps managed by the application
-  or the database.
-
-### 3.3 Recommended Indexes
+Indexes:
 
 ```sql
-CREATE INDEX idx_desired_repos_tenant
+CREATE INDEX IF NOT EXISTS idx_desired_repos_tenant
     ON desired_repos (tenant);
 
-CREATE INDEX idx_desired_repos_enabled
-    ON desired_repos (tenant, is_enabled);
+CREATE INDEX IF NOT EXISTS idx_desired_repos_active
+    ON desired_repos (tenant, active);
 ```
 
-These indexes support common queries such as “list all desired repos for a
-tenant” or “list all enabled repos for a tenant”.
+### 3.3 Column Semantics
 
-### 3.4 Mapping from V2 XLSX (Informative)
+* `tenant`
+  Logical tenant identifier used by DirectorSyncV3. A separate
+  mapping table links this to Director concepts such as `pool_uuid`
+  and `logpoint_identifier`.
 
-A typical V2 XLSX → V3 import mapping for repos is:
+* `name`
+  Repository name, as expected by the Director API (`name` field).
 
-- `name`             ← `cleaned_repo_name`
-- `order_index`      ← `repo_number`
-- `storage_paths`    ← `storage_paths`
-- `retention_days`   ← `retention_days`
-- `is_enabled`       ← `active`
-- `used_size`        ← `used_size`
+* `active`
+  Indicates whether the repository should be active in Director
+  (maps to API field `active`).
 
-This mapping is implemented in separate migration/import scripts, not in the
-Sync Engine itself.
+* `hiddenrepopath`
+  JSON-encoded list of objects describing storage paths and retention,
+  for example:
 
----
+  ```json
+  [
+    { "path": "/opt/immune/storage/", "retention": 365 },
+    { "path": "/opt/immune/cold/", "retention": 730 }
+  ]
+  ```
+
+  This maps directly to the Director API `hiddenrepopath` field.
+
+* `repoha`
+  Optional JSON-encoded list describing high-availability configuration,
+  for example:
+
+  ```json
+  [
+    { "ha_day": 2, "ha_li": "10.0.0.10" }
+  ]
+  ```
+
+  This maps directly to the Director API `repoha` field.
+
+* `used_size`, `repo_number`, `tid`
+  Optional, primarily informational fields that may be read back from
+  Director but are not required for create/update payloads.
+
+* `created_at`, `updated_at`
+  Optional audit timestamps at the DB level (not tied to Director
+  audit fields).
+
+### 3.4 Relationship with V2 Migration
+
+Any mapping from legacy V2 XLSX columns (e.g. `repo_number`,
+`cleaned_repo_name`, `storage_paths`, `retention_days`, etc.) into the
+V3 `desired_repos` schema must be implemented in **separate import or
+migration scripts**.
+
+The steady-state schema remains aligned with the Director API and does
+not contain V2-specific naming.
+
 
 ## 4. Routing Policies Data Model
 
@@ -139,166 +162,160 @@ Routing policies are modeled using **two tables**:
 - `desired_routing_policies` (policy header, 1 row per policy),
 - `desired_routing_policy_rules` (rules/criteria, 1..N rows per policy).
 
-This reflects the semantics of the V2 XLSX, where columns like
-`rule_type`, `key`, `value`, `repo`, `drop` define specific criteria that can
-appear multiple times for a single logical routing policy.
+This matches the Director API structure, where a routing policy is
+defined by:
+
+- a header (`policy_name`, `catch_all`, etc.),
+- a list of `routing_criteria` objects.
 
 ### 4.1 Routing Policy Header (`desired_routing_policies`)
 
 #### 4.1.1 Purpose
 
-The `desired_routing_policies` table represents the high-level definition of a
-routing policy:
+The `desired_routing_policies` table represents the high-level definition
+of a routing policy for a given tenant.
 
-- its canonical name in V3,
-- whether it is enabled,
-- its catch-all target repository,
-- an optional external identifier (e.g. a Director `policy_id`),
-- optional metadata (description, timestamps).
+Each row corresponds to one logical routing policy, identified by a
+tenant and a `policy_name`.
 
-In V2 XLSX templates, header-related information typically comes from columns
-like:
-
-- `original_policy_name`
-- `cleaned_policy_name`
-- `active`
-- `catch_all`
-- `policy_id`
-
-In V3, we keep a single canonical `name` and remove migration-specific naming.
-
-#### 4.1.2 Table Definition (Logical)
+#### 4.1.2 Table Definition
 
 ```sql
-CREATE TABLE desired_routing_policies (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant              VARCHAR(255) NOT NULL,
-    name                VARCHAR(255) NOT NULL,  -- V3 canonical policy name
-    description         TEXT,
-    is_enabled          BOOLEAN,               -- from XLSX "active"
-    catch_all_repo_name VARCHAR(255),          -- from XLSX "catch_all"
-    external_id         VARCHAR(255),          -- from XLSX "policy_id"
-    created_at          TIMESTAMP NULL,
-    updated_at          TIMESTAMP NULL,
+CREATE TABLE IF NOT EXISTS desired_routing_policies (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant       VARCHAR(255) NOT NULL,
+    policy_name  VARCHAR(255) NOT NULL,
+    catch_all    VARCHAR(255) NOT NULL,
+    active       BOOLEAN,
+    description  TEXT,
+    created_at   TIMESTAMP NULL,
+    updated_at   TIMESTAMP NULL,
     CONSTRAINT uq_desired_routing_policies_tenant_name
-        UNIQUE (tenant, name)
+        UNIQUE (tenant, policy_name)
 );
-```
+````
 
-Field semantics:
-
-- `tenant`: logical owner of the routing policy.
-- `name`: canonical routing policy name in V3.
-- `description`: optional free-text description.
-- `is_enabled`: whether the policy should be active (from XLSX `active`).
-- `catch_all_repo_name`: name of the repository used as catch-all (from XLSX
-  `catch_all`).
-- `external_id`: optional identifier used to link to an existing Director
-  routing policy (from XLSX `policy_id` when present).
-
-#### 4.1.3 Recommended Indexes
+Indexes:
 
 ```sql
-CREATE INDEX idx_desired_routing_policies_tenant
+CREATE INDEX IF NOT EXISTS idx_desired_routing_policies_tenant
     ON desired_routing_policies (tenant);
 
-CREATE INDEX idx_desired_routing_policies_enabled
-    ON desired_routing_policies (tenant, is_enabled);
+CREATE INDEX IF NOT EXISTS idx_desired_routing_policies_active
+    ON desired_routing_policies (tenant, active);
 ```
 
-These indexes support common queries such as “list all policies for a tenant”
-or “list all enabled policies for a tenant”.
+#### 4.1.3 Column Semantics
 
-#### 4.1.4 Mapping from V2 XLSX (Informative)
+* `tenant`
+  Logical tenant identifier, consistent with `desired_repos`.
 
-A typical V2 XLSX → V3 import mapping for routing policy headers is:
+* `policy_name`
+  Name of the routing policy, mapping directly to the Director API
+  field `policy_name`.
 
-- `name`                ← `cleaned_policy_name`
-- `is_enabled`          ← `active`
-- `catch_all_repo_name` ← `catch_all`
-- `external_id`         ← `policy_id`
+* `catch_all`
+  Name of the repository used as the catch-all target, mapping to the
+  Director API field `catch_all`. This should correspond to an
+  existing `desired_repos.name` for the same tenant.
 
-Again, this mapping is implemented in migration/import scripts.
+* `active`
+  Optional flag indicating whether the policy should be active.
 
----
+* `description`
+  Optional free-text description for documentation purposes.
+
+* `created_at`, `updated_at`
+  Optional DB-level timestamps.
 
 ### 4.2 Routing Policy Rules (`desired_routing_policy_rules`)
 
 #### 4.2.1 Purpose
 
-The `desired_routing_policy_rules` table represents individual rules or
-criteria attached to a routing policy.
+The `desired_routing_policy_rules` table represents **individual routing
+criteria** attached to a routing policy. Each row corresponds to one
+element of the `routing_criteria` list in the Director API.
 
-In V2 XLSX templates, the following columns define per-rule behavior:
-
-- `rule_type`
-- `key`
-- `value`
-- `repo`
-- `drop` (e.g. `store` / `drop`)
-
-There can be **multiple such rules** per logical routing policy. V3 models this
-explicitly as a separate table with a foreign key to
-`desired_routing_policies`.
-
-#### 4.2.2 Table Definition (Logical)
+#### 4.2.2 Table Definition
 
 ```sql
-CREATE TABLE desired_routing_policy_rules (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    routing_policy_id   BIGINT NOT NULL,
-    rule_index          INTEGER,          -- for preserving evaluation order
-    rule_type           TEXT,             -- from XLSX "rule_type"
-    key_name            TEXT,             -- from XLSX "key"
-    value_expression    TEXT,             -- from XLSX "value"
-    target_repo_name    VARCHAR(255),     -- from XLSX "repo"
-    action              VARCHAR(32),      -- from XLSX "drop" (e.g. "store"/"drop")
-    created_at          TIMESTAMP NULL,
-    updated_at          TIMESTAMP NULL,
+CREATE TABLE IF NOT EXISTS desired_routing_policy_rules (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    routing_policy_id  BIGINT NOT NULL,
+    criteria_index     INTEGER NOT NULL,
+    repo               VARCHAR(255),
+    drop               VARCHAR(32),
+    type               VARCHAR(64),
+    key                TEXT,
+    value              TEXT,
+    category           VARCHAR(32),
+    operation          VARCHAR(32),
+    prefix             BOOLEAN,
+    event_key          TEXT,
+    source_key         TEXT,
+    value_type         VARCHAR(16),
+    created_at         TIMESTAMP NULL,
+    updated_at         TIMESTAMP NULL,
     CONSTRAINT fk_routing_policy
         FOREIGN KEY (routing_policy_id)
         REFERENCES desired_routing_policies (id)
         ON DELETE CASCADE
 );
+
 ```
 
-Field semantics:
-
-- `routing_policy_id`: foreign key referencing the header row in
-  `desired_routing_policies`.
-- `rule_index`: optional integer to preserve the rule order as defined in the
-  original XLSX (e.g. line number or explicit priority).
-- `rule_type`: textual discriminator describing how to interpret the rule
-  (e.g. `KeyPresentValueMatches`, ...).
-- `key_name`: the field or attribute to match (from XLSX `key`).
-- `value_expression`: the expected value or expression (from XLSX `value`).
-- `target_repo_name`: the repository name targeted by this rule (from XLSX
-  `repo`).
-- `action`: describes what to do when the rule matches (e.g. `"store"` or
-  `"drop"` from XLSX `drop`).
-
-#### 4.2.3 Recommended Indexes
+Index:
 
 ```sql
-CREATE INDEX idx_routing_policy_rules_policy
+CREATE INDEX IF NOT EXISTS idx_routing_policy_rules_policy
     ON desired_routing_policy_rules (routing_policy_id);
 ```
 
-#### 4.2.4 Mapping from V2 XLSX (Informative)
+#### 4.2.3 Column Semantics
 
-For each row in the V2 routing policy sheet:
+The columns are intentionally aligned with the Director API routing
+criteria fields.
 
-- Find or create the corresponding policy header in
-  `desired_routing_policies` (based on `cleaned_policy_name` and `tenant`).
-- Insert a row into `desired_routing_policy_rules` with:
-  - `rule_type`        ← `rule_type`
-  - `key_name`         ← `key`
-  - `value_expression` ← `value`
-  - `target_repo_name` ← `repo`
-  - `action`           ← `drop`
-  - `rule_index`       ← line number or another ordering hint
+* `routing_policy_id`
+  Foreign key to `desired_routing_policies.id`.
 
----
+* `criteria_index`
+  Zero-based or one-based index defining the order of evaluation in
+  the `routing_criteria` list.
+
+* `repo`
+  Target repository name for this criterion, mapping to the API field
+  `repo`. This should reference an existing `desired_repos.name` for
+  the same tenant when non-empty.
+
+* `drop`
+  Action flag, typically `"store"` or `"drop"`, mapping directly to
+  the API field `drop`.
+
+* `type`
+  Criterion type, e.g. `"KeyPresent"`, `"KeyPresentValueMatches"`,
+  or other values supported by Director.
+
+* `key`, `value`
+  Key and value associated with the criterion, mapping to the API
+  fields `key` and `value`.
+
+* `category`, `operation`, `prefix`, `event_key`, `source_key`,
+  `value_type`
+  Optional advanced fields corresponding to more sophisticated routing
+  criteria variants described in the Director API documentation.
+
+#### 4.2.4 Relationship with V2 Migration
+
+In V2, routing policies were typically described with columns such as
+`rule_type`, `key`, `value`, `repo`, `drop` in XLSX templates.
+
+The V3 schema intentionally **drops V2-specific naming** and uses fields
+aligned with the Director API.
+
+Any XLSX → V3 mapping (for example, from V2 migration tools) should be
+implemented in dedicated import scripts or transformers, not in the
+steady-state schema.
 
 ## 5. Future Extensions
 

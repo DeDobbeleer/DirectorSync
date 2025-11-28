@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS desired_repos (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant          VARCHAR(255) NOT NULL,
     name            VARCHAR(255) NOT NULL,
-    description     TEXT,
-    order_index     INTEGER,
-    storage_paths   TEXT,
-    retention_days  TEXT,
-    is_enabled      BOOLEAN,
-    used_size       TEXT,
+    active          BOOLEAN NOT NULL,
+    hiddenrepopath  TEXT NOT NULL,
+    repoha          TEXT,
+    used_size       BIGINT,
+    repo_number     INTEGER,
+    tid             VARCHAR(255),
     created_at      TIMESTAMP NULL,
     updated_at      TIMESTAMP NULL,
     CONSTRAINT uq_desired_repos_tenant_name
@@ -42,25 +42,23 @@ DESIRED_REPOS_INDEXES_DDL: tuple[str, ...] = (
         ON desired_repos (tenant);
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_desired_repos_enabled
-        ON desired_repos (tenant, is_enabled);
+    CREATE INDEX IF NOT EXISTS idx_desired_repos_active
+        ON desired_repos (tenant, active);
     """,
 )
 
-
 DESIRED_ROUTING_POLICIES_DDL = """
 CREATE TABLE IF NOT EXISTS desired_routing_policies (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant              VARCHAR(255) NOT NULL,
-    name                VARCHAR(255) NOT NULL,
-    description         TEXT,
-    is_enabled          BOOLEAN,
-    catch_all_repo_name VARCHAR(255),
-    external_id         VARCHAR(255),
-    created_at          TIMESTAMP NULL,
-    updated_at          TIMESTAMP NULL,
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant       VARCHAR(255) NOT NULL,
+    policy_name  VARCHAR(255) NOT NULL,
+    catch_all    VARCHAR(255) NOT NULL,
+    active       BOOLEAN,
+    description  TEXT,
+    created_at   TIMESTAMP NULL,
+    updated_at   TIMESTAMP NULL,
     CONSTRAINT uq_desired_routing_policies_tenant_name
-        UNIQUE (tenant, name)
+        UNIQUE (tenant, policy_name)
 );
 """
 
@@ -70,24 +68,29 @@ DESIRED_ROUTING_POLICIES_INDEXES_DDL: tuple[str, ...] = (
         ON desired_routing_policies (tenant);
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_desired_routing_policies_enabled
-        ON desired_routing_policies (tenant, is_enabled);
+    CREATE INDEX IF NOT EXISTS idx_desired_routing_policies_active
+        ON desired_routing_policies (tenant, active);
     """,
 )
 
-
 DESIRED_ROUTING_POLICY_RULES_DDL = """
 CREATE TABLE IF NOT EXISTS desired_routing_policy_rules (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    routing_policy_id   BIGINT NOT NULL,
-    rule_index          INTEGER,
-    rule_type           TEXT,
-    key_name            TEXT,
-    value_expression    TEXT,
-    target_repo_name    VARCHAR(255),
-    action              VARCHAR(32),
-    created_at          TIMESTAMP NULL,
-    updated_at          TIMESTAMP NULL,
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    routing_policy_id  BIGINT NOT NULL,
+    criteria_index     INTEGER NOT NULL,
+    repo               VARCHAR(255),
+    drop               VARCHAR(32),
+    type               VARCHAR(64),
+    key                TEXT,
+    value              TEXT,
+    category           VARCHAR(32),
+    operation          VARCHAR(32),
+    prefix             BOOLEAN,
+    event_key          TEXT,
+    source_key         TEXT,
+    value_type         VARCHAR(16),
+    created_at         TIMESTAMP NULL,
+    updated_at         TIMESTAMP NULL,
     CONSTRAINT fk_routing_policy
         FOREIGN KEY (routing_policy_id)
         REFERENCES desired_routing_policies (id)
@@ -102,7 +105,6 @@ DESIRED_ROUTING_POLICY_RULES_INDEXES_DDL: tuple[str, ...] = (
     """,
 )
 
-
 SCHEMA_DDL_STATEMENTS: tuple[str, ...] = (
     DESIRED_REPOS_DDL,
     *DESIRED_REPOS_INDEXES_DDL,
@@ -111,7 +113,6 @@ SCHEMA_DDL_STATEMENTS: tuple[str, ...] = (
     DESIRED_ROUTING_POLICY_RULES_DDL,
     *DESIRED_ROUTING_POLICY_RULES_INDEXES_DDL,
 )
-
 
 def apply_schema(connection: Any, statements: Iterable[str] | None = None) -> None:
     """Create or update the database schema on the given connection.

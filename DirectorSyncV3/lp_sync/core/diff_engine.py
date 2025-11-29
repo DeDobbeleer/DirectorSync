@@ -7,7 +7,7 @@ from lp_sync.utils.logging import get_logger
 
 @dataclass
 class PlannedAction:
-    action: str                   # create / update / delete / noop / skip
+    action: str                   # create / update / delete / noop
     key: Tuple[Any, ...] | None
     desired: Dict[str, Any] | None
     current: Dict[str, Any] | None

@@ -1,33 +1,116 @@
 resources:
   routing_policies:
+    enabled: true
+
+    order: 20
+    depends_on:
+      - repos
+
     data_source:
-      type: sql
-      table: routing_policies
-      tenant_column: tenant_code
-      external_id_column: external_id
-      unique_key: ["name"]
+      header:
+        table: desired_routing_policies
+        tenant_column: tenant
+        key_columns:
+          - tenant
+          - policy_name
+        id_column: id
+
+      children:
+        - alias: "criteria_rows"
+          table: desired_routing_policy_rules
+          foreign_key_column: routing_policy_id
+          order_column: criteria_index
+          tenant_column: tenant
 
     api:
-      core:
-        list:
-          endpoint: /api/director/v2/routing-policies
-          method: GET
-        create:
-          endpoint: /api/director/v2/routing-policies
-          method: POST
-        update:
-          endpoint: /api/director/v2/routing-policies/{id}
-          method: PUT
+      base_path: "/configapi/{pool_uuid}/{logpoint_identifier}"
+
+      list:
+        method: GET
+        path: "{base_path}/RoutingPolicies"
+
+      create:
+        method: POST
+        path: "{base_path}/RoutingPolicies"
+
+      update:
+        method: PUT
+        path: "{base_path}/RoutingPolicies/{id}"
+        id_field: "id"
+
+      delete:
+        method: DELETE
+        path: "{base_path}/RoutingPolicies/{id}"
+        id_field: "id"
 
     mapping:
-      fields:
-        name: name
-        catch_all: catch_all
+      desired_to_api:
+        policy_name: "policy_name"
+        catch_all: "catch_all"
+        active: "active"
+        description: "description"
+
+      arrays:
+        - source: "criteria_rows"
+          dest: "routing_criteria"
+          fields:
+            repo: "repo"
+            drop: "drop"
+            type: "type"
+            key: "key"
+            value: "value"
+            category: "category"
+            operation: "operation"
+            prefix: "prefix"
+            event_key: "event_key"
+            source_key: "source_key"
+            value_type: "value_type"
+
+      api_to_desired:
+        id: "director_id"
 
     comparison:
-      key_fields: ["name"]
-      canonical_fields:
+      identity_keys:
+        - policy_name
+      significant_fields:
+        - catch_all
+        - routing_criteria
+      canonicalization:
+        sort_arrays:
+          - "routing_criteria"
+        ignore_fields: []
+
+    constraints:
+      required_fields:
+        - tenant
+        - policy_name
         - catch_all
 
-    preprocess: []
-    postprocess: []
+      uniqueness:
+        - keys: ["tenant", "policy_name"]
+
+      field_rules:
+        - field: "criteria_rows[].drop"
+          allowed_values: ["store", "drop"]
+
+      references:
+        - source_field: "catch_all"
+          target_resource: "repos"
+          target_field: "name"
+          on_missing: "error"
+
+        - source_field: "criteria_rows[].repo"
+          target_resource: "repos"
+          target_field: "name"
+          on_missing: "skip_policy"
+
+      director_checks: []
+
+    pipeline:
+      preprocess:
+        - generic.validate_required
+        - generic.validate_references
+        - generic.build_payloads
+
+      postprocess:
+        - generic.handle_response

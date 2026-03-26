@@ -336,7 +336,7 @@ RoutingPolicy:
           default: []
 
         # --- INTERVAL / FLUSH / THROTTLING ---
-        - source: "settings.search_interval_minute"
+        - source: "settings.livesearch_data.search_interval_minute"
           rename: "search_interval_minute"
           type: int
           default: 0

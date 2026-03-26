@@ -28,7 +28,7 @@ Depuis `core_config.xlsx` (feuille **Alert**, ~59 colonnes), on isole 4 blocs :
 * **Présence**: exiger la feuille `Alert`.
 * **Colonnes minimales requises** (en tolérant la casse et alias simples) :
   `name`, `settings.user`, `settings.risk`, `settings.repos`, `settings.aggregate`, `settings.condition.condition_option`, `settings.condition.condition_value`, **au moins un** `settings.livesearch_data.timerange_minute|hour|day` (ou `settings.time_range_seconds` qu’on convertira), `settings.livesearch_data.limit`.
-* **Optionnels utiles** : `settings.livesearch_data.query`, `settings.description`, `settings.search_interval_minute`, `settings.flush_on_trigger`, `settings.throttling_*`, `settings.metadata`, `settings.log_source`, `settings.context_template`, `settings.notifications`, `settings.visible_to*`.
+* **Optionnels utiles** : `settings.livesearch_data.query`, `settings.description`, `settings.livesearch_data.search_interval_minute`, `settings.flush_on_trigger`, `settings.throttling_*`, `settings.metadata`, `settings.log_source`, `settings.context_template`, `settings.notifications`, `settings.visible_to*`.
 * **Colonnes “export only” à ignorer** : tout `…query_info.*`, `settings.version|vid|tid|used_from`, etc.
   Ce schéma suit les “required/optional” du **Create/Edit** et la politique v2 “API whitelist”. ([GitHub][3])
 

@@ -484,7 +484,7 @@ class AlertRulesImporter(BaseImporter):
                 "throttling_enabled": bool(r.get("settings.throttling_enabled")),
                 "throttling_field": _s(r.get("settings.throttling_field")),
                 "throttling_time_range": _s(r.get("settings.throttling_time_range")),
-                "search_interval_minute": _s(r.get("settings.search_interval_minute")),
+                "search_interval_minute": _s(r.get("settings.livesearch_data.search_interval_minute")),
                 "context_template": _s(r.get("settings.alert_context_template")) or _s(r.get("settings.context_template")),
                 "query": _s(r.get("settings.extra_config.query")),
                 # NEW FIELDS

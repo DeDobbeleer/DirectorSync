@@ -1,6 +1,6 @@
 # .gitignore
 .env
-*.exe
+#*.exe
 __pycache__/
 *.pyc
 artifacts/

@@ -1,0 +1,102 @@
+resources:
+  repos:
+    enabled: true
+
+    order: 10
+    depends_on: []
+
+    data_source:
+      table: desired_repos
+      tenant_column: tenant
+      key_columns:
+        - tenant
+        - name
+
+    api:
+      base_path: "/configapi/{pool_uuid}/{logpoint_identifier}"
+
+      list:
+        method: GET
+        path: "{base_path}/Repos"
+
+      create:
+        method: POST
+        path: "{base_path}/Repos"
+
+      update:
+        method: PUT
+        path: "{base_path}/Repos/{id}"
+        id_field: "id"
+
+      delete:
+        method: DELETE
+        path: "{base_path}/Repos/{id}"
+        id_field: "id"
+
+      prechecks:
+        - name: "check_repo_path"
+          method: POST
+          path: "{base_path}/Repos/CheckPath"
+          request_template: |
+            {
+              "path": "{{ path }}"
+            }
+          success_condition: "status == 200"
+
+    mapping:
+      desired_to_api:
+        name: "name"
+        active: "active"
+        hiddenrepopath: "hiddenrepopath"
+        repoha: "repoha"
+
+      # No arrays for repos
+      arrays: []
+
+      api_to_desired:
+        id: "tid"
+        used_size: "used_size"
+        repo_number: "repo_number"
+
+    comparison:
+      identity_keys:
+        - name
+      significant_fields:
+        - active
+        - hiddenrepopath
+        - repoha
+      canonicalization:
+        sort_arrays:
+          - "hiddenrepopath"
+        ignore_fields:
+          - "used_size"
+          - "repo_number"
+
+    constraints:
+      required_fields:
+        - tenant
+        - name
+        - active
+        - hiddenrepopath
+
+      uniqueness:
+        - keys: ["tenant", "name"]
+
+      field_rules: []
+
+      references: []
+
+      director_checks:
+        - type: "filesystem_path_exists"
+          target: "hiddenrepopath[].path"
+          operation: "check_repo_path"
+          on_failure: "error"
+
+    pipeline:
+      preprocess:
+        - generic.validate_required
+        - generic.director_checks
+        - generic.build_payloads
+
+      postprocess:
+        - generic.handle_response

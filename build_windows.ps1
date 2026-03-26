@@ -57,26 +57,10 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Green
 Write-Host "Build completed successfully!" -ForegroundColor Green
-Write-Host "Output: dist\LPImporter\LPImporter.exe" -ForegroundColor Green
+Write-Host "Output: dist\LPImporter.exe" -ForegroundColor Green
 Write-Host "===========================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Files to distribute:" -ForegroundColor Cyan
-Write-Host "  - dist\LPImporter\LPImporter.exe" -ForegroundColor White
-Write-Host "  - dist\LPImporter\*.dll (if any)" -ForegroundColor White
-Write-Host "  - dist\LPImporter\lp_tenant_importer_v2\resources\*" -ForegroundColor White
 Write-Host ""
 Write-Host "Optional configuration files (copy alongside exe):" -ForegroundColor Cyan
 Write-Host "  - tenants.yml" -ForegroundColor White
 Write-Host "  - .env" -ForegroundColor White
 Write-Host ""
-
-# Create distribution zip
-$zipFile = "LPImporter.zip"
-if (Test-Path $zipFile) {
-    Remove-Item $zipFile -Force
-}
-Compress-Archive -Path "dist\LPImporter" -DestinationPath $zipFile -Force
-Write-Host "Created distribution archive: $zipFile" -ForegroundColor Green
-
-Write-Host ""
-Read-Host -Prompt "Press Enter to exit"

@@ -204,7 +204,8 @@ class AlertRulesImporter(BaseImporter):
     compare_keys = ("risk", "repos_csv", "aggregate", "condition_option",
                     "condition_value", "condition_value", "limit", "timerange_day", "timerange_hour",
                     "timerange_minute", "searchname", "apply_jinja_template", "description",
-                    "original_data", "manageable_by_csv", "attack_tag_csv", "assigned_to_raw", "metadata_json" )   
+                    "original_data", "manageable_by_csv", "attack_tag_csv", "assigned_to_raw", "metadata_json",
+                    "search_interval_minute")   
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -532,6 +533,7 @@ class AlertRulesImporter(BaseImporter):
             "timerange_hour": _to_int(desired_row.get("timerange_hour")),
             "timerange_minute": _to_int(desired_row.get("timerange_minute")),
             "searchname": _s(desired_row.get("searchname")),
+            "search_interval_minute": _to_int(desired_row.get("search_interval_minute")),
         }
         # NEW FIELDS added to diff to trigger UPDATE on changes
         if desired_row.get("apply_jinja_template"):
@@ -567,6 +569,7 @@ class AlertRulesImporter(BaseImporter):
             "timerange_hour": _to_int(row.get("timerange_hour")),
             "timerange_minute": _to_int(row.get("timerange_minute")),
             "searchname": _s(row.get("searchname")),
+            "search_interval_minute": _to_int(row.get("search_interval_minute")),
         }
         # Mirror new fields if present in existing rows
         if _s(row.get("apply_jinja_template")) == "on":

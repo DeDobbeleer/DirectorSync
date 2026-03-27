@@ -32,6 +32,9 @@ pip install pyinstaller
 # Install requirements
 pip install -r lp_tenant_importer_v2/requirements.txt
 
+# Clean previous builds
+rmdir /s /q build dist
+
 # Build
 pyinstaller build.spec --clean
 ```
@@ -63,8 +66,19 @@ LPImporter.exe alerts --tenant "MyTenant" --xlsx "config.xlsx" --dry-run
 
 ## Troubleshooting
 
-### Missing imports
-If you get import errors, add the missing module to `hiddenimports` in `build.spec`.
+### ImportError: cannot import name 'ValidationError'
+**Fixed**: This was caused by `ValidationError` not being exported from `base.py`. 
+Ensure you have the latest code where `base.py` imports `ValidationError` from `validators`.
+
+### Other missing imports
+If you get import errors like `ImportError: cannot import name 'X' from 'Y'`, add the missing module to `hiddenimports` in `build.spec` and rebuild.
+
+### Clean rebuild
+Always clean before rebuilding to avoid stale cache:
+```bash
+rmdir /s /q build dist
+pyinstaller build.spec --clean
+```
 
 ### Large file size
 The executable includes Python and all dependencies (~15-30MB). This is normal.

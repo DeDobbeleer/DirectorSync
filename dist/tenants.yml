@@ -2,21 +2,21 @@
 
 tenants:
   core:
-    pool_uuid: "2bc98ce16a6d4c4c82e362bc11691488"
+    pool_uuid: "e95a9f8d2eb94d999c6b3bb6569fbf02"
     siems:
       search_heads: 
         - name: "sh01"
-          id: "19fc63880b018d978aabe9162b851a9d" 
-          ip: "10.160.40.200"
+          id: "e0f090926f0afb401fadf0ea9bc820c8" 
+          ip: "10.9.54.166"
       backends:
         - name: "lb-backend01" 
-          id: "01925abf82fe0db0a75c190c4316b8a6"
-          ip: "10.160.40.202"
-          ip_private: "10.41.39.1"
+          id: "06287f9423e61c39f1b0800d5bf7b26f"
+          ip: "10.9.28.76"
+          ip_private: "10.149.23.1"
         - name: "lb-backend02"
-          id: "01925abf82fe0db0a75c190c4316b8b7"
-          ip: "10.160.40.203"
-          ip_private: "10.216.206.1"
+          id: "403a9ded778adcffd3173819ee8ca0a8"
+          ip: "10.9.34.227"
+          ip_private: "10.223.172.1"
       all_in_one: []
 
 defaults:
@@ -29,5 +29,6 @@ defaults:
     device_groups: [ backends, all_in_one ]
     devices: [ backends, all_in_one ]
     syslog_collectors: [ backends, all_in_one ]
-    alert_rules: [ search_heads ]
+    alert_rules: [ search_heads, all_in_one] 
+    user_defined_lists: [search_heads, all_in_one]
  

@@ -13,7 +13,7 @@ import pandas as pd
 from ..core.config import NodeRef, TenantConfig
 from ..core.director_client import DirectorClient
 from ..utils.diff_engine import Decision, decide
-from ..utils.validators import require_columns, require_sheets
+from ..utils.validators import require_columns, require_sheets, ValidationError
 
 
 @dataclass

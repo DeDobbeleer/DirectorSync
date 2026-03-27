@@ -1,0 +1,9 @@
+# DirectorSync v2 — Environment (sample)
+# Replace values with your deployment details.
+
+LP_DIRECTOR_URL=https://<LP_DIRECTOR IP or Hostname>
+LP_DIRECTOR_API_TOKEN=<KEY>
+LP_TENANTS_FILE=./tenants.yml
+LP_PROFILE_FILE=./resources/profiles.yml
+LP_LOG_LEVEL=DEBUG
+LP_SUPPRESS_TLS_WARNINGS=True

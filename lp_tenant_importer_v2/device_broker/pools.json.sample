@@ -1,0 +1,18 @@
+{
+  "pools": [
+    {
+      "name": "production",
+      "pool_uuid": "2bc98ce1-6a6d-4c4c-82e3-62bc11691488",
+      "nodes": [
+        {
+          "name": "search_head_01",
+          "node_id": "19fc6388-0b01-8d97-8aab-e9162b851a9d"
+        },
+        {
+          "name": "search_head_02",
+          "node_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+      ]
+    }
+  ]
+}

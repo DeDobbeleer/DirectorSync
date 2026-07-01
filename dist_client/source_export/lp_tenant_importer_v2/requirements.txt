@@ -1,0 +1,8 @@
+# DirectorSync v2 — runtime dependencies
+# Python >= 3.10 required
+
+requests
+pandas
+openpyxl
+python-dotenv
+PyYAML

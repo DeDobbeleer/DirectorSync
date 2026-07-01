@@ -1,3 +1,5 @@
+> **Important:** This document is a **migration plan / design proposal**. It describes the full lifecycle that was *intended* for AlertRules (core rule, activate/deactivate, share/unshare, notifications). The current implementation in `importers/alert_rules.py` is limited to the **core MyRules create/update/NOOP/SKIP** flow. Activation, sharing, and notifications are **not implemented**.
+
 Parfait — voilà **comment j’implémenterais l’import “AlertRules”** dans ton **Framework v2** en réutilisant strictement le pipeline `BaseImporter` et le style de `ProcessingPoliciesImporter`, sans code.
 
 # 1) Où s’accrocher dans le pipeline v2
@@ -12,14 +14,14 @@ Depuis `core_config.xlsx` (feuille **Alert**, ~59 colonnes), on isole 4 blocs :
 1. **Règle cœur** (pour `Create/Edit`)
    `name` (`searchname`), `settings.user` (`owner`), `settings.risk`, `settings.repos`, `settings.aggregate`, `settings.condition.condition_option/value`, `settings.livesearch_data.limit`, fenêtre `timerange_*` (ou conversion depuis `settings.time_range_seconds`), `query` + champs annexes (`description`, `flush_on_trigger`, `search_interval_minute`, `throttling_*`, `metadata`, `log_source`, `alert_context_template`). Ces champs correspondent aux paramètres **documentés** côté API pour la création/édition de règle. ([GitHub][2])
 
-2. **État** (post-création)
-   `settings.active` → déclenche **activate/deactivate** après `Create/Edit`. ([GitHub][2])
+2. **État** (post-création) — **non implémenté**
+   `settings.active` → déclencherait **activate/deactivate** après `Create/Edit` dans une version complète. Le code actuel ne fait pas ces appels. ([GitHub][2])
 
-3. **Partage / RBAC** (post-création)
-   `settings.visible_to` (groupes) et `settings.visible_to_users` (utilisateurs) → **share/unshare** sur la règle. ([GitHub][3])
+3. **Partage / RBAC** (post-création) — **non implémenté**
+   `settings.visible_to` (groupes) et `settings.visible_to_users` (utilisateurs) → **share/unshare** dans une version complète. Le code actuel ignore ces colonnes. ([GitHub][3])
 
-4. **Notifications** (post-création, par type)
-   `settings.notifications` (liste d’objets typés `email|syslog|http|sms|snmp|ssh`) → chaque item appelle son **endpoint** dédié (ex. `…/SyslogNotification`). ([GitHub][2])
+4. **Notifications** (post-création, par type) — **non implémenté**
+   `settings.notifications` (liste d’objets typés `email|syslog|http|sms|snmp|ssh`) → chaque item appellerait son **endpoint** dédié dans une version complète. Le code actuel ne lit pas cette colonne. ([GitHub][2])
 
 > Comme pour PP, on **diff** d’abord sur la partie **cœur** (indépendante du node), puis on résout les dépendances par node au **moment apply**. ([GitHub][4])
 
@@ -28,7 +30,7 @@ Depuis `core_config.xlsx` (feuille **Alert**, ~59 colonnes), on isole 4 blocs :
 * **Présence**: exiger la feuille `Alert`.
 * **Colonnes minimales requises** (en tolérant la casse et alias simples) :
   `name`, `settings.user`, `settings.risk`, `settings.repos`, `settings.aggregate`, `settings.condition.condition_option`, `settings.condition.condition_value`, **au moins un** `settings.livesearch_data.timerange_minute|hour|day` (ou `settings.time_range_seconds` qu’on convertira), `settings.livesearch_data.limit`.
-* **Optionnels utiles** : `settings.livesearch_data.query`, `settings.description`, `settings.livesearch_data.search_interval_minute`, `settings.flush_on_trigger`, `settings.throttling_*`, `settings.metadata`, `settings.log_source`, `settings.context_template`, `settings.notifications`, `settings.visible_to*`.
+* **Optionnels utiles** : `settings.extra_config.query`, `settings.description`, `settings.livesearch_data.search_interval_minute`, `settings.flush_on_trigger`, `settings.throttling_*`, `settings.metadata`, `settings.log_source`, `settings.context_template`, `settings.apply_jinja_template`.
 * **Colonnes “export only” à ignorer** : tout `…query_info.*`, `settings.version|vid|tid|used_from`, etc.
   Ce schéma suit les “required/optional” du **Create/Edit** et la politique v2 “API whitelist”. ([GitHub][3])
 

@@ -1,0 +1,14 @@
+# .gitignore
+.env
+*.exe
+__pycache__/
+*.pyc
+artifacts/
+
+# *.xlsx
+.venv/
+temp/
+*.spec
+build/
+dist/
+data/*

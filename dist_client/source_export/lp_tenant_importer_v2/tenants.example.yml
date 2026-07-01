@@ -1,0 +1,31 @@
+# DirectorSync v2 — Tenants (global-only targets)
+# EXAMPLE FILE - recreate from scratch with customer-specific values.
+# Copy to tenants.yml and fill in real pool UUIDs, node IDs and IPs.
+
+tenants:
+  tenant_a:
+    pool_uuid: "EXAMPLE_POOL_UUID_00000000000000000000000000000000"
+    siems:
+      search_heads:
+        - name: "sh01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000000"
+          ip: "10.0.0.10"
+      backends:
+        - name: "backend01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000001"
+          ip: "10.0.0.20"
+          ip_private: "10.0.0.21"
+      all_in_one: []
+
+defaults:
+  target:
+    repos: [ backends, all_in_one ]
+    routing_policies: [ backends, all_in_one ]
+    normalization_policies: [ backends, all_in_one ]
+    processing_policies: [ backends, all_in_one ]
+    enrichment_policies: [ backends, all_in_one ]
+    device_groups: [ backends, all_in_one ]
+    devices: [ backends, all_in_one ]
+    syslog_collectors: [ backends, all_in_one ]
+    alert_rules: [ search_heads ]
+    user_defined_lists: [ search_heads ]

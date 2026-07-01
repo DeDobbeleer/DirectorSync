@@ -1,5 +1,7 @@
 # lp_tenant_importer_v2 – EnrichmentPolicies (V2)
 
+> **Implementation note:** The code below is an **illustrative patch** written during design. The actual `importers/enrichment_policies.py` follows the same algorithm (sheet contract, aggregation by `source`, strict SKIP rules, `{"data": ...}` envelope) and is registered in the common `BaseImporter` pipeline. However, the live `apply()` method still uses raw `DirectorClient.post_json`/`put_json` calls (wrapped in `{"data": payload}`) and uses only the `GET /EnrichmentSource` list endpoint for source validation. It does **not** perform a `refreshlist` fallback. Refer to the live file for the exact implementation.
+
 This patch adds a new importer that migrates **Enrichment Policies (EP)** from V1 to V2, enforcing the strict API contract we agreed:
 
 - `source` is **required** per specification.

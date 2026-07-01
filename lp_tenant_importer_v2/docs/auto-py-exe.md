@@ -3,15 +3,15 @@ Bonne question. Avec **auto-py-to-exe** (PyInstaller), voilà comment faire pour
 ## 1) Choix de build
 
 * **Recommandé : “One-folder (onedir)”**
-  Cela produit `dist/DirectorSync/DirectorSync.exe` + des fichiers à côté. Tu peux alors poser **`.env`**, **`tenants.yml`**, **`resources/profiles.yml`** **dans le même dossier** que l’exe. Simple et robuste.
+  Cela produit `dist/LPImporter.exe` + des fichiers à côté. Tu peux alors poser **`.env`**, **`tenants.yml`**, **`resources/profiles.yml`** **dans le même dossier** que l’exe. Simple et robuste.
 * “One-file (onefile)”
   L’exe s’extrait dans un répertoire **temporaire** à l’exécution → les chemins relatifs comme `./resources/profiles.yml` deviennent piégeux. Possible, mais demande un peu de code pour retrouver le dossier de l’exe.
 
 ## 2) Arbo conseillée (onedir)
 
 ```
-dist/DirectorSync/
-├─ DirectorSync.exe
+dist/LPImporter/
+├─ LPImporter.exe
 ├─ .env
 ├─ tenants.yml
 ├─ resources/
@@ -25,8 +25,8 @@ dist/DirectorSync/
 Depuis **PowerShell** (ou CMD) :
 
 ```powershell
-cd dist/DirectorSync
-.\DirectorSync.exe `
+cd dist
+.\LPImporter.exe `
   --tenant core `
   --tenants-file .\tenants.yml `
   --xlsx .\samples\core_config.xlsx `
@@ -42,7 +42,7 @@ Crée un **wrapper** `run.cmd` à côté de l’exe pour garantir le bon répert
 @echo off
 setlocal
 cd /d "%~dp0"
-.\DirectorSync.exe --tenant core --tenants-file .\tenants.yml --xlsx .\samples\core_config.xlsx import-repos
+.\LPImporter.exe --tenant core --tenants-file .\tenants.yml --xlsx .\samples\core_config.xlsx import-repos
 pause
 ```
 
@@ -51,12 +51,15 @@ pause
 ## 4) Paramétrage auto-py-to-exe (résumé)
 
 * Script: `lp_tenant_importer_v2/main.py`
+* Additional hooks directory: `hooks/` (not `hooks-importer/`) when using a manual PyInstaller command.
 * Console based: **Oui**
 * Onefile: **Non** (préférer onedir)
 * Additional Files (si tu veux embarquer des exemples) : ajouter `samples/`
   *(Pour `.env`, `tenants.yml`, `resources/profiles.yml`, je recommande de les **laisser à côté** de l’exe, pas “embarqués”, pour pouvoir les modifier sans rebuild.)*
 
 ## 5) Rendre l’exe autonome vis-à-vis de `.env` et YAML (patch pro, optionnel)
+
+> **Status:** The patch below is a design proposal. It is **not currently implemented** in `core/config.py`. If you need the executable to auto-discover `.env` / `tenants.yml` / `profiles.yml` next to the `.exe`, apply the snippet below manually.
 
 Si tu veux que l’exe retrouve **toujours** `.env` / `tenants.yml` / `profiles.yml` **à côté de l’exe** (même en onefile), ajoute ce petit durcissement (EN only) :
 
@@ -109,4 +112,6 @@ Et pour `LP_PROFILE_FILE` (si tu l’utilises), même logique avec `resources/pr
 * **Certificat TLS** en lab : tu as `--no-verify` si besoin.
 * **Logs** : ils s’affichent en console ; si tu veux en plus un fichier, on peut ajouter un `FileHandler` vers `logs/` à côté de l’exe.
 
-Si tu veux, je te prépare un **petit zip “dist modèle”** avec `DirectorSync.exe` factice + `run.cmd` + `.env`/`tenants.yml`/`resources/` — pour que tu voies exactement quoi livrer à un client Windows.
+Si tu veux, je te prépare un **petit zip “dist modèle”** avec `LPImporter.exe` factice + `run.cmd` + `.env`/`tenants.yml`/`resources/` — pour que tu voies exactement quoi livrer à un client Windows.
+
+> The build output is a single executable `dist/LPImporter.exe` (as configured in `build.spec`). If you prefer a one-folder layout, adjust `build.spec` or use auto-py-to-exe with "Onedir" mode.

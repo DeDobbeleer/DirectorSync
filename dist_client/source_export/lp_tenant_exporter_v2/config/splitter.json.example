@@ -1,0 +1,4 @@
+{
+  "_comment": "EXAMPLE FILE - copy to splitter.json. Command template used by split_cli.py.",
+  "cmd": "\"{python}\" \"{script}\" --input \"{input}\" --input-sh \"{input_sh}\" --config-dir \"{config_dir}\" --output-dir \"{out_dir}\""
+}

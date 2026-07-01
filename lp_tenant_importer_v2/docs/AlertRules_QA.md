@@ -1,7 +1,9 @@
+> **Important:** This document is a **design reference** describing what a *complete* AlertRules import could cover. The current implementation in `importers/alert_rules.py` only handles the **core MyRules** create/update path. Activation, sharing, transferOwnership, and all notification endpoints are **not implemented**.
+
 Voici la **version courte** demandée.
 
 **1) Combien d’éléments “Alerte” à prendre en compte (pour un import complet) ?**
-👉 **10** éléments fonctionnels :
+👉 **10** éléments fonctionnels (API-level; implémentés dans le code actuel : 1, partiellement 2–4 et 9 via résolution owner/assigned_to/manageable_by, sans appels share/activate/notifications) :
 
 1. Règle d’alerte (AlertRule, définition)
 2. État actif/inactif (Activate/Deactivate) ([Logpoint Docs][1])
@@ -10,7 +12,7 @@ Voici la **version courte** demandée.
 4. Transfert de propriété (TransferOwnership) ([Logpoint Docs][1])
 
 **2) Combien de types d’endpoints à utiliser ?**
-👉 **18** au total (import complet) :
+👉 **18** au total pour un import complet; le code actuel en utilise **3** (MyAlertRules/fetch, POST /AlertRules, PUT /AlertRules/{id}) :
 
 * Core: Create, Edit, Activate, Deactivate (4) ([Logpoint Docs][1])
 * Listing: FetchMy, FetchShared, FetchVendor, FetchUsed, FetchUsedShared (5) ([Logpoint Docs][1])

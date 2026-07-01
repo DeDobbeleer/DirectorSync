@@ -127,12 +127,21 @@ Defines the importer lifecycle and overridable hooks:
 - `repos` → `import-repos` (targets: `backends`)
 - `routing_policies` → `import-routing-policies` (targets: `backends`)
 - `normalization_policies` → `import-normalization-policies` (targets: `backends`)
-- `enrichment_policies` → `import-enrichment-policies` (targets: `backends`) ← **new in this update**
+- `enrichment_policies` → `import-enrichment-policies` (targets: `backends`)
+- `processing_policies` → `import-processing-policies` (targets: `backends`)
+- `device_groups` → `import-device-groups` (targets: `backends`)
+- `devices` → `import-devices` (targets: `backends`)
+- `syslog_collectors` → `import-syslog-collectors` (targets: `backends`)
+- `alert_rules` → `import-alert-rules` (targets: `search_heads`)
+- `user_defined_lists` → `import-user-lists` (targets: `search_heads`)
+- `alert_rules_report` → `list-alert-users` (report-only, targets: `search_heads`)
 
 ### 5.2 Resource Profiles (declarative)
 Two forms coexist:
 - **Python profile** for Repos (see `utils/resource_profiles.py`): encapsulates parse rules, equality, and payload shaping.
 - **YAML profiles** (`resources/profiles.yml`): a generalized format to describe resources (columns, mappings, equality strategies, lookups). This is the target for converging future importers.
+
+**Note on `director_client.py`:** The file currently contains two definitions of `invoke_action`; the second overrides the first. Importers should rely on the higher-level `create_resource`/`update_resource`/`delete_resource` helpers rather than calling `invoke_action` directly.
 
 **Roadmap:** migrate Routing Policies and Normalization Policies to declarative profiles to reduce imperative code.
 
@@ -352,7 +361,14 @@ python -m lp_tenant_importer_v2.main \
 - `import-repos`
 - `import-routing-policies`
 - `import-normalization-policies`
-- `import-enrichment-policies`  ← **new**
+- `import-enrichment-policies`
+- `import-processing-policies`
+- `import-device-groups`
+- `import-devices`
+- `import-syslog-collectors`
+- `import-alert-rules`
+- `import-user-lists`
+- `list-alert-users` (report-only)
 
 **Typical flow:**
 1. Run with `--dry-run` and review plan.
@@ -388,8 +404,7 @@ python -m lp_tenant_importer_v2.main \
 
 ## 14) Roadmap & Change Log
 
-- **Migrated now:** Repos, Routing Policies, Normalization Policies, **Enrichment Policies (new)**.
-- **Next candidates:** Processing Policies, Devices, Device Groups, Syslog Collectors, Alerts.
+- **Migrated now:** Repos, Routing Policies, Normalization Policies, Enrichment Policies, Processing Policies, Device Groups, Devices, Syslog Collectors, Alert Rules (MyRules core), User-Defined Lists.
 - **Breaking changes tracker:**  
   - NP payloads -> **CSV** strings (v2).
   - **EP v2**: aggregation **by source**, strict SKIPs: **missing `source_name`** on node or **empty rules in any spec**; payload envelope `{ "data": ... }` for POST/PUT.

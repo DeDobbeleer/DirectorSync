@@ -9,7 +9,7 @@ git pull origin main
 python -m lp_tenant_importer_v2.main \
   --tenant core \
   --tenants-file ./tenants.yml \
-  --xlsx ./lp_tenant_importer/samples/core_config.xlsx \
+  --xlsx ./lp_tenant_importer_v2/samples/core_config.xlsx \
   --dry-run \
   --no-verify \
   import-repos
@@ -60,17 +60,25 @@ python -m lp_tenant_importer_v2.main \
 ```
 
 ## Compilation for `.exe` and run from `dist/`
+
+The repository ships a PyInstaller spec file that produces `dist/LPImporter.exe`:
+
 ```bash
-# compilation: directorSync
-python -m PyInstaller -F app.py -n directorSync --paths . --additional-hooks-dir hooks-importer --collect-submodules lp_tenant_importer_v2.importers --collect-all openpyxl
-# run : directorSync.exe
-..\dist\directorSync.exe --tenant core --xlsx samples\core_config.xlsx import-alert-rules
+pyinstaller build.spec --clean
+```
 
-#compilation: logpoint_config_splitter
-python -m PyInstaller -F lp_tenant_exporter_v2\splitter\logpoint_config_splitter.py  -n logpoint_config_splitter  --paths .  --collect-all xlsxwriter
+Run the generated executable from the distribution folder:
 
-# run: logpoint_config_splitter
-..\dist\logpoint_config_splitter.exe --input data\sync_config_ESA.json --input-sh data\alerts_with_ESA_original_repos.json --output-dir split --config-dir config
+```powershell
+.\dist\LPImporter.exe --tenant core --xlsx .\lp_tenant_importer_v2\samples\core_config.xlsx import-alert-rules
+```
+
+> Note: older documentation referred to the executable as `directorSync.exe` and used `--additional-hooks-dir hooks-importer`. The current canonical build is `LPImporter` via `build.spec` with hooks in `hooks/`.
+
+For the exporter splitter, run the Python script directly (no build is required):
+
+```bash
+python lp_tenant_exporter_v2\splitter\logpoint_config_splitter.py --input data\sync_config_ESA.json --input-sh data\alerts_with_ESA_original_repos.json --output-dir split --config-dir config
 ```
 
 ### Vérif rapide

@@ -35,16 +35,31 @@ lp_tenant_importer_v2/
 │  ├─ repos.py                 # migrated
 │  ├─ routing_policies.py      # migrated
 │  ├─ normalization_policies.py# migrated (CSV payload semantics)
-│  └─ enrichment_policies.py   # **migrated in this update**
+│  ├─ enrichment_policies.py   # migrated
+│  ├─ processing_policies.py   # migrated
+│  ├─ device_groups.py         # migrated
+│  ├─ devices.py               # migrated
+│  ├─ syslog_collectors.py     # migrated
+│  ├─ alert_rules.py           # migrated (MyRules core only)
+│  ├─ alert_rules_report.py    # report-only XLSX lister
+│  ├─ user_defined_lists.py    # migrated
+│  └─ registry.py              # importer registry / CLI auto-generation
+├─ device_broker/              # standalone device cleanup utility
+│  ├─ __main__.py
+│  ├─ client.py
+│  ├─ config.py
+│  ├─ manager.py
+│  └─ README.md
+├─ resources/
+│  └─ profiles.yml             # optional overrides (AlertRules default owner, repo port, …)
 └─ utils/
    ├─ __init__.py
    ├─ diff_engine.py           # NOOP/CREATE/UPDATE/SKIP decision helper
    ├─ validators.py            # XLSX sheet/column validation
+   ├─ resource_profiles.py     # declarative repo profile
    ├─ resolvers.py             # simple per-node caches for lookups
    └─ reporting.py             # uniform table/json output
 ```
-
-> Other importers (Processing Policies, Devices, Device Groups, Syslog Collectors, Alerts) will follow the same profile-driven pattern.
 
 ---
 
@@ -125,11 +140,17 @@ Standard pipeline:
 ## 5. Migrated Modules — Quick Reference (updated)
 
 | Resource                   | XLSX Sheets                                     | CLI Command                      | Targets (default) | Payload Contract (POST/PUT)                                                                                 | Special Notes |
-|---------------------------|--------------------------------------------------|----------------------------------|-------------------|--------------------------------------------------------------------------------------------------------------|---------------|
+|---------------------------|--------------------------------------------------|----------------------------------|-------------------|-------------------------------------------------------------------------------------------------------------|---------------|
 | **Repos**                 | `Repo`                                          | `import-repos`                   | `backends`        | `name`, `hiddenrepopath:[{path,retention}]`, optional `repoha:[{ha_li,ha_day}]`                              | Pre-flight **RepoPaths** check; list-of-dicts compared **order-insensitively** by key. |
 | **Routing Policies**      | `RoutingPolicy`                                 | `import-routing-policies`        | `backends`        | `policy_name`, `routing_criteria:[{type,key,value,repo,drop}]`, `catch_all`, `active`                       | Repo **names→IDs** lookups (criteria & `catch_all`); group rows by policy. |
 | **Normalization Policies**| `NormalizationPolicy`                           | `import-normalization-policies`  | `backends`        | **CSV strings**: `norm_packages:"ID1,ID2"`, `compiled_normalizer:"C1,C2"`; `name` on POST                | **CSV required** by API (not arrays). Packages are **name→ID**; compiled must exist on node. |
 | **Enrichment Policies**   | `EnrichmentPolicy`, `EnrichmentRules`, `EnrichmentCriteria` | `import-enrichment-policies`      | `backends`        | Envelope **`{"data": { name, specifications, [description] }}`**; PUT accepts same body shape as POST      | **Aggregate by `source`**; strict **SKIP** if **any spec has empty rules** or **any `source` missing on node**; inventory via **`GET …/EnrichmentSource`** and exact match on **`source_name`**. |
+| **Processing Policies**   | `ProcessingPolicy`                              | `import-processing-policies`     | `backends`        | `policy_name`, `norm_policy`, `enrich_policy`, `routing_policy` (resolved to IDs)                          | Resolves NP/EP/RP names → IDs per node. |
+| **Device Groups**         | `DeviceGroups`                                  | `import-device-groups`           | `backends`        | `name`, `active`, optional `device_ids`, `tags`                                                            | — |
+| **Devices**               | `Device`                                        | `import-devices`                 | `backends`        | `name`, `ip`, `timezone`, `type`, `active`, optional groups/tags/confidentiality/integrity/availability    | Risk normalization; DeviceGroup name→ID resolution. |
+| **Syslog Collectors**     | `Device`/`SyslogCollector`                      | `import-syslog-collectors`       | `backends`        | `device_id`, `parser`, `charset`, `proxy_condition`, `processpolicy`                                       | Filters rows where `app = SyslogCollector`; enforces proxy matrix. |
+| **Alert Rules**           | `Alert`                                         | `import-alert-rules`             | `search_heads`    | Core rule fields (`searchname`, `owner`, `risk`, `repos`, `aggregate`, `condition_*`, `limit`, timerange, …) | MyRules only; activation/sharing/notifications **not implemented**. |
+| **User-Defined Lists**    | `UserDefinedList`                               | `import-user-lists`              | `search_heads`    | Static/dynamic list fields                                                                                  | — |
 
 ---
 
@@ -171,7 +192,7 @@ Global flags: `--dry-run`, `--no-verify`, `--format {table,json}`.
 - **Idempotence**: re-running with identical inputs yields **NOOP** everywhere.
 - **Unit tests**: per importer (diff logic, lookups, payload builders). Parity tests (v1 vs v2 dry-run) recommended.
 - **Logging**: `DEBUG/INFO/WARNING/ERROR`; tokens masked; concise error surfacing. Enrichment Policies log aggregated `sources` with counts per policy.
-- **Packaging**: Windows `.exe` using **auto-py-exe** (`lp_tenant_importer_v2/main.py` entry point).
+- **Packaging**: Windows `.exe` via `pyinstaller build.spec` (produces `dist/LPImporter.exe`). Manual PyInstaller commands should use `lp_tenant_importer_v2/main.py` as the entry point and the `hooks/` directory.
 
 ---
 

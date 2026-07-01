@@ -1,0 +1,195 @@
+entities:
+
+  devices:
+    sheet: "Device"
+    method: "POST"
+    # NOTE: Director 2.7 uses pool + SIEM scope; path segment name may be 'logpoints' or 'siems' in your deployment.
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/devices"
+    target: "backend"
+    required_columns: ["name", "ip", "timezone"]
+    columns:
+      device_id: "device_id"
+      name: "name"
+      description: "description"
+      type: "type"
+      tags: "tags"
+      ip: "ip"
+      fqdn: "fqdn"
+      active: "active"
+      timezone: "timezone"
+      has_hostname: "has_hostname"
+      device_groups: "device_groups"
+      distributed_collector: "distributed_collector"
+      confidentiality: "confidentiality"
+      integrity: "integrity"
+      availability: "availability"
+    static_fields: {}
+
+  routing_policies:
+    sheet: "RoutingPolicy"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/routing-policies"
+    target: "search_head"
+    required_columns: ["cleaned_policy_name", "rule_type", "key", "value", "repo"]
+    columns:
+      original_policy_name: "original_policy_name"
+      cleaned_policy_name: "cleaned_policy_name"
+      active: "active"
+      catch_all: "catch_all"
+      rule_type: "rule_type"
+      key: "key"
+      value: "value"
+      repo: "repo"
+      drop: "drop"
+      policy_id: "policy_id"
+    static_fields: {}
+
+  repos:
+    sheet: "Repo"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/repos"
+    target: "backend"
+    required_columns: ["cleaned_repo_name", "storage_paths", "retention_days", "active"]
+    columns:
+      repo_number: "repo_number"
+      original_repo_name: "original_repo_name"
+      cleaned_repo_name: "cleaned_repo_name"
+      storage_paths: "storage_paths"
+      retention_days: "retention_days"
+      active: "active"
+      used_size: "used_size"
+    static_fields: {}
+
+  normalization_policies:
+    sheet: "NormalizationPolicy"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/normalization/policies"
+    target: "search_head"
+    required_columns: ["policy_name", "normalization_packages"]
+    columns:
+      policy_name: "policy_name"
+      normalization_packages: "normalization_packages"
+      compiled_normalizer: "compiled_normalizer"
+    static_fields: {}
+
+  processing_policies:
+    sheet: "ProcessingPolicy"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/processing/policies"
+    target: "search_head"
+    required_columns: ["cleaned_policy_name", "norm_policy", "enrich_policy"]
+    columns:
+      original_policy_name: "original_policy_name"
+      cleaned_policy_name: "cleaned_policy_name"
+      active: "active"
+      norm_policy: "norm_policy"
+      enrich_policy: "enrich_policy"
+      routing_policy_id: "routing_policy_id"
+      policy_id: "policy_id"
+    static_fields: {}
+
+  enrichment_policies:
+    sheet: "EnrichmentPolicy"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/enrichment/policies"
+    target: "search_head"
+    required_columns: ["policy_name", "source"]
+    columns:
+      spec_index: "spec_index"
+      policy_name: "policy_name"
+      description: "description"
+      tags: "tags"
+      active: "active"
+      source: "source"
+      policy_id: "policy_id"
+    static_fields: {}
+
+  enrichment_rules:
+    sheet: "EnrichmentRules"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/enrichment/rules"
+    target: "search_head"
+    required_columns: ["policy_name", "source", "source_key", "operation", "event_key"]
+    columns:
+      policy_name: "policy_name"
+      source: "source"
+      spec_index: "spec_index"
+      category: "category"
+      source_key: "source_key"
+      prefix: "prefix"
+      operation: "operation"
+      type: "type"
+      event_key: "event_key"
+    static_fields: {}
+
+  enrichment_criteria:
+    sheet: "EnrichmentCriteria"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/enrichment/criteria"
+    target: "search_head"
+    required_columns: ["policy_name", "source", "type", "key", "value"]
+    columns:
+      policy_name: "policy_name"
+      source: "source"
+      spec_index: "spec_index"
+      type: "type"
+      key: "key"
+      value: "value"
+    static_fields: {}
+
+  device_fetchers:
+    sheet: "DeviceFetcher"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/device-fetchers"
+    target: "backend"
+    required_columns: ["device_id", "device_name"]
+    columns:
+      device_id: "device_id"
+      device_name: "device_name"
+      app: "app"
+      sid: "sid"
+      parser: "parser"
+      processpolicy: "processpolicy"
+      charset: "charset"
+      uuid: "uuid"
+      path: "path"
+      excludes: "excludes"
+      hasLCP: "hasLCP"
+      client_id: "client_id"
+      api_key: "api_key"
+      uri: "uri"
+      fetch_interval: "fetch_interval"
+      LOGGEDINUSER: "LOGGEDINUSER"
+      proxy: "proxy"
+      authorization_url: "authorization_url"
+      client_secret: "client_secret"
+      events_url: "events_url"
+      distributed_collector: "distributed_collector"
+      tenant_id: "tenant_id"
+      workspace_id: "workspace_id"
+      endpoint: "endpoint"
+      resource: "resource"
+      user_query: "user_query"
+      generated: "generated"
+      requestType: "requestType"
+      ips: "ips"
+      proxy_condition: "proxy_condition"
+      CSRFToken: "CSRFToken"
+      proxy_ip: "proxy_ip"
+      hostname: "hostname"
+    static_fields: {}
+
+  device_groups:
+    sheet: "DeviceGroups"
+    method: "POST"
+    endpoint: "/api/director/v2/pools/{pool_uuid}/logpoints/{siem_id}/device-groups"
+    target: "search_head"
+    required_columns: ["name", "active"]
+    columns:
+      group_id: "group_id"
+      name: "name"
+      description: "description"
+      active: "active"
+      device_ids: "device_ids"
+      tags: "tags"
+    static_fields: {}

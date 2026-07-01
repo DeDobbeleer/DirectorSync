@@ -1,0 +1,48 @@
+# DirectorSync v2 — Full tenants example
+# EXAMPLE FILE - recreate from scratch with customer-specific values.
+
+tenants:
+  tenant_a:
+    pool_uuid: "EXAMPLE_POOL_UUID_00000000000000000000000000000000"
+    siems:
+      search_heads:
+        - name: "sh01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000000"
+          ip: "10.0.0.10"
+      backends:
+        - name: "backend01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000001"
+          ip: "10.0.0.20"
+          ip_private: "10.0.0.21"
+        - name: "backend02"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000002"
+          ip: "10.0.0.22"
+          ip_private: "10.0.0.23"
+      all_in_one: []
+
+  tenant_b:
+    pool_uuid: "EXAMPLE_POOL_UUID_00000000000000000000000000000001"
+    siems:
+      search_heads:
+        - name: "sh01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000003"
+          ip: "10.0.0.30"
+      backends:
+        - name: "backend01"
+          id: "EXAMPLE_NODE_ID_00000000000000000000000000000004"
+          ip: "10.0.0.40"
+          ip_private: "10.0.0.41"
+      all_in_one: []
+
+defaults:
+  target:
+    repos: [ backends, all_in_one ]
+    routing_policies: [ backends, all_in_one ]
+    normalization_policies: [ backends, all_in_one ]
+    processing_policies: [ backends, all_in_one ]
+    enrichment_policies: [ backends, all_in_one ]
+    device_groups: [ backends, all_in_one ]
+    devices: [ backends, all_in_one ]
+    syslog_collectors: [ backends, all_in_one ]
+    alert_rules: [ search_heads ]
+    user_defined_lists: [ search_heads ]

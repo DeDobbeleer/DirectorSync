@@ -1,3 +1,5 @@
+> **Important:** Ce document est une **cartographie API complète** entre la feuille `Alert` et l’ensemble des endpoints AlertRules. Le code actuel dans `importers/alert_rules.py` n’implémente que le **fetch MyRules** et les opérations **Create/Update** de la règle cœur. Les sections §4 (activate/deactivate), §5 (share/unshare), §6 (notifications) et §7 (transferOwnership) sont conservées comme référence API mais ne sont **pas implémentées**.
+
 Super — voilà la cartographie **complète** entre la feuille **Alert** de votre `core_config.xlsx` et **tous** les endpoints `AlertRules` pertinents (liste, création, mise à jour, activation, partage, notifications, etc.). Je reste strictement sur l’analyse/mapping — sans code ni considérations “Importers V2”.
 
 ---
@@ -32,15 +34,15 @@ Endpoint : `POST …/AlertRules`. Champs principaux côté API et **source dans 
 * `aggregate` (String: `min|max|avg`, **obligatoire**) ⇢ `settings.aggregate`. ([docs.logpoint.com][1])
 * Fenêtre temporelle :
   • `timerange_minute` (ou `timerange_hour`/`timerange_day`) ⇢ `settings.livesearch_data.timerange_minute/hour/day`. Si vous n’avez que `settings.time_range_seconds`, convertissez-le en minutes/heure/jour avant d’affecter. ([docs.logpoint.com][1])
-* `query` (String) ⇢ priorité à `settings.livesearch_data.query`; à défaut, concaténer/adapter `settings.extra_config.query` si pertinent. ([docs.logpoint.com][1])
+* `query` (String) ⇢ `settings.extra_config.query` (lu par l’importeur actuel). `settings.livesearch_data.query` n’est pas utilisée. ([docs.logpoint.com][1])
 * `description` (String) ⇢ `settings.description`. ([docs.logpoint.com][1])
 * `assigned_to` (String userId) ⇢ `settings.assigned_to`. ([docs.logpoint.com][1])
 * `owner` (String userId, **obligatoire**) ⇢ `settings.user` (votre colonne “propriétaire”). ([docs.logpoint.com][1])
 * `attack_tag` ([String]) ⇢ `settings.attack_tag`. ([docs.logpoint.com][1])
 * `log_source` ([String]) ⇢ `settings.log_source`. ([docs.logpoint.com][1])
-* `manageable_by` ([String]) ⇢ `settings.visible_to` (groupes RBAC d’incident). ([docs.logpoint.com][1])
+* `manageable_by` ([String]) ⇢ `settings.manageable_by` (incident-group names/IDs resolved to IDs). `settings.visible_to` is not used by the current importer. ([docs.logpoint.com][1])
 * `metadata` ([{field,value}]) ⇢ `settings.metadata` (liste d’objets `{field, value}`). ([docs.logpoint.com][1])
-* `alert_context_template` (String – Jinja) ⇢ `settings.context_template`. (Si `settings.is_context_template_enabled` = true, alimentez ce champ.) ([docs.logpoint.com][1])
+* `alert_context_template` (String – Jinja) ⇢ `settings.context_template`. `settings.apply_jinja_template` active le mode Jinja. ([docs.logpoint.com][1])
 * `flush_on_trigger` ("on" pour activer) ⇢ `settings.flush_on_trigger` (convertir booléen ⇒ `"on"`/ne pas envoyer). ([docs.logpoint.com][1])
 * `search_interval_minute` (int) ⇢ `settings.livesearch_data.search_interval_minute`. ([docs.logpoint.com][1])
 * Throttling :
@@ -59,26 +61,28 @@ Endpoint : `PUT …/AlertRules/{id}` — mêmes champs que “Create” (mêmes 
 
 ---
 
-# 4) Activer / Désactiver
+# 4) Activer / Désactiver (non implémenté)
 
 * **Activer** : `POST …/AlertRules/{id}/activate`
 * **Désactiver** : `POST …/AlertRules/{id}/deactivate`
-  Décision en fonction de `settings.active` (true ⇒ appeler *activate*, false ⇒ *deactivate*). ([docs.logpoint.com][1])
+  Décision en fonction de `settings.active` (true ⇒ appeler *activate*, false ⇒ *deactivate*).
+
+> Le code actuel lit `settings.active` mais ne fait **pas** ces appels. ([docs.logpoint.com][1])
 
 ---
 
-# 5) Partage / Visibilité
+# 5) Partage / Visibilité (non implémenté)
 
-Vos colonnes **`settings.visible_to`** (groupes) et **`settings.visible_to_users`** (utilisateurs) servent à bâtir le **`rbac_config`** de :
+Vos colonnes **`settings.visible_to`** (groupes) et **`settings.visible_to_users`** (utilisateurs) serviraient à bâtir le **`rbac_config`** de :
 
 * **Partager** : `POST …/AlertRules/{id}/share` → construire `rbac_config` avec soit `group_id` + `group_permission` (READ/EDIT/FULL), soit des `user_permissions` (`user_id`, `permission`).
 * **Retirer le partage** : `POST …/AlertRules/{id}/unshare` (aucun paramètre autre que l’id). ([docs.logpoint.com][1])
 
 ---
 
-# 6) Notifications (depuis `settings.notifications`)
+# 6) Notifications (depuis `settings.notifications`) — non implémenté
 
-Votre colonne **`settings.notifications`** contient (généralement) une **liste d’objets** par type (`email`, `syslog`, `http`, `sms`, `snmp`, `ssh` …). Chaque objet alimente **un** endpoint dédié ci-dessous. S’il y a plusieurs notifications de même type, appelez l’endpoint plusieurs fois (une par config).
+Votre colonne **`settings.notifications`** contient (généralement) une **liste d’objets** par type (`email`, `syslog`, `http`, `sms`, `snmp`, `ssh` …). Dans une version complète, chaque objet alimenterait **un** endpoint dédié ci-dessous. Le code actuel ne lit pas cette colonne.
 
 ## 6.1 Email → `POST …/AlertRules/{id}/EmailNotification`
 
@@ -155,12 +159,12 @@ Votre colonne **`settings.notifications`** contient (généralement) une **liste
 | Risque            | `settings.risk`                                                                                          | Create/Edit → `risk` (obligatoire) ([docs.logpoint.com][1])                                 |
 | Repos             | `settings.repos`                                                                                         | Create/Edit → `repos` (obligatoire) ([docs.logpoint.com][1])                                |
 | Log sources       | `settings.log_source`                                                                                    | Create/Edit → `log_source`; Fetch* → filtre `log_source` ([docs.logpoint.com][1])           |
-| Requête           | `settings.livesearch_data.query` (→ principal) ; `settings.extra_config.query` (→ à fusionner si besoin) | Create/Edit → `query` ([docs.logpoint.com][1])                                              |
+| Requête           | `settings.extra_config.query` (→ lu par l’importeur actuel) ; `settings.livesearch_data.query` n’est pas utilisée | Create/Edit → `query` ([docs.logpoint.com][1])                                              |
 | Fenêtre           | `settings.livesearch_data.timerange_minute/hour/day` ou `settings.time_range_seconds`                    | Create/Edit → `timerange_*` (convertir si seconds) ([docs.logpoint.com][1])                 |
 | Limite            | `settings.livesearch_data.limit`                                                                         | Create/Edit → `limit` (obligatoire) ([docs.logpoint.com][1])                                |
 | Condition         | `settings.condition.condition_option/value`                                                              | Create/Edit → `condition_option`, `condition_value` (obligatoires) ([docs.logpoint.com][1]) |
 | Agrégat           | `settings.aggregate`                                                                                     | Create/Edit → `aggregate` (obligatoire) ([docs.logpoint.com][1])                            |
-| Contexte (Jinja)  | `settings.context_template` (+ `settings.is_context_template_enabled`)                                   | Create/Edit → `alert_context_template` ([docs.logpoint.com][1])                             |
+| Contexte (Jinja)  | `settings.context_template` (+ `settings.apply_jinja_template` pour activer Jinja)                       | Create/Edit → `alert_context_template` ([docs.logpoint.com][1])                             |
 | Throttling        | `settings.throttling_enabled`, `settings.throttling_field`, `settings.throttling_time_range`             | Create/Edit → `throttling_*` (avec `"on"`) ([docs.logpoint.com][1])                         |
 | Visibilité        | `settings.visible_to` (groupes), `settings.visible_to_users` (users)                                     | ShareWithUsers → `rbac_config`; UnshareWithUsers (reset) ([docs.logpoint.com][1])           |
 | État actif        | `settings.active`                                                                                        | **Activate/Deactivate** (pas dans Create/Edit) ([docs.logpoint.com][1])                     |

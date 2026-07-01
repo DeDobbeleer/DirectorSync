@@ -1,3 +1,5 @@
+> **Historical note:** This document was written before `NormalizationPoliciesImporter` was implemented. The importer is now live in `lp_tenant_importer_v2/importers/normalization_policies.py` and registered as `import-normalization-policies`. The section below is kept as context; refer to the live source for the exact `sheet_names`, `compare_keys`, and payload builders.
+
 Parfait — dors bien 😴
 Avant ton “NP V1 → V2”, voilà ce que je comprends et comment je propose de procéder (sans code, en FR). Quand tu me dis **GO**, je passe à l’implémentation (code + docs en EN, PEP 8, logging complet, tests).
 
@@ -14,7 +16,7 @@ Avant ton “NP V1 → V2”, voilà ce que je comprends et comment je propose d
 
   * **Create**: POST `/NormalizationPolicy` avec `data.name`, `data.norm_packages` (IDs séparés par virgules) et `data.compiled_normalizer` (noms séparés par virgules) .
   * **Edit**: PUT `/NormalizationPolicy/{id}` avec les mêmes clés de `data` .
-  * **List/Get**: GET renvoie notamment `normalization_packages` (liste d’IDs), mais **ne remonte pas forcément** `compiled_normalizer` tel quel — on voit surtout `selected_signatures`, ce qui implique que `compiled_normalizer` peut être à considérer comme champ “write-only” pour le diff .
+  * **List/Get**: GET renvoie `normalization_packages` (liste d’IDs) et `compiled_normalizer`. Le diff V2 compare donc les deux champs (packages convertis en noms via le cache, et compiled normalizers triés).
   * **CompiledNormalizers**: GET `/NormalizationPackage/CompiledNormalizers` .
 
 # Ce qui existe déjà en **V2** (architecture à suivre)
@@ -26,7 +28,7 @@ Avant ton “NP V1 → V2”, voilà ce que je comprends et comment je propose d
 # Écarts et points d’attention
 
 1. **Délimiteur Excel**: V1 utilise `|` pour séparer les valeurs multi (packages, compiled). On garde ce comportement pour continuité utilisateur (et on documente). ([GitHub][1])
-2. **Compare/diff**: L’API **List/Get** des NP retourne bien `normalization_packages` (IDs), mais **pas** explicitement `compiled_normalizer`. On fera donc le **diff** sur `name` + `normalization_packages` seulement, tout en **poussant** `compiled_normalizer` à chaque CREATE/UPDATE (comme champ write-only). Justification: doc API NormalizationPolicy Get/List + Create/Edit .
+2. **Compare/diff**: L’API **List/Get** des NP retourne `normalization_packages` (IDs) et `compiled_normalizer`. Le diff V2 compare donc les deux champs (noms de packages convertis en IDs, et noms de compiled normalizers triés). `compiled_normalizer` est poussé à chaque CREATE/UPDATE.
 3. **Validation**: au moins un des deux champs (packages ou compiled) doit être non vide — V1 SKIPpe ces lignes avec message. On réplique la règle en V2 (même UX) ([GitHub][1]).
 4. **Résolution des noms → IDs**: on doit **cacher** par nœud la liste des `NormalizationPackage` (name→id) et la liste des `CompiledNormalizers` (set de noms) pour éviter des re-fetchs (utiliser le `ResolverCache` V2) ([GitHub][6]).
 5. **Payload côté API**: respecter strictement la **forme doc** (`data.norm_packages` CSV d’IDs, `data.compiled_normalizer` CSV de noms) même si V1 manipulait parfois des listes, afin d’être future-proof par rapport au contrat officiel .
@@ -36,9 +38,9 @@ Avant ton “NP V1 → V2”, voilà ce que je comprends et comment je propose d
 1. **Créer l’importer V2** `NormalizationPoliciesImporter` avec:
 
    * `resource_name = "normalization_policies"`
-   * `sheet_names = ("NormalizationPolicy", "NP")` (tolérance nom de feuille),
+   * `sheet_names = ("NormalizationPolicy",)` (only the full name is accepted),
    * `required_columns = ("policy_name", "normalization_packages", "compiled_normalizer")`,
-   * `compare_keys = ("name", "normalization_packages")` (pas `compiled_normalizer`, cf. limite API) ([GitHub][3]).
+   * `compare_keys = ("normalization_packages", "compiled_normalizer")` (both fields are compared; the API returns compiled normalizers, so they are included in the diff) ([GitHub][3]).
 2. **validate()**
 
    * Vérifier feuille/colonnes (réutiliser `validators.require_columns`) et **logguer** la feuille réellement utilisée (comme RoutingPolicies) ([GitHub][5]).
@@ -56,8 +58,8 @@ Avant ton “NP V1 → V2”, voilà ce que je comprends et comment je propose d
    * En parallèle, alimenter le **cache** des paquets (`NormalizationPackage` list) et des **CompiledNormalizers** pour la validation / SKIP si manquants, exactement comme V1 mais factorisé V2 ([GitHub][1]).
 5. **canon_*()**
 
-   * `canon_desired`: `{"name", "normalization_packages": [ids triées]}` (après conversion noms→IDs),
-   * `canon_existing`: extraire `normalization_packages` (liste d’IDs) depuis l’API List/Get; trier pour comparaison stable. (On ignorerait `selected_signatures` ici.) .
+   * `canon_desired`: `{"name", "normalization_packages": [ids triées], "compiled_normalizer": [noms triés]}` (après conversion noms→IDs pour les packages),
+   * `canon_existing`: extraire `normalization_packages` (liste d’IDs convertis en noms) et `compiled_normalizer` depuis l’API List/Get; trier pour comparaison stable.
 6. **build_payload_create/update()**
 
    * Construire `data` selon la **doc API**: `name`, `norm_packages` (CSV d’IDs), `compiled_normalizer` (CSV de noms). On applique la même forme pour CREATE et UPDATE (en adaptant l’URL) .

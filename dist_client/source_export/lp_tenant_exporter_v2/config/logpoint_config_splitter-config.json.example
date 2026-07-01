@@ -1,0 +1,12 @@
+{
+  "_comment": "EXAMPLE FILE - recreate from scratch with customer-specific values. Copy to logpoint_config_splitter-config.json and edit.",
+  "tenant_list": ["tenant_a", "tenant_b", "tenant_c"],
+  "collector_to_tenant": {
+    "EXAMPLE_COLLECTOR_ID_1": "tenant_a",
+    "EXAMPLE_COLLECTOR_ID_2": "tenant_b",
+    "EXAMPLE_COLLECTOR_ID_3": "tenant_c"
+  },
+  "collector_field_column": "distributed_collector",
+  "collector_field_split_regex": "[,;|\\s]+",
+  "collector_value_left_of_colon": true
+}
